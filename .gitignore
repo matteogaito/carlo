@@ -1,0 +1,8 @@
+.env
+.carlo/
+.pytest_cache/
+.venv/
+__pycache__/
+*.py[cod]
+frontend/dist/
+frontend/node_modules/
