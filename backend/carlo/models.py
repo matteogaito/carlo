@@ -93,7 +93,7 @@ class Task(TimestampMixin, Base):
         ForeignKey("agent_profiles.id")
     )
 
-    project: Mapped[Project] = relationship(back_populates="tasks", lazy="joined")
+    project: Mapped[Project] = relationship(back_populates="tasks", lazy="selectin")
     plans: Mapped[list["PlanRevision"]] = relationship(
         back_populates="task", cascade="all, delete-orphan", passive_deletes=True
     )
