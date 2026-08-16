@@ -1,11 +1,11 @@
 import asyncio
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.domain import TaskStage, TaskStatus
-from carlo.models import Base, Project, Task
+from carlo.models import Base, Event, Project, Task
 from carlo.orchestrator import Orchestrator
 
 
@@ -125,4 +125,53 @@ async def test_active_task_is_recovered_before_a_ready_task() -> None:
     async with factory() as session:
         assert (await session.get(Task, "CAR-1")).status == TaskStatus.DONE
         assert (await session.get(Task, "CAR-2")).status == TaskStatus.READY
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_crash_keeps_task_recoverable() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/tmp/carlo-test")
+        session.add(
+            Task(
+                id="CAR-1",
+                project=project,
+                sequence=1,
+                title="Recover",
+                goal="Survive provider crash",
+                status=TaskStatus.READY,
+                stage=TaskStage.QUEUED,
+            )
+        )
+        await session.commit()
+
+    async def crash(task_id: str) -> str:
+        raise RuntimeError("provider died")
+
+    with pytest.raises(RuntimeError, match="provider died"):
+        await Orchestrator(engine, factory, crash).run_next()
+    async with factory() as session:
+        task = await session.get(Task, "CAR-1")
+        events = (
+            await session.scalars(select(Event).where(Event.task_id == "CAR-1"))
+        ).all()
+        assert task.status == TaskStatus.IN_PROGRESS
+        assert any(event.type == "execution.interrupted" for event in events)
+
+    async def recover(task_id: str) -> str:
+        return "validated"
+
+    assert await Orchestrator(engine, factory, recover).run_next() == "CAR-1"
+    async with factory() as session:
+        assert (await session.get(Task, "CAR-1")).status == TaskStatus.DONE
     await engine.dispose()

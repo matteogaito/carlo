@@ -41,6 +41,7 @@ export interface Task {
     outcome: string | null
     error_fingerprint: string | null
     progress: Record<string, unknown>
+    artifact_path: string | null
     created_at: string
   }[]
   validations?: {

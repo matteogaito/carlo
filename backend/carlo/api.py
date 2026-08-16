@@ -40,6 +40,16 @@ class Approval(BaseModel):
     version: int
 
 
+class ProfileUpdate(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    permissions: dict[str, Any] | None = None
+    default_skills: list[str] | None = None
+    context_policy: dict[str, Any] | None = None
+    active: bool | None = None
+
+
 class PlanMetadata(BaseModel):
     skills: list[str]
     validation_commands: list[str]
@@ -99,6 +109,36 @@ def create_app(
     ) -> list[dict[str, Any]]:
         projects = (await session.scalars(select(Project).order_by(Project.key))).all()
         return [_project_view(project) for project in projects]
+
+    @app.get("/api/agent-profiles")
+    async def list_agent_profiles(
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        profiles = (
+            await session.scalars(
+                select(AgentProfileRecord).order_by(AgentProfileRecord.name)
+            )
+        ).all()
+        return [_profile_view(profile) for profile in profiles]
+
+    @app.patch("/api/agent-profiles/{name}")
+    async def update_agent_profile(
+        name: str,
+        payload: ProfileUpdate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        profile = await session.scalar(
+            select(AgentProfileRecord).where(AgentProfileRecord.name == name)
+        )
+        if profile is None:
+            raise HTTPException(404, "agent profile not found")
+        for field in payload.model_fields_set:
+            setattr(profile, field, getattr(payload, field))
+        session.add(
+            Event(type="agent_profile.updated", payload={"name": name, "fields": sorted(payload.model_fields_set)})
+        )
+        await session.commit()
+        return _profile_view(profile)
 
     @app.post("/api/tasks", status_code=status.HTTP_201_CREATED)
     async def create_task(
@@ -355,6 +395,19 @@ def _project_view(project: Project) -> dict[str, Any]:
     }
 
 
+def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
+    return {
+        "name": profile.name,
+        "provider": profile.provider,
+        "model": profile.model,
+        "effort": profile.effort,
+        "permissions": profile.permissions,
+        "default_skills": profile.default_skills,
+        "context_policy": profile.context_policy,
+        "active": profile.active,
+    }
+
+
 async def _task_view(
     session: AsyncSession, task: Task, detail: bool = False
 ) -> dict[str, Any]:
@@ -425,6 +478,7 @@ async def _task_view(
                 "outcome": attempt.outcome,
                 "error_fingerprint": attempt.error_fingerprint,
                 "progress": attempt.progress,
+                "artifact_path": attempt.artifact_path,
                 "created_at": attempt.created_at.isoformat(),
             }
             for attempt in attempts

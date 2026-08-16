@@ -145,6 +145,7 @@ async def test_stall_escalates_then_local_validation_completes(
         def __init__(self) -> None:
             self.implementation_calls = 0
             self.escalation_instruction = ""
+            self.implementation_skills: tuple[str, ...] = ()
 
         async def run(
             self,
@@ -162,6 +163,7 @@ async def test_stall_escalates_then_local_validation_completes(
                     0,
                 )
             self.implementation_calls += 1
+            self.implementation_skills = profile.skills
             Path(cwd, "feature.txt").write_text(
                 "broken" if self.implementation_calls < 3 else "ok"
             )
@@ -191,8 +193,11 @@ async def test_stall_escalates_then_local_validation_completes(
         assert await session.scalar(select(func.count(Attempt.id))) == 3
         assert await session.scalar(select(func.count(Escalation.id))) == 1
         assert await session.scalar(select(func.count(ValidationRun.id))) == 3
+        attempts = (await session.scalars(select(Attempt).order_by(Attempt.number))).all()
+        assert all(attempt.artifact_path and Path(attempt.artifact_path).is_file() for attempt in attempts)
     assert "repeated_outcome" in provider.escalation_instruction
     assert provider.implementation_calls == 3
+    assert provider.implementation_skills == ("testing",)
     await engine.dispose()
 
 

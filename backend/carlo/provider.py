@@ -59,6 +59,7 @@ class PiProvider:
             "--mode",
             "json",
             "--print",
+            "--approve",
             "--session-id",
             session_id,
             "--session-dir",

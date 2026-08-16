@@ -30,7 +30,7 @@ from .models import (
     Task,
     ValidationRun,
 )
-from .provider import AgentProfile, CodingAgentProvider
+from .provider import AgentProfile, AgentResult, CodingAgentProvider
 
 IMPLEMENTATION_LOCK = 1_128_352_847
 TaskRunner = Callable[[str], Awaitable[str]]
@@ -67,8 +67,8 @@ class Orchestrator:
                     return None
                 try:
                     outcome = await self.runner(task_id)
-                except Exception:
-                    await self._finish(task_id, "failed")
+                except Exception as error:
+                    await self._interrupt(task_id, error)
                     raise
                 await self._finish(task_id, outcome)
                 return task_id
@@ -130,6 +130,24 @@ class Orchestrator:
                 event_type = "execution.failed"
             task.version += 1
             session.add(Event(task=task, type=event_type, payload={"outcome": outcome}))
+            await session.commit()
+
+    async def _interrupt(self, task_id: str, error: Exception) -> None:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            if task is None:
+                return
+            task.version += 1
+            session.add(
+                Event(
+                    task=task,
+                    type="execution.interrupted",
+                    payload={
+                        "error_type": type(error).__name__,
+                        "error": str(error)[:500],
+                    },
+                )
+            )
             await session.commit()
 
 
@@ -216,11 +234,19 @@ class ImplementationPipeline:
                 task_id, implementation.id, number, instruction
             )
             result = await self.provider.run(
-                _agent_profile(implementation),
+                _agent_profile(
+                    implementation,
+                    tuple(
+                        skill
+                        for skill in plan.metadata_json.get("skills", [])
+                        if isinstance(skill, str)
+                    ),
+                ),
                 instruction,
                 str(worktree.path),
                 f"{task_id}-implementation-{number}",
             )
+            await self._record_provider_result(task_id, attempt_id, number, result)
             deviation = major_deviation(result.output)
             if deviation:
                 await self._block_for_amendment(
@@ -410,6 +436,49 @@ class ImplementationPipeline:
                 task.checkpoint_sha = checkpoint
             await session.commit()
 
+    async def _record_provider_result(
+        self,
+        task_id: str,
+        attempt_id: int,
+        attempt_number: int,
+        result: AgentResult,
+    ) -> None:
+        artifact = (
+            self.artifact_root
+            / task_id
+            / f"attempt-{attempt_number}"
+            / "provider.json"
+        )
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            json.dumps(
+                {
+                    "session_id": result.session_id,
+                    "exit_code": result.exit_code,
+                    "output": result.output,
+                    "events": result.events,
+                },
+                default=str,
+            )
+        )
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            attempt = await session.get(Attempt, attempt_id)
+            if task is None or attempt is None:
+                raise RuntimeError("task or attempt disappeared")
+            attempt.artifact_path = str(artifact)
+            session.add(
+                Event(
+                    task=task,
+                    type="agent.completed",
+                    payload={
+                        "session_id": result.session_id,
+                        "event_count": len(result.events),
+                    },
+                )
+            )
+            await session.commit()
+
     async def _set_stage(self, task_id: str, stage: TaskStage) -> None:
         async with self.session_factory() as session:
             task = await session.get(Task, task_id)
@@ -536,14 +605,17 @@ class ImplementationPipeline:
         )
 
 
-def _agent_profile(record: AgentProfileRecord) -> AgentProfile:
+def _agent_profile(
+    record: AgentProfileRecord, extra_skills: tuple[str, ...] = ()
+) -> AgentProfile:
     tools = record.permissions.get("tools") or ["read", "bash", "edit", "write", "grep", "find", "ls"]
+    skills = tuple(dict.fromkeys((*record.default_skills, *extra_skills)))
     return AgentProfile(
         record.name,
         record.model,
         record.effort,
         tuple(tools),
-        tuple(record.default_skills),
+        skills,
     )
 
 
