@@ -29,6 +29,18 @@ class InvalidTransition(ValueError):
 
 
 _TRANSITIONS = {
+    (TaskStatus.NOT_READY, TaskStage.CREATED, "plan"): (
+        TaskStatus.NOT_READY,
+        TaskStage.BRIEFING,
+    ),
+    (TaskStatus.NOT_READY, TaskStage.BRIEFING, "briefed"): (
+        TaskStatus.NOT_READY,
+        TaskStage.PLANNING,
+    ),
+    (TaskStatus.NOT_READY, TaskStage.PLANNING, "planned"): (
+        TaskStatus.NOT_READY,
+        TaskStage.AWAITING_APPROVAL,
+    ),
     (TaskStatus.NOT_READY, TaskStage.AWAITING_APPROVAL, "approve"): (
         TaskStatus.READY,
         TaskStage.QUEUED,
