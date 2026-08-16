@@ -18,3 +18,9 @@ def test_local_success_completes_task() -> None:
 def test_unknown_transition_is_rejected() -> None:
     with pytest.raises(InvalidTransition):
         transition(TaskStatus.NOT_READY, TaskStage.CREATED, "validated")
+
+
+def test_approved_amendment_resumes_implementation() -> None:
+    assert transition(
+        TaskStatus.IN_PROGRESS, TaskStage.BLOCKED, "approve_amendment"
+    ) == (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING)

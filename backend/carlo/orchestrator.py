@@ -1,13 +1,47 @@
+import asyncio
+import json
+import re
+import shlex
+from dataclasses import asdict, dataclass
 from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from .domain import TaskStage, TaskStatus, transition
-from .models import Event, Task
+from .domain import (
+    AttemptSignal,
+    TaskStage,
+    TaskStatus,
+    ValidationSnapshot,
+    assess_progress,
+    detect_stall,
+    fingerprint,
+    transition,
+)
+from .git import GitWorkspace, Worktree
+from .models import (
+    AgentProfile as AgentProfileRecord,
+    Attempt,
+    Escalation,
+    Event,
+    PlanRevision,
+    Task,
+    ValidationRun,
+)
+from .provider import AgentProfile, CodingAgentProvider
 
 IMPLEMENTATION_LOCK = 1_128_352_847
 TaskRunner = Callable[[str], Awaitable[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationBatch:
+    passed: bool
+    snapshot: ValidationSnapshot
+    fingerprint: str
+    summary: str
 
 
 class Orchestrator:
@@ -47,6 +81,19 @@ class Orchestrator:
 
     async def _claim_next(self) -> str | None:
         async with self.session_factory() as session:
+            active = await session.scalar(
+                select(Task)
+                .where(Task.status == TaskStatus.IN_PROGRESS)
+                .order_by(Task.created_at, Task.id)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if active is not None:
+                if active.stage == TaskStage.BLOCKED:
+                    return None
+                session.add(Event(task=active, type="recovery.resumed", payload={}))
+                await session.commit()
+                return active.id
             task = await session.scalar(
                 select(Task)
                 .where(Task.status == TaskStatus.READY, Task.stage == TaskStage.QUEUED)
@@ -73,6 +120,10 @@ class Orchestrator:
                     task.status, task.stage, "validated"
                 )
                 event_type = "execution.completed"
+            elif outcome == "blocked":
+                task.status = TaskStatus.IN_PROGRESS
+                task.stage = TaskStage.BLOCKED
+                event_type = "execution.blocked"
             else:
                 task.status = TaskStatus.FAILED
                 task.stage = TaskStage.BLOCKED
@@ -80,3 +131,435 @@ class Orchestrator:
             task.version += 1
             session.add(Event(task=task, type=event_type, payload={"outcome": outcome}))
             await session.commit()
+
+
+class ImplementationPipeline:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        provider: CodingAgentProvider,
+        worktree_root: Path,
+        artifact_root: Path,
+        max_attempts: int = 20,
+    ) -> None:
+        self.session_factory = session_factory
+        self.provider = provider
+        self.worktree_root = worktree_root
+        self.artifact_root = artifact_root
+        self.max_attempts = max_attempts
+
+    async def run(self, task_id: str) -> str:
+        task, plan, implementation, escalation = await self._context(task_id)
+        workspace = GitWorkspace(
+            Path(task.project.repository_path),
+            self.worktree_root,
+            task.project.integration_branch,
+        )
+        if task.worktree_path and task.branch_name:
+            worktree = Worktree(task.branch_name, Path(task.worktree_path))
+        else:
+            worktree = await workspace.prepare(task.id, task.title)
+            async with self.session_factory() as session:
+                current = await session.get(Task, task_id)
+                if current is None:
+                    return "failed"
+                current.branch_name = worktree.branch
+                current.worktree_path = str(worktree.path)
+                current.stage = TaskStage.IMPLEMENTING
+                session.add(
+                    Event(
+                        task=current,
+                        type="git.worktree_prepared",
+                        payload={"branch": worktree.branch, "path": str(worktree.path)},
+                    )
+                )
+                await session.commit()
+
+        previous: ValidationSnapshot | None = None
+        history: list[AttemptSignal] = []
+        strategy = "approved_plan"
+        if task.stage == TaskStage.VALIDATING:
+            async with self.session_factory() as session:
+                interrupted = await session.scalar(
+                    select(Attempt)
+                    .where(Attempt.task_id == task_id)
+                    .order_by(Attempt.number.desc())
+                    .limit(1)
+                )
+            if interrupted is None:
+                return "failed"
+            recovered = await self._validate(
+                task,
+                plan,
+                worktree,
+                interrupted.id,
+                interrupted.number,
+            )
+            if recovered.passed:
+                checkpoint = await workspace.checkpoint(
+                    worktree, f"attempt {interrupted.number} recovered and validated"
+                )
+                await self._finish_attempt(
+                    task_id,
+                    interrupted.id,
+                    "verified",
+                    checkpoint,
+                    None,
+                    recovered,
+                )
+                return "validated"
+            previous = recovered.snapshot
+        start = await self._next_attempt_number(task_id)
+        for number in range(start, self.max_attempts + 1):
+            instruction = self._implementation_instruction(task, plan, strategy)
+            attempt_id = await self._start_attempt(
+                task_id, implementation.id, number, instruction
+            )
+            result = await self.provider.run(
+                _agent_profile(implementation),
+                instruction,
+                str(worktree.path),
+                f"{task_id}-implementation-{number}",
+            )
+            deviation = major_deviation(result.output)
+            if deviation:
+                await self._block_for_amendment(
+                    task_id, plan, attempt_id, deviation
+                )
+                return "blocked"
+            await self._set_stage(task_id, TaskStage.VALIDATING)
+            batch = await self._validate(task, plan, worktree, attempt_id, number)
+            if batch.passed:
+                checkpoint = await workspace.checkpoint(
+                    worktree, f"attempt {number} validated"
+                )
+                await self._finish_attempt(
+                    task_id, attempt_id, "verified", checkpoint, None, batch
+                )
+                return "validated"
+
+            diff_hash = await workspace.diff_hash(worktree)
+            signal = AttemptSignal(batch.fingerprint, diff_hash, strategy)
+            history.append(signal)
+            await self._finish_attempt(
+                task_id, attempt_id, "validation_failed", None, diff_hash, batch
+            )
+            if previous and assess_progress(previous, batch.snapshot).is_progress:
+                checkpoint = await workspace.checkpoint(
+                    worktree, f"attempt {number} improved validation"
+                )
+                await self._set_checkpoint(task_id, checkpoint)
+            previous = batch.snapshot
+            stalled = detect_stall(history)
+            if stalled:
+                strategy = await self._escalate(
+                    task, plan, escalation, worktree, stalled.reason, history, batch
+                )
+            await self._set_stage(task_id, TaskStage.IMPLEMENTING)
+        return "failed"
+
+    async def _context(
+        self, task_id: str
+    ) -> tuple[Task, PlanRevision, AgentProfileRecord, AgentProfileRecord]:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            if task is None or task.approved_plan_revision is None:
+                raise RuntimeError("task has no approved plan")
+            plan = await session.scalar(
+                select(PlanRevision).where(
+                    PlanRevision.task_id == task_id,
+                    PlanRevision.revision == task.approved_plan_revision,
+                )
+            )
+            profiles = {
+                profile.name: profile
+                for profile in (
+                    await session.scalars(
+                        select(AgentProfileRecord).where(
+                            AgentProfileRecord.name.in_(("implementation", "escalation"))
+                        )
+                    )
+                ).all()
+            }
+            if plan is None or set(profiles) != {"implementation", "escalation"}:
+                raise RuntimeError("plan or agent profiles are missing")
+            return task, plan, profiles["implementation"], profiles["escalation"]
+
+    async def _next_attempt_number(self, task_id: str) -> int:
+        async with self.session_factory() as session:
+            maximum = await session.scalar(
+                select(func.coalesce(func.max(Attempt.number), 0)).where(
+                    Attempt.task_id == task_id
+                )
+            )
+            return int(maximum or 0) + 1
+
+    async def _start_attempt(
+        self, task_id: str, profile_id: int, number: int, instruction: str
+    ) -> int:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            if task is None:
+                raise RuntimeError("task disappeared")
+            task.active_profile_id = profile_id
+            task.stage = TaskStage.IMPLEMENTING
+            attempt = Attempt(
+                task_id=task_id,
+                number=number,
+                profile_id=profile_id,
+                provider_session_id=f"{task_id}-implementation-{number}",
+                instruction=instruction,
+            )
+            session.add_all(
+                [attempt, Event(task=task, type="implementation.attempt_started", payload={"number": number})]
+            )
+            await session.commit()
+            return attempt.id
+
+    async def _validate(
+        self,
+        task: Task,
+        plan: PlanRevision,
+        worktree: Worktree,
+        attempt_id: int,
+        attempt_number: int,
+    ) -> ValidationBatch:
+        commands = plan.metadata_json.get("validation_commands") or task.project.validation_commands
+        if not commands:
+            return ValidationBatch(
+                False,
+                ValidationSnapshot(1, 0),
+                fingerprint(1, "no validation commands declared"),
+                "No validation commands declared",
+            )
+        failures = 0
+        completed = 0
+        summaries: list[str] = []
+        for index, command in enumerate(commands, start=1):
+            artifact = self.artifact_root / task.id / f"attempt-{attempt_number}" / f"validation-{index}.log"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                arguments = shlex.split(command)
+                if not arguments:
+                    raise ValueError("empty validation command")
+                process = await asyncio.create_subprocess_exec(
+                    *arguments,
+                    cwd=worktree.path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                stdout, _ = await process.communicate()
+                output = stdout.decode(errors="replace")
+                exit_code = process.returncode or 0
+                classification = "VERIFIED" if exit_code == 0 else "PARTIALLY_VERIFIED"
+            except (FileNotFoundError, ValueError) as error:
+                output = str(error)
+                exit_code = 127
+                classification = "UNVERIFIABLE"
+            artifact.write_text(output)
+            summary = output[-4000:]
+            summaries.append(summary)
+            failure_count = 0 if exit_code == 0 else _failure_count(output)
+            failures += failure_count
+            completed += int(exit_code == 0)
+            async with self.session_factory() as session:
+                session.add(
+                    ValidationRun(
+                        task_id=task.id,
+                        attempt_id=attempt_id,
+                        command=command,
+                        exit_code=exit_code,
+                        classification=classification,
+                        summary=summary,
+                        artifact_path=str(artifact),
+                        failure_count=failure_count,
+                    )
+                )
+                await session.commit()
+        combined = "\n".join(summaries)
+        return ValidationBatch(
+            failures == 0,
+            ValidationSnapshot(failures, completed),
+            fingerprint(0 if failures == 0 else 1, combined),
+            combined[-4000:],
+        )
+
+    async def _finish_attempt(
+        self,
+        task_id: str,
+        attempt_id: int,
+        outcome: str,
+        checkpoint: str | None,
+        diff_hash: str | None,
+        batch: ValidationBatch,
+    ) -> None:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            attempt = await session.get(Attempt, attempt_id)
+            if task is None or attempt is None:
+                raise RuntimeError("attempt disappeared")
+            attempt.outcome = outcome
+            attempt.checkpoint_sha = checkpoint
+            attempt.diff_hash = diff_hash
+            attempt.error_fingerprint = None if batch.passed else batch.fingerprint
+            attempt.progress = {
+                "failures": batch.snapshot.failures,
+                "completed_steps": batch.snapshot.completed_steps,
+            }
+            if checkpoint:
+                task.checkpoint_sha = checkpoint
+            await session.commit()
+
+    async def _set_stage(self, task_id: str, stage: TaskStage) -> None:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            if task is None:
+                raise RuntimeError("task disappeared")
+            task.stage = stage
+            await session.commit()
+
+    async def _set_checkpoint(self, task_id: str, checkpoint: str) -> None:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            if task is None:
+                raise RuntimeError("task disappeared")
+            task.checkpoint_sha = checkpoint
+            session.add(
+                Event(task=task, type="git.checkpoint_created", payload={"sha": checkpoint})
+            )
+            await session.commit()
+
+    async def _block_for_amendment(
+        self,
+        task_id: str,
+        plan: PlanRevision,
+        attempt_id: int,
+        deviation: dict[str, str],
+    ) -> None:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            attempt = await session.get(Attempt, attempt_id)
+            if task is None or attempt is None:
+                raise RuntimeError("task or attempt disappeared")
+            revision = (
+                await session.scalar(
+                    select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
+                        PlanRevision.task_id == task_id
+                    )
+                )
+            ) or 1
+            amendment = PlanRevision(
+                task=task,
+                revision=revision,
+                brief_markdown=plan.brief_markdown,
+                plan_markdown=(
+                    f"{plan.plan_markdown}\n\n## Proposed amendment\n"
+                    f"{deviation['summary']}\n\n{deviation['reason']}"
+                ),
+                metadata_json={**plan.metadata_json, "amendment": deviation},
+            )
+            attempt.outcome = "major_deviation"
+            task.stage = TaskStage.BLOCKED
+            task.version += 1
+            session.add_all(
+                [
+                    amendment,
+                    Event(
+                        task=task,
+                        type="plan.amendment_proposed",
+                        payload={"revision": revision, **deviation},
+                    ),
+                ]
+            )
+            await session.commit()
+
+    async def _escalate(
+        self,
+        task: Task,
+        plan: PlanRevision,
+        profile: AgentProfileRecord,
+        worktree: Worktree,
+        reason: str,
+        history: list[AttemptSignal],
+        batch: ValidationBatch,
+    ) -> str:
+        evidence: dict[str, Any] = {
+            "reason": reason,
+            "goal": task.goal,
+            "brief": plan.brief_markdown,
+            "plan": plan.plan_markdown,
+            "checkpoint": task.checkpoint_sha,
+            "validation": batch.summary,
+            "history": [asdict(signal) for signal in history],
+            "skills": plan.metadata_json.get("skills", []),
+        }
+        async with self.session_factory() as session:
+            escalation = Escalation(task_id=task.id, reason=reason, evidence=evidence)
+            session.add(escalation)
+            await session.commit()
+            escalation_id = escalation.id
+        instruction = (
+            "Diagnose the stalled implementation and return JSON with diagnosis and strategy.\n"
+            + json.dumps(evidence)
+        )
+        result = await self.provider.run(
+            _agent_profile(profile),
+            instruction,
+            str(worktree.path),
+            f"{task.id}-escalation-{escalation_id}",
+        )
+        output = json.loads(result.output)
+        strategy = str(output["strategy"])
+        async with self.session_factory() as session:
+            record = await session.get(Escalation, escalation_id)
+            current = await session.get(Task, task.id)
+            if record is None or current is None:
+                raise RuntimeError("escalation disappeared")
+            record.diagnosis = str(output["diagnosis"])
+            record.strategy = strategy
+            record.status = "completed"
+            session.add(
+                Event(task=current, type="escalation.completed", payload={"reason": reason})
+            )
+            await session.commit()
+        return strategy
+
+    @staticmethod
+    def _implementation_instruction(
+        task: Task, plan: PlanRevision, strategy: str
+    ) -> str:
+        return (
+            f"Implement {task.id}: {task.goal}\n\n"
+            f"Approved plan:\n{plan.plan_markdown}\n\n"
+            f"Current strategy: {strategy}\n"
+            "Work only inside this worktree. Run no undeclared deployment commands."
+        )
+
+
+def _agent_profile(record: AgentProfileRecord) -> AgentProfile:
+    tools = record.permissions.get("tools") or ["read", "bash", "edit", "write", "grep", "find", "ls"]
+    return AgentProfile(
+        record.name,
+        record.model,
+        record.effort,
+        tuple(tools),
+        tuple(record.default_skills),
+    )
+
+
+def _failure_count(output: str) -> int:
+    match = re.search(r"(\d+)\s+failed", output, re.IGNORECASE)
+    return int(match.group(1)) if match else 1
+
+
+def major_deviation(output: str) -> dict[str, str] | None:
+    try:
+        value = json.loads(output).get("major_deviation")
+    except (AttributeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    summary, reason = value.get("summary"), value.get("reason")
+    if not isinstance(summary, str) or not isinstance(reason, str):
+        return None
+    return {"summary": summary, "reason": reason}

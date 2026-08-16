@@ -215,7 +215,13 @@ def create_app(
         if plan is None:
             raise HTTPException(404, "plan revision not found")
         try:
-            task.status, task.stage = transition(task.status, task.stage, "approve")
+            action = (
+                "approve_amendment"
+                if task.status == TaskStatus.IN_PROGRESS
+                and task.stage == TaskStage.BLOCKED
+                else "approve"
+            )
+            task.status, task.stage = transition(task.status, task.stage, action)
         except InvalidTransition as error:
             raise HTTPException(409, str(error)) from error
         task.approved_plan_revision = payload.revision

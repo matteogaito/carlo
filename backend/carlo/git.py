@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -70,6 +71,12 @@ class GitWorkspace:
             cwd=worktree.path,
         )
         return await self._git("rev-parse", "HEAD", cwd=worktree.path)
+
+    async def diff_hash(self, worktree: Worktree) -> str:
+        self._validate(worktree)
+        await self._git("add", "-A", cwd=worktree.path)
+        diff = await self._git("diff", "--cached", "--binary", cwd=worktree.path)
+        return hashlib.sha256(diff.encode()).hexdigest()
 
     async def restore(self, worktree: Worktree, checkpoint: str) -> None:
         self._validate(worktree)

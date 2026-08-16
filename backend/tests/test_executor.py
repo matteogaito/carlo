@@ -72,3 +72,57 @@ async def test_implementation_is_globally_serialized() -> None:
         assert (await session.get(Task, "CAR-1")).status == TaskStatus.DONE
         assert (await session.get(Task, "CAR-2")).status == TaskStatus.DONE
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_active_task_is_recovered_before_a_ready_task() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/tmp/carlo-test")
+        session.add(project)
+        await session.flush()
+        session.add_all(
+            [
+                Task(
+                    id="CAR-1",
+                    project=project,
+                    sequence=1,
+                    title="Recover",
+                    goal="Resume validation",
+                    status=TaskStatus.IN_PROGRESS,
+                    stage=TaskStage.VALIDATING,
+                ),
+                Task(
+                    id="CAR-2",
+                    project=project,
+                    sequence=2,
+                    title="Wait",
+                    goal="Stay queued",
+                    status=TaskStatus.READY,
+                    stage=TaskStage.QUEUED,
+                ),
+            ]
+        )
+        await session.commit()
+
+    calls: list[str] = []
+
+    async def runner(task_id: str) -> str:
+        calls.append(task_id)
+        return "validated"
+
+    assert await Orchestrator(engine, factory, runner).run_next() == "CAR-1"
+    assert calls == ["CAR-1"]
+    async with factory() as session:
+        assert (await session.get(Task, "CAR-1")).status == TaskStatus.DONE
+        assert (await session.get(Task, "CAR-2")).status == TaskStatus.READY
+    await engine.dispose()

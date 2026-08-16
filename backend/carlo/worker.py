@@ -1,8 +1,37 @@
-"""Worker entrypoint is wired after the concrete task runner is configured."""
+import asyncio
+from pathlib import Path
+
+from .config import Settings
+from .db import make_engine, make_session_factory
+from .orchestrator import ImplementationPipeline, Orchestrator
+from .provider import PiProvider
+
+
+async def run() -> None:
+    settings = Settings.from_env()
+    engine = make_engine(settings)
+    factory = make_session_factory(engine)
+    provider = PiProvider(
+        settings.pi_executable, Path(settings.artifact_root) / "pi-sessions"
+    )
+    pipeline = ImplementationPipeline(
+        factory,
+        provider,
+        Path(settings.worktree_root),
+        Path(settings.artifact_root),
+        settings.max_attempts,
+    )
+    orchestrator = Orchestrator(engine, factory, pipeline.run)
+    try:
+        while True:
+            if await orchestrator.run_next() is None:
+                await asyncio.sleep(2)
+    finally:
+        await engine.dispose()
 
 
 def main() -> None:
-    raise SystemExit("Configure CARLO profiles and worktree root before starting worker")
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
