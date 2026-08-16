@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
 from .models import AgentProfile as AgentProfileRecord
-from .models import Event, PlanRevision, Project, Task
+from .models import Attempt, Escalation, Event, PlanRevision, Project, Task, ValidationRun
 from .provider import AgentProfile, CodingAgentProvider, ProviderError
 
 
@@ -141,7 +141,47 @@ def create_app(
     async def get_task(
         task_id: str, session: AsyncSession = Depends(get_session)
     ) -> dict[str, Any]:
-        return await _task_view(session, await _task_or_404(session, task_id))
+        return await _task_view(
+            session, await _task_or_404(session, task_id), detail=True
+        )
+
+    @app.get("/api/events")
+    async def list_events(
+        after: int = 0, session: AsyncSession = Depends(get_session)
+    ) -> list[dict[str, Any]]:
+        events = (
+            await session.scalars(
+                select(Event)
+                .where(Event.sequence > after)
+                .order_by(Event.sequence)
+                .limit(200)
+            )
+        ).all()
+        return [_event_view(event) for event in events]
+
+    @app.websocket("/api/ws")
+    async def events_socket(websocket: WebSocket, after: int = 0) -> None:
+        await websocket.accept()
+        sequence = after
+        try:
+            while True:
+                async with session_factory() as session:
+                    events = (
+                        await session.scalars(
+                            select(Event)
+                            .where(Event.sequence > sequence)
+                            .order_by(Event.sequence)
+                            .limit(200)
+                        )
+                    ).all()
+                if not events:
+                    await asyncio.sleep(0.5)
+                    continue
+                for event in events:
+                    await websocket.send_json(_event_view(event))
+                    sequence = event.sequence
+        except WebSocketDisconnect:
+            return
 
     @app.post("/api/tasks/{task_id}/plan")
     async def plan_task(
@@ -315,14 +355,16 @@ def _project_view(project: Project) -> dict[str, Any]:
     }
 
 
-async def _task_view(session: AsyncSession, task: Task) -> dict[str, Any]:
+async def _task_view(
+    session: AsyncSession, task: Task, detail: bool = False
+) -> dict[str, Any]:
     plan = await session.scalar(
         select(PlanRevision)
         .where(PlanRevision.task_id == task.id)
         .order_by(PlanRevision.revision.desc())
         .limit(1)
     )
-    return {
+    view = {
         "id": task.id,
         "project_id": task.project_id,
         "title": task.title,
@@ -344,4 +386,81 @@ async def _task_view(session: AsyncSession, task: Task) -> dict[str, Any]:
             "metadata": plan.metadata_json,
             "approved_at": plan.approved_at,
         },
+    }
+    if not detail:
+        return view
+    attempts = (
+        await session.scalars(
+            select(Attempt)
+            .where(Attempt.task_id == task.id)
+            .order_by(Attempt.number.desc())
+        )
+    ).all()
+    validations = (
+        await session.scalars(
+            select(ValidationRun)
+            .where(ValidationRun.task_id == task.id)
+            .order_by(ValidationRun.created_at.desc())
+        )
+    ).all()
+    escalations = (
+        await session.scalars(
+            select(Escalation)
+            .where(Escalation.task_id == task.id)
+            .order_by(Escalation.created_at.desc())
+        )
+    ).all()
+    events = (
+        await session.scalars(
+            select(Event)
+            .where(Event.task_id == task.id)
+            .order_by(Event.sequence.desc())
+            .limit(200)
+        )
+    ).all()
+    view.update(
+        attempts=[
+            {
+                "number": attempt.number,
+                "outcome": attempt.outcome,
+                "error_fingerprint": attempt.error_fingerprint,
+                "progress": attempt.progress,
+                "created_at": attempt.created_at.isoformat(),
+            }
+            for attempt in attempts
+        ],
+        validations=[
+            {
+                "command": validation.command,
+                "exit_code": validation.exit_code,
+                "classification": validation.classification,
+                "summary": validation.summary,
+                "failure_count": validation.failure_count,
+                "artifact_path": validation.artifact_path,
+                "created_at": validation.created_at.isoformat(),
+            }
+            for validation in validations
+        ],
+        escalations=[
+            {
+                "reason": escalation.reason,
+                "status": escalation.status,
+                "diagnosis": escalation.diagnosis,
+                "strategy": escalation.strategy,
+                "created_at": escalation.created_at.isoformat(),
+            }
+            for escalation in escalations
+        ],
+        events=[_event_view(event) for event in events],
+    )
+    return view
+
+
+def _event_view(event: Event) -> dict[str, Any]:
+    return {
+        "sequence": event.sequence,
+        "task_id": event.task_id,
+        "type": event.type,
+        "payload": event.payload,
+        "created_at": event.created_at.isoformat(),
     }

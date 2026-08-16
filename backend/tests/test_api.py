@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.api import create_app
-from carlo.models import Base
+from carlo.models import Base, ValidationRun
 from tests.fakes import FakeProvider
 
 
@@ -81,6 +81,22 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         )
         assert approved.status_code == 200
         assert approved.json()["status"] == "READY"
+
+        async with factory() as session:
+            session.add(
+                ValidationRun(
+                    task_id=task["id"],
+                    command="pytest -q",
+                    exit_code=1,
+                    classification="PARTIALLY_VERIFIED",
+                    summary="2 failed",
+                    failure_count=2,
+                )
+            )
+            await session.commit()
+        detail = (await client.get(f'/api/tasks/{task["id"]}')).json()
+        assert detail["validations"][0]["failure_count"] == 2
+        assert any(event["type"] == "plan.approved" for event in detail["events"])
 
     assert provider.calls[0][0].name == "plan"
     assert provider.calls[0][2] == str(repository)
