@@ -1,4 +1,5 @@
 .env
+.worktrees/
 .carlo/
 .pytest_cache/
 .venv/
