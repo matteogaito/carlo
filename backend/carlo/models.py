@@ -51,6 +51,55 @@ class Project(TimestampMixin, Base):
     )
 
 
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), unique=True)
+    password_hash: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(30), default="member")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ProjectMembership(TimestampMixin, Base):
+    __tablename__ = "project_memberships"
+    __table_args__ = (UniqueConstraint("user_id", "project_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(30), default="contributor")
+
+
+class UserSession(TimestampMixin, Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = relationship(lazy="joined")
+
+
+class LoginFailure(Base):
+    __tablename__ = "login_failures"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    source_ip: Mapped[str] = mapped_column(String(80), index=True)
+    attempted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
 class AgentProfile(TimestampMixin, Base):
     __tablename__ = "agent_profiles"
 
@@ -184,3 +233,25 @@ class Event(Base):
     )
 
     task: Mapped[Task | None] = relationship(back_populates="events")
+
+
+class NotificationCursor(TimestampMixin, Base):
+    __tablename__ = "notification_cursors"
+
+    destination: Mapped[str] = mapped_column(String(160), primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(BigInteger)
+
+
+class NotificationDelivery(TimestampMixin, Base):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (UniqueConstraint("event_sequence", "destination"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    event_sequence: Mapped[int] = mapped_column(
+        ForeignKey("events.sequence", ondelete="CASCADE"), index=True
+    )
+    destination: Mapped[str] = mapped_column(String(160), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
