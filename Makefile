@@ -1,7 +1,7 @@
 UV_CACHE_DIR ?= /tmp/carlo-uv-cache
 export UV_CACHE_DIR
 
-.PHONY: install migrate api worker ui test
+.PHONY: install migrate bootstrap-admin api worker ui test
 
 install:
 	cd backend && uv sync
@@ -9,6 +9,9 @@ install:
 
 migrate:
 	cd backend && uv run alembic upgrade head
+
+bootstrap-admin:
+	cd backend && uv run python -m carlo.admin
 
 api:
 	cd backend && uv run uvicorn carlo.main:app --reload
