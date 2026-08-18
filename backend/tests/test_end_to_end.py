@@ -7,7 +7,9 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from carlo.admin import bootstrap_admin
 from carlo.api import create_app
+from carlo.config import Settings
 from carlo.models import AgentProfile as AgentProfileRecord
 from carlo.models import Base
 from carlo.orchestrator import ImplementationPipeline, Orchestrator
@@ -36,8 +38,10 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
             text(
-                "TRUNCATE events, validation_runs, escalations, attempts, "
-                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+                "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+                "user_sessions, project_memberships, users, events, validation_runs, "
+                "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+                "RESTART IDENTITY CASCADE"
             )
         )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -46,6 +50,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
             [AgentProfileRecord(name=name, provider="pi") for name in ("plan", "implementation", "escalation")]
         )
         await session.commit()
+    await bootstrap_admin(factory, "admin", "admin-password")
 
     validation = (
         "python3 -c \"from pathlib import Path; "
@@ -89,8 +94,14 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
             return "idle"
 
     provider = Provider()
-    app = create_app(factory, provider)
+    app = create_app(factory, provider, Settings(app_origin="http://test"))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login = await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        assert login.status_code == 200
+        client.headers["Origin"] = "http://test"
         project = (
             await client.post(
                 "/api/projects",

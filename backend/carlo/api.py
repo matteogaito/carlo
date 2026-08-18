@@ -6,15 +6,38 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.responses import FileResponse
+from starlette.staticfiles import StaticFiles
 
+from .auth import InvalidCredentials, LoginThrottled, login, resolve_session, revoke_session
+from .config import Settings
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
 from .models import AgentProfile as AgentProfileRecord
-from .models import Attempt, Escalation, Event, PlanRevision, Project, Task, ValidationRun
+from .models import (
+    Attempt,
+    Escalation,
+    Event,
+    PlanRevision,
+    Project,
+    Task,
+    User,
+    ValidationRun,
+)
 from .provider import AgentProfile, CodingAgentProvider, ProviderError
 
 
@@ -69,17 +92,88 @@ class PlanPayload(BaseModel):
     metadata: PlanMetadata
 
 
+class LoginPayload(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+SESSION_COOKIE = "carlo_session"
+
+
 def create_app(
     session_factory: async_sessionmaker[AsyncSession],
     provider: CodingAgentProvider,
+    settings: Settings | None = None,
 ) -> FastAPI:
+    settings = settings or Settings.from_env()
     app = FastAPI(title="CARLO v3")
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
             yield session
 
-    @app.post("/api/projects", status_code=status.HTTP_201_CREATED)
+    async def require_admin(request: Request) -> User:
+        user = await resolve_session(
+            session_factory, request.cookies.get(SESSION_COOKIE, "")
+        )
+        if user is None:
+            raise HTTPException(401, "authentication required")
+        if user.role != "admin":
+            raise HTTPException(403, "administrator access required")
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"}
+            and request.headers.get("origin") != settings.app_origin
+        ):
+            raise HTTPException(403, "invalid request origin")
+        return user
+
+    @app.post("/api/auth/login")
+    async def login_user(
+        payload: LoginPayload, request: Request, response: Response
+    ) -> dict[str, str]:
+        source_ip = request.client.host if request.client is not None else "unknown"
+        try:
+            user, token = await login(
+                session_factory,
+                payload.username,
+                payload.password,
+                source_ip,
+                settings.session_hours,
+            )
+        except InvalidCredentials as error:
+            raise HTTPException(401, "invalid credentials") from error
+        except LoginThrottled as error:
+            raise HTTPException(429, "try again later") from error
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            max_age=settings.session_hours * 3600,
+            httponly=True,
+            secure=settings.cookie_secure,
+            samesite="lax",
+            path="/",
+        )
+        return _user_view(user)
+
+    @app.get("/api/auth/me")
+    async def current_user(user: User = Depends(require_admin)) -> dict[str, str]:
+        return _user_view(user)
+
+    @app.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+    async def logout_user(
+        request: Request, user: User = Depends(require_admin)
+    ) -> Response:
+        del user
+        await revoke_session(
+            session_factory, request.cookies.get(SESSION_COOKIE, "")
+        )
+        response = Response(status_code=status.HTTP_204_NO_CONTENT)
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return response
+
+    api = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
+
+    @api.post("/projects", status_code=status.HTTP_201_CREATED)
     async def create_project(
         payload: ProjectCreate, session: AsyncSession = Depends(get_session)
     ) -> dict[str, Any]:
@@ -103,14 +197,14 @@ def create_app(
         await session.refresh(project)
         return _project_view(project)
 
-    @app.get("/api/projects")
+    @api.get("/projects")
     async def list_projects(
         session: AsyncSession = Depends(get_session),
     ) -> list[dict[str, Any]]:
         projects = (await session.scalars(select(Project).order_by(Project.key))).all()
         return [_project_view(project) for project in projects]
 
-    @app.get("/api/agent-profiles")
+    @api.get("/agent-profiles")
     async def list_agent_profiles(
         session: AsyncSession = Depends(get_session),
     ) -> list[dict[str, Any]]:
@@ -121,7 +215,7 @@ def create_app(
         ).all()
         return [_profile_view(profile) for profile in profiles]
 
-    @app.patch("/api/agent-profiles/{name}")
+    @api.patch("/agent-profiles/{name}")
     async def update_agent_profile(
         name: str,
         payload: ProfileUpdate,
@@ -140,7 +234,7 @@ def create_app(
         await session.commit()
         return _profile_view(profile)
 
-    @app.post("/api/tasks", status_code=status.HTTP_201_CREATED)
+    @api.post("/tasks", status_code=status.HTTP_201_CREATED)
     async def create_task(
         payload: TaskCreate, session: AsyncSession = Depends(get_session)
     ) -> dict[str, Any]:
@@ -166,7 +260,7 @@ def create_app(
         await session.commit()
         return await _task_view(session, task)
 
-    @app.get("/api/tasks")
+    @api.get("/tasks")
     async def list_tasks(
         session: AsyncSession = Depends(get_session),
     ) -> list[dict[str, Any]]:
@@ -177,7 +271,7 @@ def create_app(
         ).unique().all()
         return [await _task_view(session, task) for task in tasks]
 
-    @app.get("/api/tasks/{task_id}")
+    @api.get("/tasks/{task_id}")
     async def get_task(
         task_id: str, session: AsyncSession = Depends(get_session)
     ) -> dict[str, Any]:
@@ -185,7 +279,7 @@ def create_app(
             session, await _task_or_404(session, task_id), detail=True
         )
 
-    @app.get("/api/events")
+    @api.get("/events")
     async def list_events(
         after: int = 0, session: AsyncSession = Depends(get_session)
     ) -> list[dict[str, Any]]:
@@ -201,6 +295,12 @@ def create_app(
 
     @app.websocket("/api/ws")
     async def events_socket(websocket: WebSocket, after: int = 0) -> None:
+        user = await resolve_session(
+            session_factory, websocket.cookies.get(SESSION_COOKIE, "")
+        )
+        if user is None or user.role != "admin":
+            await websocket.close(code=4401)
+            return
         await websocket.accept()
         sequence = after
         try:
@@ -223,7 +323,7 @@ def create_app(
         except WebSocketDisconnect:
             return
 
-    @app.post("/api/tasks/{task_id}/plan")
+    @api.post("/tasks/{task_id}/plan")
     async def plan_task(
         task_id: str, session: AsyncSession = Depends(get_session)
     ) -> dict[str, Any]:
@@ -277,7 +377,7 @@ def create_app(
         await session.commit()
         return await _task_view(session, task)
 
-    @app.post("/api/tasks/{task_id}/approve")
+    @api.post("/tasks/{task_id}/approve")
     async def approve_plan(
         task_id: str,
         payload: Approval,
@@ -312,6 +412,23 @@ def create_app(
         )
         await session.commit()
         return await _task_view(session, task)
+
+    app.include_router(api)
+
+    dist = Path(settings.frontend_dist).resolve()
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def spa(path: str) -> FileResponse:
+        index = dist / "index.html"
+        if path.startswith("api/") or not index.is_file():
+            raise HTTPException(404)
+        candidate = (dist / path).resolve()
+        if candidate.is_file() and candidate.is_relative_to(dist):
+            return FileResponse(candidate)
+        return FileResponse(index)
 
     return app
 
@@ -406,6 +523,10 @@ def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
         "context_policy": profile.context_policy,
         "active": profile.active,
     }
+
+
+def _user_view(user: User) -> dict[str, str]:
+    return {"username": user.username, "role": user.role}
 
 
 async def _task_view(

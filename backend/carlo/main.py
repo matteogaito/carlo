@@ -10,4 +10,5 @@ engine = make_engine(settings)
 app = create_app(
     make_session_factory(engine),
     PiProvider(settings.pi_executable, Path(settings.artifact_root) / "pi-sessions"),
+    settings,
 )

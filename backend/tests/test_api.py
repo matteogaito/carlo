@@ -8,7 +8,9 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from carlo.admin import bootstrap_admin
 from carlo.api import create_app
+from carlo.config import Settings
 from carlo.models import AgentProfile as AgentProfileRecord
 from carlo.models import Base, ValidationRun
 from carlo.provider import AgentProfile, AgentResult
@@ -29,8 +31,10 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
             text(
-                "TRUNCATE events, validation_runs, escalations, attempts, "
-                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+                "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+                "user_sessions, project_memberships, users, events, validation_runs, "
+                "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+                "RESTART IDENTITY CASCADE"
             )
         )
     provider = FakeProvider(
@@ -52,9 +56,16 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         )
     )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    app = create_app(factory, provider)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    app = create_app(factory, provider, Settings(app_origin="http://test"))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login = await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        assert login.status_code == 200
+        client.headers["Origin"] = "http://test"
         project_response = await client.post(
             "/api/projects",
             json={"name": "CARLO", "key": "CAR", "repository_path": str(repository)},
@@ -131,14 +142,17 @@ async def test_planning_runs_concurrently_without_the_implementation_lock(
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
             text(
-                "TRUNCATE events, validation_runs, escalations, attempts, "
-                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+                "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+                "user_sessions, project_memberships, users, events, validation_runs, "
+                "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+                "RESTART IDENTITY CASCADE"
             )
         )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
         session.add(AgentProfileRecord(name="plan", provider="pi"))
         await session.commit()
+    await bootstrap_admin(factory, "admin", "admin-password")
 
     output = json.dumps(
         {
@@ -183,8 +197,14 @@ async def test_planning_runs_concurrently_without_the_implementation_lock(
             return "idle"
 
     provider = ConcurrentProvider()
-    app = create_app(factory, provider)
+    app = create_app(factory, provider, Settings(app_origin="http://test"))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login = await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        assert login.status_code == 200
+        client.headers["Origin"] = "http://test"
         project = (
             await client.post(
                 "/api/projects",
