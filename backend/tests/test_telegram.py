@@ -67,7 +67,13 @@ def test_format_includes_task_and_severity() -> None:
 
 @pytest.mark.parametrize(
     "event_type",
-    ["planning.failed", "execution.blocked", "execution.failed", "execution.interrupted"],
+    [
+        "planning.failed",
+        "execution.blocked",
+        "execution.failed",
+        "execution.interrupted",
+        "escalation.completed",
+    ],
 )
 def test_failure_and_blocked_events_are_blocking(event_type: str) -> None:
     assert format_event(Event(type=event_type, payload={}))[1] == "blocking"

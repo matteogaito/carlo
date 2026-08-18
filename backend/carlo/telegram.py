@@ -32,6 +32,7 @@ BLOCKING_EVENTS = {
     "execution.blocked",
     "execution.failed",
     "execution.interrupted",
+    "escalation.completed",
     "plan.amendment_proposed",
 }
 
