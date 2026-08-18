@@ -1,5 +1,12 @@
 export type TaskStatus = 'NOT_READY' | 'READY' | 'IN_PROGRESS' | 'TEST' | 'DONE' | 'FAILED'
 
+export interface User {
+  username: string
+  role: 'admin' | 'member'
+}
+
+export class AuthenticationRequired extends Error {}
+
 export interface Project {
   id: number
   name: string
@@ -72,6 +79,9 @@ export interface Event {
 }
 
 export interface Api {
+  me(): Promise<User>
+  login(username: string, password: string): Promise<User>
+  logout(): Promise<void>
   listProjects(): Promise<Project[]>
   listTasks(): Promise<Task[]>
   getTask(id: string): Promise<Task>
@@ -79,22 +89,35 @@ export interface Api {
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'>): Promise<Task>
   startPlanning(id: string): Promise<Task>
   approvePlan(id: string, revision: number, version: number): Promise<Task>
-  events(onEvent: (event: Event) => void, onStatus?: (connected: boolean) => void): () => void
+  events(
+    onEvent: (event: Event) => void,
+    onStatus?: (connected: boolean) => void,
+    onAuthenticationRequired?: () => void,
+  ): () => void
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, requireAuthentication = true): Promise<T> {
   const response = await fetch(path, {
+    credentials: 'same-origin',
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
   if (!response.ok) {
+    if (response.status === 401 && requireAuthentication) throw new AuthenticationRequired()
     const detail = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(detail.detail || `Request failed (${response.status})`)
   }
+  if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
 
 export const httpApi: Api = {
+  me: () => request('/api/auth/me'),
+  login: (username, password) => request('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  }, false),
+  logout: () => request('/api/auth/logout', { method: 'POST' }),
   listProjects: () => request('/api/projects'),
   listTasks: () => request('/api/tasks'),
   getTask: (id) => request(`/api/tasks/${id}`),
@@ -105,7 +128,7 @@ export const httpApi: Api = {
     method: 'POST',
     body: JSON.stringify({ revision, version }),
   }),
-  events(onEvent, onStatus) {
+  events(onEvent, onStatus, onAuthenticationRequired) {
     let closed = false
     let socket: WebSocket | undefined
     let sequence = 0
@@ -119,8 +142,12 @@ export const httpApi: Api = {
         sequence = event.sequence
         onEvent(event)
       }
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         onStatus?.(false)
+        if (event.code === 4401) {
+          onAuthenticationRequired?.()
+          return
+        }
         if (!closed) retry = window.setTimeout(connect, 1500)
       }
     }

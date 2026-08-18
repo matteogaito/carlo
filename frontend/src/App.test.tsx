@@ -1,9 +1,11 @@
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
-import type { Api, Task } from './api'
+import { AuthenticationRequired, type Api, type Task, type User } from './api'
+
+afterEach(cleanup)
 
 const task: Task = {
   id: 'CAR-1',
@@ -37,6 +39,9 @@ const task: Task = {
 }
 
 const api: Api = {
+  me: async () => ({ username: 'admin', role: 'admin' }),
+  login: async () => ({ username: 'admin', role: 'admin' }),
+  logout: async () => undefined,
   listProjects: async () => [],
   listTasks: async () => [task],
   getTask: async () => task,
@@ -58,5 +63,36 @@ describe('CARLO board', () => {
     expect(await screen.findByRole('heading', { name: 'Validation' })).toBeTruthy()
     expect(screen.getByText('pytest -q')).toBeTruthy()
     expect(screen.getByText('2 failed')).toBeTruthy()
+  })
+
+  it('shows login before loading the board', async () => {
+    const user: User = { username: 'admin', role: 'admin' }
+    const login = vi.fn(async () => user)
+    const unauthenticatedApi = {
+      ...api,
+      me: async () => { throw new AuthenticationRequired() },
+      login,
+      listTasks: vi.fn(api.listTasks),
+    }
+
+    render(<App api={unauthenticatedApi} />)
+
+    expect(await screen.findByRole('heading', { name: 'Sign in to CARLO' })).toBeTruthy()
+    expect(unauthenticatedApi.listTasks).not.toHaveBeenCalled()
+    await userEvent.type(screen.getByLabelText('Username'), 'admin')
+    await userEvent.type(screen.getByLabelText('Password'), 'admin-password')
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(login).toHaveBeenCalledWith('admin', 'admin-password')
+    expect(await screen.findByRole('heading', { name: 'Not Ready' })).toBeTruthy()
+  })
+
+  it('logs out to the login form', async () => {
+    const logout = vi.fn(async () => undefined)
+    render(<App api={{ ...api, logout }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Sign out' }))
+
+    expect(logout).toHaveBeenCalledOnce()
+    expect(await screen.findByRole('heading', { name: 'Sign in to CARLO' })).toBeTruthy()
   })
 })

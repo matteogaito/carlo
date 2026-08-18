@@ -1,6 +1,14 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 
-import { httpApi, type Api, type Project, type Task, type TaskStatus } from './api'
+import {
+  AuthenticationRequired,
+  httpApi,
+  type Api,
+  type Project,
+  type Task,
+  type TaskStatus,
+  type User,
+} from './api'
 import './styles.css'
 
 const columns: { status: TaskStatus; label: string; code: string }[] = [
@@ -13,6 +21,7 @@ const columns: { status: TaskStatus; label: string; code: string }[] = [
 ]
 
 export function App({ api = httpApi }: { api?: Api }) {
+  const [user, setUser] = useState<User | null>()
   const [projects, setProjects] = useState<Project[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [selected, setSelected] = useState<Task | null>(null)
@@ -26,11 +35,28 @@ export function App({ api = httpApi }: { api?: Api }) {
       setTasks(nextTasks)
       setError('')
     } catch (cause) {
+      if (cause instanceof AuthenticationRequired) {
+        setUser(null)
+        return
+      }
       setError(cause instanceof Error ? cause.message : 'Could not load CARLO state')
     }
   }, [api])
 
   useEffect(() => {
+    let active = true
+    void api.me().then((nextUser) => {
+      if (active) setUser(nextUser)
+    }).catch((cause) => {
+      if (!active) return
+      if (cause instanceof AuthenticationRequired) setUser(null)
+      else setError(cause instanceof Error ? cause.message : 'Could not verify session')
+    })
+    return () => { active = false }
+  }, [api])
+
+  useEffect(() => {
+    if (!user) return
     void refresh()
     return api.events(
       (event) => {
@@ -40,8 +66,9 @@ export function App({ api = httpApi }: { api?: Api }) {
         }
       },
       setConnected,
+      () => setUser(null),
     )
-  }, [api, refresh, selected?.id])
+  }, [api, refresh, selected?.id, user])
 
   const active = useMemo(() => tasks.find((task) => task.status === 'IN_PROGRESS'), [tasks])
 
@@ -51,7 +78,30 @@ export function App({ api = httpApi }: { api?: Api }) {
       setSelected(task)
       await refresh()
     } catch (cause) {
+      if (cause instanceof AuthenticationRequired) {
+        setUser(null)
+        return
+      }
       setError(cause instanceof Error ? cause.message : 'Action failed')
+    }
+  }
+
+  if (user === undefined) {
+    return <main className="auth-shell"><p>Starting CARLO…</p></main>
+  }
+
+  if (user === null) {
+    return <LoginForm api={api} authenticated={setUser} />
+  }
+
+  async function signOut() {
+    try {
+      await api.logout()
+    } finally {
+      setProjects([])
+      setTasks([])
+      setSelected(null)
+      setUser(null)
     }
   }
 
@@ -66,6 +116,8 @@ export function App({ api = httpApi }: { api?: Api }) {
           <span className={connected ? 'connection online' : 'connection'}>
             {connected ? 'Live' : 'Reconnecting'}
           </span>
+          <span className="signed-user">{user.username}</span>
+          <button className="sign-out" onClick={() => void signOut()}>Sign out</button>
         </div>
       </header>
 
@@ -116,6 +168,44 @@ export function App({ api = httpApi }: { api?: Api }) {
         )}
       </main>
     </div>
+  )
+}
+
+function LoginForm({ api, authenticated }: {
+  api: Api
+  authenticated: (user: User) => void
+}) {
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const data = new FormData(event.currentTarget)
+    setBusy(true)
+    setError('')
+    try {
+      authenticated(await api.login(String(data.get('username')), String(data.get('password'))))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Sign in failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="login-panel" aria-labelledby="login-title">
+        <div className="wordmark"><span>CARLO</span><sup>v3</sup></div>
+        <p>Slow but relentless.</p>
+        <h1 id="login-title">Sign in to CARLO</h1>
+        <form onSubmit={submit}>
+          <label>Username<input name="username" autoComplete="username" required autoFocus /></label>
+          <label>Password<input name="password" type="password" autoComplete="current-password" required /></label>
+          {error && <div className="login-error" role="alert">{error}</div>}
+          <button type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+        </form>
+      </section>
+    </main>
   )
 }
 
