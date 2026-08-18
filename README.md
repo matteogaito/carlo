@@ -16,6 +16,8 @@ PostgreSQL owns lifecycle state; Git owns source changes and checkpoints.
 - progress-aware retries, repeated-loop detection, GPT-profile escalation;
 - restart recovery from persisted task, attempt, Git, and validation state;
 - HTTP API, persisted WebSocket event replay, and six-column React Kanban;
+- in-application administrator login with durable revocable sessions;
+- restart-safe Telegram notifications for informational and blocking events;
 - configurable provider/model/effort/tool profiles.
 
 For now, a task becomes **Done when every approved local validation command
@@ -39,20 +41,27 @@ cp .env.example .env
 set -a && source .env && set +a
 make install
 make migrate
+make bootstrap-admin
 ```
 
 The databases already exist on the original development host. `carlov3_test` is
 destructive test-only storage; never point `CARLO_DATABASE_URL` at production.
 
-Configure the four seeded profiles after starting the API. Model assignments are
-data, not hardcoded domain behavior:
+Start the API, log in once with curl, then configure the seeded profiles. Model
+assignments are data, not hardcoded domain behavior:
 
 ```bash
+curl -c /tmp/carlo-cookie -X POST http://localhost:8000/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"username":"admin","password":"change-this-password"}'
+
 curl -X PATCH http://localhost:8000/api/agent-profiles/plan \
+  -b /tmp/carlo-cookie -H 'origin: http://localhost:5173' \
   -H 'content-type: application/json' \
   -d '{"model":"openai/gpt-5","effort":"high"}'
 
 curl -X PATCH http://localhost:8000/api/agent-profiles/implementation \
+  -b /tmp/carlo-cookie -H 'origin: http://localhost:5173' \
   -H 'content-type: application/json' \
   -d '{"model":"your-kat-model","effort":"high"}'
 ```
@@ -78,6 +87,50 @@ set -a && source .env && set +a && make test
 The suite uses real PostgreSQL advisory locks and temporary Git repositories.
 Provider calls use deterministic fakes; the installed Pi boundary has a separate
 smoke check because model access may require credentials and incur cost.
+
+## VPN production setup
+
+CARLO can serve the built React application itself, so Nginx is optional for
+the initial HTTP-over-VPN deployment.
+
+```bash
+cp .env.production.example .env.production
+```
+
+Edit `.env.production` and replace every `CHANGE_ME`, `VPN_IP_OR_HOSTNAME`, and
+`/ABSOLUTE/PATH`. `CARLO_APP_ORIGIN` must exactly match the URL opened in the
+browser. Then install, migrate, bootstrap the only administrator, and build:
+
+```bash
+set -a && source .env.production && set +a
+make install
+make migrate
+make bootstrap-admin
+make build
+```
+
+After bootstrap, remove the real value of `CARLO_BOOTSTRAP_ADMIN_PASSWORD` from
+the populated file; CARLO never changes an existing administrator implicitly.
+
+Run the API and worker as two separately supervised processes:
+
+```bash
+set -a && source .env.production && set +a && make prod-api
+set -a && source .env.production && set +a && make worker
+```
+
+Open the configured VPN URL. The API, SPA, and WebSocket share the same origin.
+When HTTPS is added, change the origin to `https://...` and set
+`CARLO_COOKIE_SECURE=true`.
+
+### Telegram
+
+Create a bot with BotFather, send that bot one message, and put its token and
+your single destination chat ID in `.env.production`. `CARLO_TELEGRAM_LEVEL=all`
+sends informational and blocking events; use `blocking` for intervention-only
+messages. Placeholder values disable Telegram cleanly. Delivery uses Telegram's
+official HTTPS `sendMessage` API, is deduplicated across restarts, and never
+blocks task execution.
 
 ## Runtime shape
 
