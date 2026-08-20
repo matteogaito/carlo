@@ -29,6 +29,7 @@ class Settings:
     pi_executable: str = DEFAULT_PI_EXECUTABLE
     worktree_root: str = DEFAULT_WORKTREE_ROOT
     max_attempts: int = 20
+    action_cancel_grace_seconds: int = 10
     app_origin: str = "http://127.0.0.1:8000"
     cookie_secure: bool = False
     session_hours: int = 24
@@ -52,6 +53,9 @@ class Settings:
             pi_executable=os.getenv("CARLO_PI_EXECUTABLE", DEFAULT_PI_EXECUTABLE),
             worktree_root=os.getenv("CARLO_WORKTREE_ROOT", DEFAULT_WORKTREE_ROOT),
             max_attempts=_positive_integer("CARLO_MAX_ATTEMPTS", 20),
+            action_cancel_grace_seconds=_positive_integer(
+                "CARLO_ACTION_CANCEL_GRACE_SECONDS", 10
+            ),
             app_origin=os.getenv("CARLO_APP_ORIGIN", "http://127.0.0.1:8000").rstrip("/"),
             cookie_secure=_boolean("CARLO_COOKIE_SECURE", False),
             session_hours=_positive_integer("CARLO_SESSION_HOURS", 24),

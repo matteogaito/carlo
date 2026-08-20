@@ -11,9 +11,11 @@ def test_default_database_url_is_a_string(monkeypatch) -> None:
 def test_worker_settings_are_loaded_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("CARLO_WORKTREE_ROOT", "/tmp/carlo-worktrees")
     monkeypatch.setenv("CARLO_MAX_ATTEMPTS", "9")
+    monkeypatch.setenv("CARLO_ACTION_CANCEL_GRACE_SECONDS", "7")
     settings = Settings.from_env()
     assert settings.worktree_root == "/tmp/carlo-worktrees"
     assert settings.max_attempts == 9
+    assert settings.action_cancel_grace_seconds == 7
 
 
 def test_production_settings_are_loaded(monkeypatch) -> None:
