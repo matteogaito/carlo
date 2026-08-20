@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -13,6 +14,7 @@ from fastapi import (
     HTTPException,
     Request,
     Response,
+    Query,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -25,15 +27,19 @@ from starlette.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
 from .auth import InvalidCredentials, LoginThrottled, login, resolve_session, revoke_session
+from .actions import ActionConfigError, load_catalog, preflight
 from .config import Settings
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
 from .models import AgentProfile as AgentProfileRecord
 from .models import (
+    ActionRun,
+    ActionStep,
     Attempt,
     Escalation,
     Event,
     PlanRevision,
     Project,
+    Runner,
     Task,
     User,
     ValidationRun,
@@ -203,6 +209,216 @@ def create_app(
     ) -> list[dict[str, Any]]:
         projects = (await session.scalars(select(Project).order_by(Project.key))).all()
         return [_project_view(project) for project in projects]
+
+    @api.get("/projects/{project_id}/actions")
+    async def project_actions(
+        project_id: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        project = await session.get(Project, project_id)
+        if project is None:
+            raise HTTPException(404, "project not found")
+        try:
+            catalog = await load_catalog(project)
+        except ActionConfigError as error:
+            return {
+                "project_id": project.id,
+                "commit_sha": None,
+                "branch": None,
+                "dirty_paths": [],
+                "actions": [],
+                "error": str(error),
+            }
+        return {
+            "project_id": project.id,
+            "commit_sha": catalog.commit_sha,
+            "branch": catalog.branch,
+            "dirty_paths": list(catalog.dirty_paths),
+            "actions": [
+                {"key": action.key, **action.snapshot()}
+                for action in sorted(catalog.actions.values(), key=lambda item: item.key)
+            ],
+            "error": None,
+        }
+
+    @api.post(
+        "/projects/{project_id}/actions/{action_key}/runs",
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_action_run(
+        project_id: int,
+        action_key: str,
+        user: User = Depends(require_admin),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        project = await session.get(Project, project_id)
+        if project is None:
+            raise HTTPException(404, "project not found")
+        try:
+            checked = await preflight(project, action_key)
+        except ActionConfigError as error:
+            raise HTTPException(409, str(error)) from error
+
+        definition = checked.definition
+        if definition.runner == "local":
+            runner_snapshot: dict[str, Any] = {"type": "local", "name": "local"}
+        else:
+            runner = await session.scalar(
+                select(Runner).where(Runner.name == definition.runner)
+            )
+            if runner is None or not runner.enabled or not runner.fingerprint:
+                raise HTTPException(409, f"runner is not ready: {definition.runner}")
+            runner_snapshot = {
+                "type": "ssh",
+                "name": runner.name,
+                "host": runner.host,
+                "port": runner.port,
+                "username": runner.username,
+                "workspace_root": runner.workspace_root,
+                "fingerprint": runner.fingerprint,
+            }
+
+        run = ActionRun(
+            project_id=project.id,
+            requested_by_id=user.id,
+            action_key=definition.key,
+            action_name=definition.name,
+            definition=definition.snapshot(),
+            runner_name=definition.runner,
+            runner_snapshot=runner_snapshot,
+            status="queued",
+            commit_sha=checked.commit_sha,
+            branch_name=checked.branch,
+            origin=checked.origin,
+            env_file=definition.env_file,
+            env_names=sorted(checked.env_values),
+            artifact_path="pending",
+            steps=[
+                ActionStep(position=position, command=command)
+                for position, command in enumerate(definition.commands, start=1)
+            ],
+        )
+        session.add(run)
+        await session.flush()
+        run_root = (Path(settings.artifact_root).resolve() / "actions" / str(run.id))
+        run.artifact_path = str(run_root / "console.log")
+        secret_path: Path | None = None
+        try:
+            run_root.mkdir(parents=True, exist_ok=True)
+            if checked.env_path is not None:
+                secret_path = run_root / "environment"
+                descriptor = os.open(
+                    secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(checked.env_path.read_bytes())
+                run.secret_path = str(secret_path)
+            session.add(
+                Event(
+                    type="action.queued",
+                    payload={
+                        "run_id": run.id,
+                        "project_id": project.id,
+                        "action_key": definition.key,
+                        "runner": definition.runner,
+                        "commit_sha": checked.commit_sha,
+                    },
+                )
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            if secret_path is not None:
+                secret_path.unlink(missing_ok=True)
+            raise
+        return _action_run_view(run)
+
+    @api.get("/action-runs")
+    async def list_action_runs(
+        project_id: int | None = None,
+        limit: int = Query(default=50, ge=1, le=100),
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        statement = select(ActionRun).order_by(
+            ActionRun.requested_at.desc(), ActionRun.id.desc()
+        )
+        if project_id is not None:
+            statement = statement.where(ActionRun.project_id == project_id)
+        runs = (await session.scalars(statement.limit(limit))).all()
+        return [_action_run_view(run) for run in runs]
+
+    @api.get("/action-runs/{run_id}")
+    async def get_action_run(
+        run_id: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        return _action_run_view(await _action_run_or_404(session, run_id))
+
+    @api.get("/action-runs/{run_id}/console")
+    async def get_action_console(
+        run_id: int,
+        offset: int = Query(default=0, ge=0),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        run = await _action_run_or_404(session, run_id)
+        root = (Path(settings.artifact_root).resolve() / "actions").resolve()
+        artifact = Path(run.artifact_path).resolve()
+        if not artifact.is_relative_to(root):
+            raise HTTPException(500, "invalid console artifact path")
+        if not artifact.is_file():
+            return {"offset": offset, "next_offset": offset, "text": "", "eof": True}
+        size = artifact.stat().st_size
+        if offset > size:
+            raise HTTPException(416, "console offset exceeds file size")
+        with artifact.open("rb") as source:
+            source.seek(offset)
+            data = source.read(256 * 1024)
+        next_offset = offset + len(data)
+        return {
+            "offset": offset,
+            "next_offset": next_offset,
+            "text": data.decode(errors="replace"),
+            "eof": next_offset >= size,
+        }
+
+    @api.post("/action-runs/{run_id}/cancel")
+    async def cancel_action_run(
+        run_id: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        run = await session.scalar(
+            select(ActionRun).where(ActionRun.id == run_id).with_for_update()
+        )
+        if run is None:
+            raise HTTPException(404, "action run not found")
+        if run.status == "queued":
+            now = datetime.now(UTC)
+            run.status = "cancelled"
+            run.internal_stage = "complete"
+            run.cancel_requested_at = now
+            run.finished_at = now
+            for step in run.steps:
+                step.status = "skipped"
+                step.finished_at = now
+            if run.secret_path:
+                Path(run.secret_path).unlink(missing_ok=True)
+                run.secret_path = None
+            event_type = "action.cancelled"
+        elif run.status == "running":
+            if run.cancel_requested_at is None:
+                run.cancel_requested_at = datetime.now(UTC)
+            event_type = "action.cancel_requested"
+        else:
+            return _action_run_view(run)
+        session.add(
+            Event(
+                type=event_type,
+                payload={
+                    "run_id": run.id,
+                    "project_id": run.project_id,
+                    "action_key": run.action_key,
+                },
+            )
+        )
+        await session.commit()
+        return _action_run_view(run)
 
     @api.get("/agent-profiles")
     async def list_agent_profiles(
@@ -458,6 +674,13 @@ async def _task_or_404(session: AsyncSession, task_id: str) -> Task:
     return task
 
 
+async def _action_run_or_404(session: AsyncSession, run_id: int) -> ActionRun:
+    run = await session.get(ActionRun, run_id)
+    if run is None:
+        raise HTTPException(404, "action run not found")
+    return run
+
+
 async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
     profile = await session.scalar(
         select(AgentProfileRecord).where(AgentProfileRecord.name == name)
@@ -645,4 +868,51 @@ def _event_view(event: Event) -> dict[str, Any]:
         "type": event.type,
         "payload": event.payload,
         "created_at": event.created_at.isoformat(),
+    }
+
+
+def _action_run_view(run: ActionRun) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "project_id": run.project_id,
+        "action_key": run.action_key,
+        "action_name": run.action_name,
+        "definition": run.definition,
+        "runner_name": run.runner_name,
+        "runner_snapshot": run.runner_snapshot,
+        "status": run.status,
+        "internal_stage": run.internal_stage,
+        "commit_sha": run.commit_sha,
+        "branch_name": run.branch_name,
+        "origin": run.origin,
+        "env_file": run.env_file,
+        "env_names": run.env_names,
+        "requested_at": run.requested_at.isoformat(),
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "cancel_requested_at": (
+            run.cancel_requested_at.isoformat() if run.cancel_requested_at else None
+        ),
+        "current_step": run.current_step,
+        "workspace_path": run.workspace_path,
+        "artifact_path": run.artifact_path,
+        "secret_path": run.secret_path,
+        "log_offset": run.log_offset,
+        "recent_output": run.recent_output,
+        "exit_code": run.exit_code,
+        "error": run.error,
+        "cleanup_pending": run.cleanup_pending,
+        "steps": [
+            {
+                "position": step.position,
+                "command": step.command,
+                "status": step.status,
+                "started_at": step.started_at.isoformat() if step.started_at else None,
+                "finished_at": step.finished_at.isoformat() if step.finished_at else None,
+                "exit_code": step.exit_code,
+                "log_start": step.log_start,
+                "log_end": step.log_end,
+            }
+            for step in run.steps
+        ],
     }

@@ -4,10 +4,12 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
     Identity,
+    Index,
     Integer,
     String,
     Text,
@@ -87,6 +89,105 @@ class UserSession(TimestampMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(lazy="joined")
+
+
+class Runner(TimestampMixin, Base):
+    __tablename__ = "runners"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    host: Mapped[str] = mapped_column(String(253))
+    port: Mapped[int] = mapped_column(Integer, default=22)
+    username: Mapped[str] = mapped_column(String(80))
+    identity_file: Mapped[str] = mapped_column(Text)
+    workspace_root: Mapped[str] = mapped_column(Text, default=".carlo")
+    host_key: Mapped[str | None] = mapped_column(Text)
+    fingerprint: Mapped[str | None] = mapped_column(String(160))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_check_ok: Mapped[bool | None] = mapped_column(Boolean)
+    last_check_error: Mapped[str | None] = mapped_column(Text)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ActionRun(TimestampMixin, Base):
+    __tablename__ = "action_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed', "
+            "'cancelled', 'interrupted')",
+            name="ck_action_runs_status",
+        ),
+        Index("ix_action_runs_queue", "status", "requested_at", "id"),
+        Index("ix_action_runs_project_history", "project_id", "requested_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    requested_by_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    action_key: Mapped[str] = mapped_column(String(120))
+    action_name: Mapped[str] = mapped_column(String(160))
+    definition: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    runner_name: Mapped[str] = mapped_column(String(80))
+    runner_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    internal_stage: Mapped[str] = mapped_column(String(30), default="queued")
+    commit_sha: Mapped[str] = mapped_column(String(64))
+    branch_name: Mapped[str | None] = mapped_column(String(240))
+    origin: Mapped[str | None] = mapped_column(Text)
+    env_file: Mapped[str | None] = mapped_column(Text)
+    env_names: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_step: Mapped[int | None] = mapped_column(Integer)
+    process_group: Mapped[int | None] = mapped_column(BigInteger)
+    workspace_path: Mapped[str | None] = mapped_column(Text)
+    artifact_path: Mapped[str] = mapped_column(Text)
+    secret_path: Mapped[str | None] = mapped_column(Text)
+    log_offset: Mapped[int] = mapped_column(BigInteger, default=0)
+    recent_output: Mapped[str] = mapped_column(Text, default="")
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)
+    cleanup_pending: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    steps: Mapped[list["ActionStep"]] = relationship(
+        order_by="ActionStep.position",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+
+class ActionStep(TimestampMixin, Base):
+    __tablename__ = "action_steps"
+    __table_args__ = (
+        UniqueConstraint("run_id", "position"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'failed', "
+            "'cancelled', 'skipped')",
+            name="ck_action_steps_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("action_runs.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    command: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    log_start: Mapped[int | None] = mapped_column(BigInteger)
+    log_end: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class LoginFailure(Base):
