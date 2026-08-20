@@ -16,13 +16,15 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
     )
     executable.chmod(0o755)
     sessions = tmp_path / "sessions"
-    provider = PiProvider(str(executable), sessions)
+    skill_root = tmp_path / "skills"
+    (skill_root / "carlo-planning").mkdir(parents=True)
+    provider = PiProvider(str(executable), sessions, skill_root)
     profile = AgentProfile(
         name="plan",
         model="openai/gpt-5",
         effort="high",
         tools=("read", "grep", "find", "ls"),
-        skills=(),
+        skills=("carlo-planning",),
     )
 
     result = await provider.run(profile, "Inspect the repo", str(tmp_path), "CAR-1-plan-1")
@@ -33,5 +35,6 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
         "--mode", "json", "--print", "--approve", "--session-id", "CAR-1-plan-1",
         "--session-dir", str(sessions), "--model", "openai/gpt-5",
         "--thinking", "high", "--tools", "read,grep,find,ls",
+        "--skill", str(skill_root / "carlo-planning"),
         "Inspect the repo",
     ]

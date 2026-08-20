@@ -55,7 +55,7 @@ def test_password_hash_rejects_short_passwords() -> None:
 @pytest.mark.asyncio
 async def test_bootstrap_admin_is_idempotent(factory) -> None:
     first = await bootstrap_admin(factory, "Admin", "first-password")
-    second = await bootstrap_admin(factory, "admin", "different-password")
+    second = await bootstrap_admin(factory, "CHANGE_ME", "CHANGE_ME")
 
     assert second.id == first.id
     assert second.username == "admin"

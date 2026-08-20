@@ -9,7 +9,8 @@ PostgreSQL owns lifecycle state; Git owns source changes and checkpoints.
 ## Current vertical slice
 
 - Git-backed projects and permanent IDs such as `CAR-1`;
-- concurrent repository-aware Brief/Plan sessions through Pi;
+- concurrent repository-aware Brief/Plan sessions through Pi using the bundled
+  `carlo-planning` skill;
 - explicit Plan and Plan Amendment approval;
 - one globally serialized implementation via PostgreSQL advisory lock;
 - dedicated branch/worktree and validation-linked checkpoint commits;
@@ -122,6 +123,34 @@ set -a && source .env.production && set +a && make worker
 Open the configured VPN URL. The API, SPA, and WebSocket share the same origin.
 When HTTPS is added, change the origin to `https://...` and set
 `CARLO_COOKIE_SECURE=true`.
+
+### macOS boot service
+
+On macOS the complete production setup can instead be installed as two system
+`LaunchDaemon` jobs. They run at boot as user `carlo`, even when nobody has
+logged in. The installer uses an existing `carlo` account with home
+`/Users/carlo`, or creates a hidden service account when it is absent:
+
+```bash
+sudo make install-mac
+make status-mac
+make logs-mac
+```
+
+On first install, `.env.production` is copied to
+`/Users/carlo/.config/carlo/.env.production` with mode `600`. Later installs
+preserve that file; edit it there and rerun `sudo make install-mac`. The command
+installs dependencies, builds the UI, migrates PostgreSQL, bootstraps the admin,
+and installs/starts the API and worker daemons. With the default local database
+URL it also creates the PostgreSQL login `carlo`, assigns ownership of the
+dedicated `carlov3` database to it, and applies migrations as that account.
+
+```bash
+make uninstall-mac
+```
+
+Uninstalling stops and removes only the daemon definitions. Application files,
+configuration, PostgreSQL data, artifacts, and logs are preserved.
 
 ### Telegram
 

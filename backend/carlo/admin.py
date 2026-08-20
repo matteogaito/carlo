@@ -12,16 +12,15 @@ from .models import User
 async def bootstrap_admin(
     factory: async_sessionmaker[AsyncSession], username: str, password: str
 ) -> User:
-    normalized = normalize_username(username)
-    if not normalized or normalized.startswith("change_me") or password.startswith(
-        "CHANGE_ME"
-    ):
-        raise ValueError("bootstrap credentials still contain a placeholder")
-
     async with factory() as session:
         existing = await session.scalar(select(User).where(User.role == "admin"))
         if existing is not None:
             return existing
+        normalized = normalize_username(username)
+        if not normalized or normalized.startswith(
+            "change_me"
+        ) or password.startswith("CHANGE_ME"):
+            raise ValueError("bootstrap credentials still contain a placeholder")
         user = User(
             username=normalized,
             password_hash=hash_password(password),

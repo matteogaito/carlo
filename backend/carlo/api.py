@@ -339,10 +339,13 @@ def create_app(
         await session.commit()
 
         instruction = _planning_instruction(task)
+        provider_profile = _provider_profile(profile)
+        if "carlo-planning" in provider_profile.skills:
+            instruction = f"/skill:carlo-planning {instruction}"
         session_id = f"{task.id}-plan-{task.version}"
         try:
             result = await provider.run(
-                _provider_profile(profile),
+                provider_profile,
                 instruction,
                 task.project.repository_path,
                 session_id,
@@ -460,7 +463,11 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
         select(AgentProfileRecord).where(AgentProfileRecord.name == name)
     )
     if profile is None:
-        profile = AgentProfileRecord(name=name, provider="pi")
+        profile = AgentProfileRecord(
+            name=name,
+            provider="pi",
+            default_skills=["carlo-planning"] if name == "plan" else [],
+        )
         session.add(profile)
         await session.flush()
     return profile

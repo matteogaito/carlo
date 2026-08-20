@@ -122,6 +122,8 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         assert updated.json()["model"] == "openai/gpt-5"
 
     assert provider.calls[0][0].name == "plan"
+    assert provider.calls[0][0].skills == ("carlo-planning",)
+    assert provider.calls[0][1].startswith("/skill:carlo-planning ")
     assert provider.calls[0][2] == str(repository)
     await engine.dispose()
 

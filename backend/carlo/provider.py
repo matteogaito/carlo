@@ -41,9 +41,12 @@ class CodingAgentProvider(Protocol):
 
 
 class PiProvider:
-    def __init__(self, executable: str, session_dir: Path) -> None:
+    def __init__(
+        self, executable: str, session_dir: Path, skill_root: Path | None = None
+    ) -> None:
         self.executable = executable
         self.session_dir = session_dir
+        self.skill_root = skill_root or Path(__file__).resolve().parents[2] / "skills"
         self._processes: dict[str, asyncio.subprocess.Process] = {}
 
     async def run(
@@ -72,7 +75,10 @@ class PiProvider:
         if profile.tools:
             command.extend(("--tools", ",".join(profile.tools)))
         for skill in profile.skills:
-            command.extend(("--skill", skill))
+            path = Path(skill)
+            bundled = self.skill_root / skill
+            resolved = bundled if not path.is_absolute() and bundled.exists() else path
+            command.extend(("--skill", str(resolved)))
         command.append(instruction)
 
         process = await asyncio.create_subprocess_exec(
