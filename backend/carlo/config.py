@@ -30,6 +30,8 @@ class Settings:
     worktree_root: str = DEFAULT_WORKTREE_ROOT
     max_attempts: int = 20
     action_cancel_grace_seconds: int = 10
+    ssh_known_hosts: str = ".carlo/ssh/known_hosts"
+    ssh_connect_timeout: int = 10
     app_origin: str = "http://127.0.0.1:8000"
     cookie_secure: bool = False
     session_hours: int = 24
@@ -56,6 +58,10 @@ class Settings:
             action_cancel_grace_seconds=_positive_integer(
                 "CARLO_ACTION_CANCEL_GRACE_SECONDS", 10
             ),
+            ssh_known_hosts=os.getenv(
+                "CARLO_SSH_KNOWN_HOSTS", ".carlo/ssh/known_hosts"
+            ),
+            ssh_connect_timeout=_positive_integer("CARLO_SSH_CONNECT_TIMEOUT", 10),
             app_origin=os.getenv("CARLO_APP_ORIGIN", "http://127.0.0.1:8000").rstrip("/"),
             cookie_secure=_boolean("CARLO_COOKIE_SECURE", False),
             session_hours=_positive_integer("CARLO_SESSION_HOURS", 24),

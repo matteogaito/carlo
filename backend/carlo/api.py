@@ -45,6 +45,7 @@ from .models import (
     ValidationRun,
 )
 from .provider import AgentProfile, CodingAgentProvider, ProviderError
+from .ssh import HostScan, SshError, SshTransport, validate_runner
 
 
 class ProjectCreate(BaseModel):
@@ -103,6 +104,28 @@ class LoginPayload(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class RunnerCreate(BaseModel):
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+    host: str
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str
+    identity_file: str
+    workspace_root: str = ".carlo"
+
+
+class RunnerUpdate(BaseModel):
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str | None = None
+    identity_file: str | None = None
+    workspace_root: str | None = None
+    enabled: bool | None = None
+
+
+class RunnerTrust(BaseModel):
+    fingerprint: str = Field(min_length=1, max_length=160)
+
+
 SESSION_COOKIE = "carlo_session"
 
 
@@ -110,8 +133,12 @@ def create_app(
     session_factory: async_sessionmaker[AsyncSession],
     provider: CodingAgentProvider,
     settings: Settings | None = None,
+    ssh_transport: SshTransport | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    ssh_transport = ssh_transport or SshTransport(
+        Path(settings.ssh_known_hosts), connect_timeout=settings.ssh_connect_timeout
+    )
     app = FastAPI(title="CARLO v3")
 
     async def get_session() -> AsyncIterator[AsyncSession]:
@@ -210,6 +237,120 @@ def create_app(
         projects = (await session.scalars(select(Project).order_by(Project.key))).all()
         return [_project_view(project) for project in projects]
 
+    @api.get("/runners")
+    async def list_runners(
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        runners = (await session.scalars(select(Runner).order_by(Runner.name))).all()
+        return [
+            {
+                "id": None,
+                "name": "local",
+                "type": "local",
+                "enabled": True,
+                "last_check_ok": True,
+            },
+            *[_runner_view(runner) for runner in runners],
+        ]
+
+    @api.post("/runners", status_code=status.HTTP_201_CREATED)
+    async def create_runner(
+        payload: RunnerCreate, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        if payload.name == "local":
+            raise HTTPException(409, "local is reserved")
+        runner = Runner(**payload.model_dump(), enabled=False)
+        try:
+            validate_runner(runner)
+            scan = await ssh_transport.scan_host(runner.host, runner.port)
+        except SshError as error:
+            raise HTTPException(422, str(error)) from error
+        runner.host_key = scan.host_key
+        runner.fingerprint = scan.fingerprint
+        session.add(runner)
+        try:
+            await session.commit()
+        except IntegrityError as error:
+            await session.rollback()
+            raise HTTPException(409, "runner name already exists") from error
+        await session.refresh(runner)
+        return _runner_view(runner)
+
+    @api.patch("/runners/{runner_id}")
+    async def update_runner(
+        runner_id: int,
+        payload: RunnerUpdate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        runner = await session.get(Runner, runner_id)
+        if runner is None:
+            raise HTTPException(404, "runner not found")
+        connection_fields = {
+            "host", "port", "username", "identity_file", "workspace_root"
+        }
+        changed_connection = bool(payload.model_fields_set & connection_fields)
+        for field in payload.model_fields_set:
+            setattr(runner, field, getattr(payload, field))
+        try:
+            validate_runner(runner)
+            if payload.enabled is True and (
+                not runner.fingerprint or runner.last_check_ok is not True
+            ):
+                raise SshError("runner must be trusted and tested before enabling")
+            if changed_connection:
+                scan = await ssh_transport.scan_host(runner.host, runner.port)
+                runner.host_key = scan.host_key
+                runner.fingerprint = scan.fingerprint
+                runner.enabled = False
+                runner.last_check_ok = None
+                runner.last_checked_at = None
+        except SshError as error:
+            raise HTTPException(422, str(error)) from error
+        await session.commit()
+        await session.refresh(runner)
+        return _runner_view(runner)
+
+    @api.post("/runners/{runner_id}/trust")
+    async def trust_runner(
+        runner_id: int,
+        payload: RunnerTrust,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        runner = await session.get(Runner, runner_id)
+        if runner is None:
+            raise HTTPException(404, "runner not found")
+        if not runner.host_key or not runner.fingerprint or runner.last_checked_at is not None:
+            raise HTTPException(409, "runner has no pending host scan")
+        scan = HostScan(
+            runner.host_key,
+            runner.fingerprint,
+            runner.host_key.split()[1],
+        )
+        try:
+            await ssh_transport.confirm_host(scan, payload.fingerprint)
+        except SshError as error:
+            raise HTTPException(409, str(error)) from error
+        await _check_runner(ssh_transport, runner)
+        runner.enabled = runner.last_check_ok is True
+        session.add(
+            Event(type="runner.trusted", payload={"runner_id": runner.id, "name": runner.name})
+        )
+        await session.commit()
+        await session.refresh(runner)
+        return _runner_view(runner)
+
+    @api.post("/runners/{runner_id}/test")
+    async def test_runner_connection(
+        runner_id: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        runner = await session.get(Runner, runner_id)
+        if runner is None:
+            raise HTTPException(404, "runner not found")
+        await _check_runner(ssh_transport, runner)
+        await session.commit()
+        await session.refresh(runner)
+        return _runner_view(runner)
+
     @api.get("/projects/{project_id}/actions")
     async def project_actions(
         project_id: int, session: AsyncSession = Depends(get_session)
@@ -273,8 +414,10 @@ def create_app(
                 "host": runner.host,
                 "port": runner.port,
                 "username": runner.username,
+                "identity_file": runner.identity_file,
                 "workspace_root": runner.workspace_root,
                 "fingerprint": runner.fingerprint,
+                "host_key": runner.host_key,
             }
 
         run = ActionRun(
@@ -739,6 +882,48 @@ def _project_view(project: Project) -> dict[str, Any]:
         "default_branch": project.default_branch,
         "integration_branch": project.integration_branch,
         "validation_commands": project.validation_commands,
+    }
+
+
+async def _check_runner(transport: SshTransport, runner: Runner) -> None:
+    runner.last_checked_at = datetime.now(UTC)
+    try:
+        await transport.check(runner)
+    except SshError as error:
+        runner.last_check_ok = False
+        runner.last_check_error = str(error)[:500]
+    else:
+        runner.last_check_ok = True
+        runner.last_check_error = None
+
+
+def _runner_view(runner: Runner) -> dict[str, Any]:
+    return {
+        "id": runner.id,
+        "name": runner.name,
+        "type": "ssh",
+        "host": runner.host,
+        "port": runner.port,
+        "username": runner.username,
+        "identity_file": runner.identity_file,
+        "workspace_root": runner.workspace_root,
+        "fingerprint": runner.fingerprint,
+        "pending_fingerprint": (
+            runner.fingerprint if runner.last_checked_at is None else None
+        ),
+        "pending_key_type": (
+            runner.host_key.split()[1]
+            if runner.host_key and runner.last_checked_at is None
+            else None
+        ),
+        "enabled": runner.enabled,
+        "last_check_ok": runner.last_check_ok,
+        "last_check_error": runner.last_check_error,
+        "last_checked_at": (
+            runner.last_checked_at.isoformat() if runner.last_checked_at else None
+        ),
+        "created_at": runner.created_at.isoformat(),
+        "updated_at": runner.updated_at.isoformat(),
     }
 
 

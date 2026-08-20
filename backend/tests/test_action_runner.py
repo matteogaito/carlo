@@ -244,3 +244,78 @@ async def test_executor_restart_reattaches_without_rerunning_command(tmp_path: P
     assert "recovered-output" in console
     assert console.count("$ ") == 1
     await engine.dispose()
+
+
+class FakeRemote:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+        self.copies: list[tuple[Path, str]] = []
+        self.raw_sent = False
+
+    async def execute(self, runner, script: str, *arguments: str):
+        self.calls.append((script, arguments))
+        assert "super-secret" not in str(arguments)
+        if "cat -- \"$runtime/state\"" in script:
+            return 0, b'{"exit_code": 0}', b""
+        if "tail -c" in script:
+            if self.raw_sent:
+                return 0, b"", b""
+            self.raw_sent = True
+            return 0, b"remote:super-secret\n", b""
+        if "printf '%s' \"$!\"" in script:
+            return 0, b"4321", b""
+        if "printf alive" in script:
+            return 0, b"alive", b""
+        return 0, b"", b""
+
+    async def copy_file(self, runner, source: Path, destination: str) -> None:
+        self.copies.append((source, destination))
+
+
+@pytest.mark.asyncio
+async def test_ssh_action_fetches_exact_commit_and_collects_redacted_output(
+    tmp_path: Path,
+) -> None:
+    engine, factory = await database()
+    repository = make_repository(tmp_path)
+    artifacts = tmp_path / "artifacts"
+    identity = tmp_path / "id_ed25519"
+    identity.write_text("private")
+    identity.chmod(0o600)
+    run_id = await add_run(factory, repository, artifacts, [f"{sys.executable} ok.py"])
+    async with factory() as session:
+        run = await session.get(ActionRun, run_id)
+        assert run is not None
+        run.runner_name = "linux-build"
+        run.origin = "ssh://git@example.invalid/repo.git"
+        run.runner_snapshot = {
+            "type": "ssh",
+            "name": "linux-build",
+            "host": "builder.example",
+            "port": 22,
+            "username": "deploy",
+            "identity_file": str(identity),
+            "workspace_root": ".carlo",
+            "fingerprint": "SHA256:abc",
+            "host_key": "builder.example ssh-ed25519 AAAATEST",
+        }
+        await session.commit()
+    remote = FakeRemote()
+    executor = ActionExecutor(factory, tmp_path / "worktrees", artifacts, ssh_transport=remote)
+
+    assert await ActionOrchestrator(engine, factory, executor.run).run_next() == run_id
+
+    async with factory() as session:
+        run = await session.get(ActionRun, run_id)
+        assert run is not None
+        assert run.status == "succeeded"
+        assert run.steps[0].status == "succeeded"
+        assert run.secret_path is None
+    console = Path(run.artifact_path).read_text()
+    assert "remote:***" in console
+    assert "super-secret" not in console
+    flattened = " ".join(str(call) for call in remote.calls)
+    assert run.commit_sha in flattened
+    assert run.origin in flattened
+    assert len(remote.copies) == 2
+    await engine.dispose()

@@ -8,6 +8,7 @@ from .config import Settings
 from .db import make_engine, make_session_factory
 from .orchestrator import ImplementationPipeline, Orchestrator
 from .provider import PiProvider
+from .ssh import SshTransport
 from .telegram import (
     TelegramNotifier,
     TelegramTransport,
@@ -38,6 +39,10 @@ async def run() -> None:
         Path(settings.worktree_root),
         Path(settings.artifact_root),
         settings.action_cancel_grace_seconds,
+        SshTransport(
+            Path(settings.ssh_known_hosts),
+            connect_timeout=settings.ssh_connect_timeout,
+        ),
     )
     action_orchestrator = ActionOrchestrator(engine, factory, action_executor.run)
     action_task = asyncio.create_task(_action_loop(action_orchestrator))
