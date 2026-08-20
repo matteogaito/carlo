@@ -4,11 +4,13 @@ import {
   AuthenticationRequired,
   httpApi,
   type Api,
+  type Event,
   type Project,
   type Task,
   type TaskStatus,
   type User,
 } from './api'
+import { ActionsView } from './ActionsView'
 import './styles.css'
 
 const columns: { status: TaskStatus; label: string; code: string }[] = [
@@ -27,6 +29,8 @@ export function App({ api = httpApi }: { api?: Api }) {
   const [selected, setSelected] = useState<Task | null>(null)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
+  const [view, setView] = useState<'board' | 'actions'>('board')
+  const [lastEvent, setLastEvent] = useState<Event | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -60,6 +64,7 @@ export function App({ api = httpApi }: { api?: Api }) {
     void refresh()
     return api.events(
       (event) => {
+        setLastEvent(event)
         void refresh()
         if (event.task_id && event.task_id === selected?.id) {
           void api.getTask(event.task_id).then(setSelected)
@@ -121,10 +126,14 @@ export function App({ api = httpApi }: { api?: Api }) {
         </div>
       </header>
 
-      <CreateStrip api={api} projects={projects} refresh={refresh} setError={setError} />
+      <nav className="view-tabs" aria-label="Main views">
+        <button className={view === 'board' ? 'active' : ''} onClick={() => { setView('board'); setSelected(null) }}>Board</button>
+        <button className={view === 'actions' ? 'active' : ''} onClick={() => { setView('actions'); setSelected(null) }}>Actions</button>
+      </nav>
+      {view === 'board' && <CreateStrip api={api} projects={projects} refresh={refresh} setError={setError} />}
       {error && <div className="error-banner" role="alert">{error}</div>}
 
-      <main className={selected ? 'workspace detail-open' : 'workspace'}>
+      {view === 'board' ? <main className={selected ? 'workspace detail-open' : 'workspace'}>
         <section className="board" aria-label="Task board">
           {columns.map((column) => {
             const cards = tasks.filter((task) => task.status === column.status)
@@ -166,7 +175,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             )}
           />
         )}
-      </main>
+      </main> : <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} />}
     </div>
   )
 }

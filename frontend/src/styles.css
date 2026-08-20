@@ -43,6 +43,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .signed-user { color: #aebbb4; }
 .sign-out { border: 1px solid #718078; color: var(--paper); background: transparent; padding: 5px 8px; font: inherit; text-transform: uppercase; }
 .sign-out:hover { border-color: var(--paper); }
+.view-tabs { display: flex; gap: 4px; padding: 8px 24px 0; background: #dce2de; border-bottom: 1px solid var(--line); }
+.view-tabs button { min-width: 100px; border: 1px solid transparent; border-bottom: 3px solid transparent; padding: 9px 14px 7px; color: #536159; background: transparent; font-weight: 750; }
+.view-tabs button.active { color: var(--ink); border-bottom-color: var(--pine); background: var(--paper); }
 
 .auth-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: var(--ink); }
 .auth-shell > p { color: #aebbb4; font: 600 12px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; }
@@ -107,6 +110,64 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .git-evidence dd { margin: 0; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .task-detail footer { padding: 18px 24px 30px; }
 
+.actions-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 122px); }
+.actions-workspace.detail-open { grid-template-columns: minmax(0, 1fr) 460px; }
+.actions-page { padding: 28px 24px 48px; }
+.actions-heading { display: flex; align-items: end; justify-content: space-between; margin-bottom: 22px; }
+.actions-heading span, .project-action-card header span, .modal-panel header span { color: var(--pine); font: 750 9px ui-monospace, monospace; letter-spacing: .16em; }
+.actions-heading h1 { margin: 3px 0 0; font: 750 30px "Avenir Next", ui-rounded, sans-serif; }
+.actions-heading button, .action-row > button, .modal-panel button, .run-history-list button { border: 1px solid var(--ink); padding: 8px 12px; color: var(--ink); background: transparent; font-weight: 700; }
+.project-action-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 18px; }
+.project-action-card { background: var(--paper); border: 1px solid #aeb8b2; box-shadow: 0 5px 0 rgb(21 32 28 / .06); }
+.project-action-card > header { display: flex; align-items: center; justify-content: space-between; padding: 17px 18px; border-bottom: 1px solid var(--line); }
+.project-action-card h2 { margin: 2px 0 0; font: 750 21px "Avenir Next", ui-rounded, sans-serif; }
+.project-action-card header code { color: #657169; font-size: 11px; }
+.action-list { display: grid; }
+.action-row { position: relative; display: grid; grid-template-columns: 6px minmax(0, 1fr) auto auto; align-items: center; gap: 12px; min-height: 72px; padding: 10px 14px 10px 0; border-bottom: 1px solid #d6dcd8; }
+.action-row:last-child { border-bottom: 0; }
+.action-row strong, .action-row small { display: block; }
+.action-row small { margin-top: 5px; color: #657169; font: 11px ui-monospace, monospace; }
+.action-row button:disabled { cursor: not-allowed; opacity: .45; }
+.status-rail { align-self: stretch; background: var(--line); }
+.status-rail.running, .status-rail.queued { background: var(--brass); }
+.status-rail.succeeded { background: var(--pine); }
+.status-rail.failed, .status-rail.interrupted { background: var(--fault); }
+.run-history { border: 0 !important; color: #657169 !important; font: 10px ui-monospace, monospace !important; }
+.action-warning { margin: 0; padding: 9px 18px; color: white; background: var(--fault); font-size: 12px; }
+.run-history-list { margin-top: 28px; }
+.run-history-list h2 { font: 700 17px "Avenir Next", ui-rounded, sans-serif; }
+.run-history-list button { display: grid; grid-template-columns: 60px 1fr auto; gap: 12px; width: 100%; margin-top: -1px; text-align: left; background: var(--paper); }
+.run-history-list em { color: var(--pine); font: 700 10px ui-monospace, monospace; text-transform: uppercase; }
+.action-detail { height: calc(100vh - 122px); }
+.action-step { display: grid; grid-template-columns: 24px 1fr auto; gap: 8px; align-items: start; margin: 8px 0 !important; }
+.action-step code { overflow-wrap: anywhere; }
+.action-step span { color: var(--pine); font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
+.action-console { min-height: 220px; max-height: 45vh; overflow: auto; padding: 14px; color: #dfe8e3 !important; background: #111a16; border-left: 4px solid var(--pine); }
+.danger { border-color: var(--fault) !important; color: var(--fault) !important; }
+
+.modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(21 32 28 / .62); }
+.modal-panel { width: min(640px, 100%); max-height: calc(100vh - 48px); overflow: auto; background: var(--paper); border-top: 5px solid var(--pine); box-shadow: 0 24px 70px rgb(0 0 0 / .28); }
+.modal-panel > header { display: flex; justify-content: space-between; align-items: start; padding: 20px 24px; border-bottom: 1px solid var(--line); }
+.modal-panel h2 { margin: 3px 0 0; font: 750 24px "Avenir Next", ui-rounded, sans-serif; }
+.modal-panel dl { display: grid; grid-template-columns: 110px 1fr; gap: 9px; margin: 0; padding: 20px 24px; }
+.modal-panel dt { color: #657169; }
+.modal-panel dd { margin: 0; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.modal-panel ol { margin: 0; padding: 0 24px 20px 56px; }
+.modal-panel li { padding: 5px; }
+.modal-panel > footer { display: flex; justify-content: end; gap: 8px; padding: 16px 24px 22px; border-top: 1px solid var(--line); }
+.modal-panel .primary { color: white; background: var(--pine); border-color: var(--pine); }
+.runner-panel { width: min(780px, 100%); }
+.runner-list { display: grid; padding: 8px 24px; }
+.runner-list article { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr) auto; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.runner-list small { display: block; color: #657169; margin-top: 3px; }
+.runner-list code { overflow-wrap: anywhere; font-size: 10px; }
+.runner-actions { display: flex; gap: 5px; }
+.runner-form { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 20px 24px 24px; background: #e4e9e6; }
+.runner-form h3 { grid-column: 1 / -1; margin: 0; }
+.runner-form label { display: grid; gap: 4px; color: var(--pine); font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
+.runner-form input { width: 100%; border: 1px solid #86928b; padding: 8px; }
+.runner-form button { align-self: end; }
+
 @keyframes slow-pulse { 50% { opacity: .48; transform: scale(.84); } }
 @keyframes runtime-rail { to { background-position: 0 200%; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -117,4 +178,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .create-strip form { min-width: max-content; }
   .workspace.detail-open { display: block; }
   .task-detail { position: fixed; inset: 0; z-index: 5; width: 100%; height: 100vh; }
+  .actions-workspace.detail-open { display: block; }
+  .project-action-grid { grid-template-columns: 1fr; }
+  .action-row { grid-template-columns: 6px minmax(0, 1fr) auto; }
+  .run-history { display: none; }
+  .runner-form { grid-template-columns: 1fr; }
 }

@@ -78,6 +78,89 @@ export interface Event {
   created_at: string
 }
 
+export interface ActionDefinition {
+  key: string
+  name: string
+  runner: string
+  env_file: string | null
+  commands: string[]
+}
+
+export interface ActionCatalog {
+  project_id: number
+  commit_sha: string | null
+  branch: string | null
+  dirty_paths: string[]
+  actions: ActionDefinition[]
+  error: string | null
+}
+
+export interface ActionStep {
+  position: number
+  command: string
+  status: string
+  started_at: string | null
+  finished_at: string | null
+  exit_code: number | null
+  log_start: number | null
+  log_end: number | null
+}
+
+export interface ActionRun {
+  id: number
+  project_id: number
+  action_key: string
+  action_name: string
+  definition: ActionDefinition
+  runner_name: string
+  runner_snapshot: Record<string, unknown>
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
+  internal_stage: string
+  commit_sha: string
+  branch_name: string | null
+  origin: string | null
+  env_file: string | null
+  env_names: string[]
+  requested_at: string
+  started_at: string | null
+  finished_at: string | null
+  cancel_requested_at: string | null
+  current_step: number | null
+  workspace_path: string | null
+  artifact_path: string
+  secret_path: string | null
+  log_offset: number
+  recent_output: string
+  exit_code: number | null
+  error: string | null
+  cleanup_pending: boolean
+  steps: ActionStep[]
+}
+
+export interface ConsoleChunk {
+  offset: number
+  next_offset: number
+  text: string
+  eof: boolean
+}
+
+export interface Runner {
+  id: number | null
+  name: string
+  type: 'local' | 'ssh'
+  host?: string
+  port?: number
+  username?: string
+  identity_file?: string
+  workspace_root?: string
+  enabled: boolean
+  fingerprint?: string | null
+  pending_fingerprint?: string | null
+  last_check_ok: boolean | null
+  last_check_error?: string | null
+  last_checked_at?: string | null
+}
+
 export interface Api {
   me(): Promise<User>
   login(username: string, password: string): Promise<User>
@@ -89,6 +172,17 @@ export interface Api {
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'>): Promise<Task>
   startPlanning(id: string): Promise<Task>
   approvePlan(id: string, revision: number, version: number): Promise<Task>
+  listProjectActions(projectId: number): Promise<ActionCatalog>
+  listActionRuns(projectId?: number): Promise<ActionRun[]>
+  getActionRun(id: number): Promise<ActionRun>
+  createActionRun(projectId: number, actionKey: string): Promise<ActionRun>
+  getActionConsole(id: number, offset?: number): Promise<ConsoleChunk>
+  cancelActionRun(id: number): Promise<ActionRun>
+  listRunners(): Promise<Runner[]>
+  createRunner(input: Omit<Runner, 'id' | 'enabled' | 'last_check_ok'>): Promise<Runner>
+  updateRunner(id: number, input: Partial<Runner>): Promise<Runner>
+  trustRunner(id: number, fingerprint: string): Promise<Runner>
+  testRunner(id: number): Promise<Runner>
   events(
     onEvent: (event: Event) => void,
     onStatus?: (connected: boolean) => void,
@@ -128,6 +222,22 @@ export const httpApi: Api = {
     method: 'POST',
     body: JSON.stringify({ revision, version }),
   }),
+  listProjectActions: (projectId) => request(`/api/projects/${projectId}/actions`),
+  listActionRuns: (projectId) => request(`/api/action-runs${projectId ? `?project_id=${projectId}` : ''}`),
+  getActionRun: (id) => request(`/api/action-runs/${id}`),
+  createActionRun: (projectId, actionKey) => request(
+    `/api/projects/${projectId}/actions/${encodeURIComponent(actionKey)}/runs`,
+    { method: 'POST' },
+  ),
+  getActionConsole: (id, offset = 0) => request(`/api/action-runs/${id}/console?offset=${offset}`),
+  cancelActionRun: (id) => request(`/api/action-runs/${id}/cancel`, { method: 'POST' }),
+  listRunners: () => request('/api/runners'),
+  createRunner: (input) => request('/api/runners', { method: 'POST', body: JSON.stringify(input) }),
+  updateRunner: (id, input) => request(`/api/runners/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  trustRunner: (id, fingerprint) => request(`/api/runners/${id}/trust`, {
+    method: 'POST', body: JSON.stringify({ fingerprint }),
+  }),
+  testRunner: (id) => request(`/api/runners/${id}/test`, { method: 'POST' }),
   events(onEvent, onStatus, onAuthenticationRequired) {
     let closed = false
     let socket: WebSocket | undefined
