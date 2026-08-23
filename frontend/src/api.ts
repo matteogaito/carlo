@@ -7,6 +7,21 @@ export interface User {
 
 export class AuthenticationRequired extends Error {}
 
+export interface ImplementationTask {
+  title: string
+  prompt: string
+  intervention_points: string[]
+}
+
+export interface PlannerProfile {
+  name: string
+  provider: string
+  model: string | null
+  effort: string | null
+  tools: string[]
+  skills: string[]
+}
+
 export interface Project {
   id: number
   name: string
@@ -22,6 +37,12 @@ export interface Plan {
   brief_markdown: string
   plan_markdown: string
   metadata: {
+    title?: string
+    description?: string
+    key_points?: string[]
+    implementation_tasks?: ImplementationTask[]
+    planner_profile?: PlannerProfile
+    amendment?: { summary: string; reason: string }
     validation_commands?: string[]
     skills?: string[]
     implementation_phases?: string[]

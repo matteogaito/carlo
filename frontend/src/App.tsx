@@ -6,6 +6,7 @@ import {
   httpApi,
   type Api,
   type Event,
+  type Plan,
   type Project,
   type Task,
   type TaskStatus,
@@ -385,6 +386,11 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
 }) {
   const validations = task.plan?.metadata.validation_commands || []
   const phases = task.plan?.metadata.implementation_phases || []
+  const structuredPlan = Boolean(
+    task.plan?.metadata.title
+    && task.plan.metadata.description
+    && task.plan.metadata.implementation_tasks?.length,
+  )
   const [resizing, setResizing] = useState(false)
   const planningActivity = (task.events || [])
     .filter((event) => event.type.startsWith('planning.'))
@@ -449,9 +455,11 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
         </form>
       </section>}
       {task.prompt_path && <section><h3>Megaprompt file</h3><code>{task.prompt_path}</code></section>}
-      <section><h3>Brief</h3>{task.plan ? <TaskMarkdown>{task.plan.brief_markdown}</TaskMarkdown> : <p>Planning has not produced a Brief yet.</p>}</section>
-      <section><h3>Plan</h3>{task.plan ? <TaskMarkdown>{task.plan.plan_markdown}</TaskMarkdown> : <p>No Plan yet.</p>}</section>
-      {!!phases.length && <section><h3>Implementation phases</h3><ol className="implementation-phases">
+      {task.plan && structuredPlan ? <StructuredPlan plan={task.plan} /> : <>
+        <section><h3>Brief</h3>{task.plan ? <TaskMarkdown>{task.plan.brief_markdown}</TaskMarkdown> : <p>Planning has not produced a Brief yet.</p>}</section>
+        <section><h3>Plan</h3>{task.plan ? <TaskMarkdown>{task.plan.plan_markdown}</TaskMarkdown> : <p>No Plan yet.</p>}</section>
+      </>}
+      {!structuredPlan && !!phases.length && <section><h3>Implementation phases</h3><ol className="implementation-phases">
         {phases.map((phase, index) => <li key={`${index}-${phase}`}><span>{index + 1}</span><p>{phase}</p></li>)}
       </ol></section>}
       <section>
@@ -484,6 +492,67 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
       ))}</section>}
     </aside>
   )
+}
+
+function StructuredPlan({ plan }: { plan: Plan }) {
+  const metadata = plan.metadata
+  const tasks = metadata.implementation_tasks || []
+  const planner = metadata.planner_profile
+  const implementationSkills = metadata.skills || []
+  return <>
+    <section className="plan-summary">
+      <h3>Plan</h3>
+      <h4>{metadata.title}</h4>
+      <p>{metadata.description}</p>
+      {!!metadata.key_points?.length && <ul className="plan-key-points">
+        {metadata.key_points.map((point) => <li key={point}>{point}</li>)}
+      </ul>}
+      {metadata.amendment && <aside
+        className={`plan-amendment${plan.approved_at ? ' approved' : ''}`}
+        role={plan.approved_at ? undefined : 'alert'}
+      >
+        <b>{plan.approved_at ? 'Approved plan amendment' : 'Plan amendment needs approval'}</b>
+        <strong>{metadata.amendment.summary}</strong>
+        <p>{metadata.amendment.reason}</p>
+      </aside>}
+      <div className="skill-ledger">
+        <SkillChips label="Used to plan" skills={planner?.skills || []} empty="Not recorded" />
+        <SkillChips label="For implementation" skills={implementationSkills} empty="None selected" />
+      </div>
+      {planner && <details className="planning-runtime">
+        <summary>Planning runtime</summary>
+        <dl>
+          <dt>Profile</dt><dd>{planner.name}</dd>
+          <dt>Provider</dt><dd>{planner.provider}</dd>
+          <dt>Model</dt><dd>{planner.model || 'Default'}</dd>
+          <dt>Effort</dt><dd>{planner.effort || 'Default'}</dd>
+          <dt>Tools</dt><dd>{planner.tools.join(', ') || 'None'}</dd>
+        </dl>
+      </details>}
+    </section>
+    <section className="plan-task-list">
+      <h3>Implementation tasks</h3>
+      {tasks.map((item, index) => <details className="plan-task" key={`${index}-${item.title}`}>
+        <summary><span>{index + 1}</span><strong>{item.title}</strong></summary>
+        <div className="plan-task-body">
+          <h4>Prompt</h4>
+          <TaskMarkdown>{item.prompt}</TaskMarkdown>
+          {!!item.intervention_points.length && <>
+            <h4>Intervention points</h4>
+            <ul>{item.intervention_points.map((point) => <li key={point}><code>{point}</code></li>)}</ul>
+          </>}
+        </div>
+      </details>)}
+    </section>
+    <section className="plan-source-material">
+      <details><summary>Repository Brief</summary><TaskMarkdown>{plan.brief_markdown}</TaskMarkdown></details>
+      <details><summary>Full technical plan</summary><TaskMarkdown>{plan.plan_markdown}</TaskMarkdown></details>
+    </section>
+  </>
+}
+
+function SkillChips({ label, skills, empty }: { label: string; skills: string[]; empty: string }) {
+  return <div><b>{label}</b><span>{skills.length ? skills.map((skill) => <code key={skill}>{skill}</code>) : <i>{empty}</i>}</span></div>
 }
 
 function clampDetailWidth(width: number): number {

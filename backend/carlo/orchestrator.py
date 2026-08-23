@@ -647,9 +647,11 @@ class ImplementationPipeline:
     def _implementation_instruction(
         task: Task, plan: PlanRevision, strategy: str
     ) -> str:
+        implementation_tasks = plan.metadata_json.get("implementation_tasks", [])
         return (
             f"Implement {task.id}: {task.goal}\n\n"
             f"Approved plan:\n{plan.plan_markdown}\n\n"
+            f"Implementation tasks:\n{json.dumps(implementation_tasks)}\n\n"
             f"Current strategy: {strategy}\n"
             "Work only inside this worktree. Run no undeclared deployment commands."
         )

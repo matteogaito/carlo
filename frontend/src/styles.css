@@ -139,6 +139,47 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .implementation-phases li { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-bottom: 1px solid var(--line); }
 .implementation-phases li span { display: grid; flex: 0 0 24px; height: 24px; place-items: center; border-radius: 50%; color: white; background: var(--pine); font: 700 11px ui-monospace, monospace; }
 .implementation-phases p { margin: 2px 0 0; }
+.plan-summary h4 { margin: 2px 0 8px; font: 750 22px "Avenir Next", ui-rounded, sans-serif; }
+.plan-summary > p { margin: 0; color: #445149; }
+.plan-key-points { margin: 14px 0 0; padding-left: 18px; }
+.plan-key-points li { margin: 6px 0; }
+.plan-amendment { display: grid; gap: 6px; margin-top: 16px; padding: 12px 14px; border: 1px solid #b76d27; border-left-width: 4px; background: #fff4e7; }
+.plan-amendment b { color: #8a4b14; font: 700 9px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.plan-amendment strong { font: 700 14px "Avenir Next", ui-rounded, sans-serif; }
+.plan-amendment p { margin: 0; font-size: 13px; }
+.plan-amendment.approved { border-color: #9baa9f; background: #edf1ee; }
+.plan-amendment.approved b { color: var(--pine); }
+.skill-ledger { display: grid; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.skill-ledger > div { display: grid; grid-template-columns: 130px 1fr; gap: 10px; align-items: start; }
+.skill-ledger b { padding-top: 4px; color: #637068; font: 700 9px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.skill-ledger span { display: flex; flex-wrap: wrap; gap: 5px; }
+.skill-ledger code { padding: 4px 7px; border: 1px solid #bcc7c0; border-radius: 999px; background: #e8edea; color: var(--pine); font: 650 10px ui-monospace, monospace; }
+.skill-ledger i { padding-top: 3px; color: #758179; font-size: 12px; }
+.planning-runtime { margin-top: 14px; }
+.planning-runtime summary, .plan-source-material summary { cursor: pointer; color: var(--pine); font: 700 12px "Avenir Next", ui-rounded, sans-serif; }
+.planning-runtime dl { display: grid; grid-template-columns: 75px 1fr; gap: 6px 10px; margin: 12px 0 0; font-size: 12px; }
+.planning-runtime dt { color: #69756e; }
+.planning-runtime dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+.plan-task-list { background: #f4f4f1; }
+.plan-task { margin-top: 8px; border: 1px solid #c9d1cc; background: var(--paper); }
+.plan-task summary { display: flex; gap: 10px; align-items: center; padding: 12px; cursor: pointer; list-style: none; }
+.plan-task summary::-webkit-details-marker { display: none; }
+.plan-task summary::after { content: "+"; margin-left: auto; color: var(--pine); font: 700 18px ui-monospace, monospace; }
+.plan-task[open] summary::after { content: "−"; }
+.plan-task summary span { display: grid; flex: 0 0 24px; height: 24px; place-items: center; border-radius: 50%; color: white; background: var(--pine); font: 700 11px ui-monospace, monospace; }
+.plan-task summary strong { font: 700 14px "Avenir Next", ui-rounded, sans-serif; }
+.plan-task-body { padding: 4px 14px 16px 48px; border-top: 1px solid var(--line); }
+.plan-task-body h4 { margin: 14px 0 6px; color: #69756e; font: 700 9px ui-monospace, monospace; letter-spacing: .09em; text-transform: uppercase; }
+.plan-task-body ul { margin: 6px 0 0; padding-left: 18px; }
+.plan-task-body li { margin: 6px 0; }
+.plan-task-body code { overflow-wrap: anywhere; font-size: 11px; }
+.plan-source-material { display: grid; gap: 12px; }
+.plan-source-material details[open] summary { margin-bottom: 12px; }
+
+@media (max-width: 600px) {
+  .skill-ledger > div { grid-template-columns: 1fr; gap: 4px; }
+  .plan-task-body { padding-left: 14px; }
+}
 
 .actions-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 122px); }
 .actions-workspace.detail-open { grid-template-columns: minmax(0, 1fr) 460px; }

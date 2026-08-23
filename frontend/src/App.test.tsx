@@ -119,6 +119,65 @@ describe('CARLO board', () => {
     expect(detail.style.width).toBe('624px')
   })
 
+  it('summarizes a structured Plan and expands its implementation tasks', async () => {
+    const planned: Task = {
+      ...task,
+      status: 'NOT_READY',
+      stage: 'awaiting_approval',
+      plan: {
+        ...task.plan!,
+        approved_at: null,
+        metadata: {
+          title: 'Deliver secure login',
+          description: 'Reuse the existing session boundary without changing public errors.',
+          key_points: ['Keep current clients compatible', 'Validate the complete login flow'],
+          implementation_tasks: [{
+            title: 'Add the session endpoint',
+            prompt: 'Implement login through the existing authentication service.',
+            intervention_points: ['backend/carlo/api.py:create_app', 'backend/tests/test_auth.py'],
+          }],
+          planner_profile: {
+            name: 'plan', provider: 'pi', model: 'openai/gpt-5.6-sol', effort: 'high',
+            tools: ['read', 'grep'], skills: ['carlo-planning', 'python-backend'],
+          },
+          amendment: {
+            summary: 'The public response must change',
+            reason: 'The existing envelope cannot represent the required state.',
+          },
+          skills: ['testing'],
+          validation_commands: ['pytest -q'],
+        },
+      },
+    }
+    render(<App api={{ ...api, listTasks: async () => [planned], getTask: async () => planned }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    expect(screen.getByRole('heading', { name: 'Deliver secure login' })).toBeTruthy()
+    expect(screen.getByText('Reuse the existing session boundary without changing public errors.')).toBeTruthy()
+    expect(screen.getByText('Keep current clients compatible')).toBeTruthy()
+    expect(screen.getByText('carlo-planning')).toBeTruthy()
+    expect(screen.getByText('python-backend')).toBeTruthy()
+    expect(screen.getByText('testing')).toBeTruthy()
+    expect(screen.getByText('Plan amendment needs approval')).toBeTruthy()
+    expect(screen.getByText('The public response must change')).toBeTruthy()
+    expect(screen.getByText('The existing envelope cannot represent the required state.')).toBeTruthy()
+
+    const taskTitle = screen.getByText('Add the session endpoint')
+    const disclosure = taskTitle.closest('details') as HTMLDetailsElement
+    expect(disclosure.open).toBe(false)
+    await userEvent.click(taskTitle)
+    expect(disclosure.open).toBe(true)
+    expect(screen.getByText('Implement login through the existing authentication service.')).toBeTruthy()
+    expect(screen.getByText('backend/carlo/api.py:create_app')).toBeTruthy()
+
+    cleanup()
+    const approved = { ...planned, plan: { ...planned.plan!, approved_at: '2026-08-23T20:00:00Z' } }
+    render(<App api={{ ...api, listTasks: async () => [approved], getTask: async () => approved }} />)
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    expect(screen.getByText('Approved plan amendment')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('creates a task from an uploaded Markdown megaprompt', async () => {
     const project: Project = {
       id: 1,

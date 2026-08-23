@@ -63,6 +63,16 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
                 "brief_markdown": "# Brief\nEvidence: README.md",
                 "plan_markdown": "# Plan\nRun the existing tests.",
                 "metadata": {
+                    "title": "Add authenticated login",
+                    "description": "Reuse the existing API boundary and session storage.",
+                    "key_points": ["Preserve the current error envelope"],
+                    "implementation_tasks": [
+                        {
+                            "title": "Add the login endpoint",
+                            "prompt": "Implement the endpoint using the existing auth service.",
+                            "intervention_points": ["backend/carlo/api.py:create_app"],
+                        }
+                    ],
                     "skills": ["testing"],
                     "validation_commands": ["pytest -q"],
                     "browser_validation": False,
@@ -93,6 +103,18 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
     )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
+    async with factory() as session:
+        session.add(
+            AgentProfileRecord(
+                name="plan",
+                provider="pi",
+                model="openai/gpt-5.6-sol",
+                effort="high",
+                permissions={"tools": ["read", "grep", "find", "ls", "bash"]},
+                default_skills=["carlo-planning", "python-backend"],
+            )
+        )
+        await session.commit()
     app = create_app(factory, provider, Settings(app_origin="http://test"))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -129,6 +151,16 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         planned = (await client.get(f'/api/tasks/{task["id"]}')).json()
         assert planned["stage"] == "awaiting_approval"
         assert planned["plan"]["metadata"]["validation_commands"] == ["pytest -q"]
+        assert planned["plan"]["metadata"]["title"] == "Add authenticated login"
+        assert planned["plan"]["metadata"]["implementation_tasks"][0]["title"] == "Add the login endpoint"
+        assert planned["plan"]["metadata"]["planner_profile"] == {
+            "name": "plan",
+            "provider": "pi",
+            "model": "openai/gpt-5.6-sol",
+            "effort": "high",
+            "tools": ["read", "grep", "find", "ls", "bash"],
+            "skills": ["carlo-planning", "python-backend"],
+        }
         activity = [event for event in planned["events"] if event["type"].startswith("planning.")]
         assert sum(event["type"] == "planning.drafting" for event in activity) == 1
         assert any(
@@ -170,7 +202,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         assert updated.json()["model"] == "openai/gpt-5"
 
     assert provider.calls[0][0].name == "plan"
-    assert provider.calls[0][0].skills == ("carlo-planning",)
+    assert provider.calls[0][0].skills == ("carlo-planning", "python-backend")
     assert provider.calls[0][1].startswith("/skill:carlo-planning ")
     assert provider.calls[0][2] == str(repository)
     await engine.dispose()

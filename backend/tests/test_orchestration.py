@@ -82,6 +82,35 @@ def test_major_deviation_is_extracted_from_provider_output() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (
+            {
+                "implementation_tasks": [
+                    {
+                        "title": "Add endpoint",
+                        "prompt": "Reuse the existing API boundary.",
+                        "intervention_points": ["backend/carlo/api.py:create_app"],
+                    }
+                ]
+            },
+            '"prompt": "Reuse the existing API boundary."',
+        ),
+        ({}, "Implementation tasks:\n[]"),
+    ],
+)
+def test_implementation_instruction_preserves_structured_plan_tasks(
+    metadata: dict, expected: str
+) -> None:
+    task = Task(id="CAR-1", goal="Add health endpoint")
+    plan = PlanRevision(plan_markdown="Concise approved overview", metadata_json=metadata)
+
+    instruction = ImplementationPipeline._implementation_instruction(task, plan, "follow plan")
+
+    assert expected in instruction
+
+
 @pytest.mark.asyncio
 async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -> None:
     repository = tmp_path / "repo"

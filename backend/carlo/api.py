@@ -115,6 +115,10 @@ class ProfileUpdate(BaseModel):
 
 
 class PlanMetadata(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    key_points: list[str] = Field(default_factory=list)
+    implementation_tasks: list["ImplementationTask"] = Field(default_factory=list)
     skills: list[str]
     implementation_phases: list[str] = Field(default_factory=list)
     validation_commands: list[str]
@@ -124,6 +128,12 @@ class PlanMetadata(BaseModel):
     deployment_expected: bool
     risk_flags: list[str]
     affected_areas: list[str]
+
+
+class ImplementationTask(BaseModel):
+    title: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    intervention_points: list[str] = Field(default_factory=list)
 
 
 class PlanPayload(BaseModel):
@@ -1008,12 +1018,21 @@ def create_app(
                 )
             )
         ) or 1
+        metadata = output.metadata.model_dump()
+        metadata["planner_profile"] = {
+            "name": profile.name,
+            "provider": profile.provider,
+            "model": provider_profile.model,
+            "effort": provider_profile.effort,
+            "tools": list(provider_profile.tools),
+            "skills": list(provider_profile.skills),
+        }
         plan = PlanRevision(
             task=task,
             revision=revision,
             brief_markdown=output.brief_markdown,
             plan_markdown=output.plan_markdown,
-            metadata_json=output.metadata.model_dump(),
+            metadata_json=metadata,
         )
         task.status, task.stage = transition(task.status, task.stage, "planned")
         task.planning_question = None
@@ -1292,6 +1311,16 @@ def _planning_instruction(task: Task, *, fresh_rework: bool = False) -> str:
         "brief_markdown": "evidence-oriented repository understanding",
         "plan_markdown": "concrete implementation plan",
         "metadata": {
+            "title": "short implementation title",
+            "description": "concise description of the approved approach",
+            "key_points": [],
+            "implementation_tasks": [
+                {
+                    "title": "concise task title",
+                    "prompt": "self-contained instruction for the implementation agent",
+                    "intervention_points": [],
+                }
+            ],
             "skills": [],
             "implementation_phases": [],
             "validation_commands": [],
