@@ -1,0 +1,4 @@
+interface:
+  display_name: "CARLO Discovery"
+  short_description: "Explore repositories without changing source"
+  default_prompt: "Use $carlo-discovery to investigate this project with me."

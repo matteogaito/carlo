@@ -1,0 +1,4 @@
+interface:
+  display_name: "CARLO UI Design"
+  short_description: "Design CARLO with its saved visual language"
+  default_prompt: "Use $carlo-ui-design to design this CARLO interface."

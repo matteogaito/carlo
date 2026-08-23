@@ -32,6 +32,7 @@ ui:
 	cd frontend && npm run dev
 
 test:
+	node --test extensions/*.test.mjs
 	cd backend && uv run pytest -q
 	cd backend && uv run alembic check
 	cd frontend && npm test
