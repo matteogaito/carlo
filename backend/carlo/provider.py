@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -11,6 +11,9 @@ from .maintenance import pi_process_lock
 
 class ProviderError(RuntimeError):
     pass
+
+
+AgentEventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +73,7 @@ class CodingAgentProvider(Protocol):
         instruction: str,
         cwd: str,
         session_id: str,
+        on_event: AgentEventHandler | None = None,
     ) -> AgentResult: ...
 
     async def open_conversation(
@@ -144,6 +148,7 @@ class PiProvider:
         instruction: str,
         cwd: str,
         session_id: str,
+        on_event: AgentEventHandler | None = None,
     ) -> AgentResult:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         command = [
@@ -168,23 +173,36 @@ class PiProvider:
                 stderr=asyncio.subprocess.PIPE,
             )
             self._processes[session_id] = process
+            stderr_task = asyncio.create_task(process.stderr.read())
+            events: list[dict[str, Any]] = []
             try:
-                stdout, stderr = await process.communicate()
+                while line := await process.stdout.readline():
+                    try:
+                        event = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                        raise ProviderError("Pi returned malformed JSON events") from error
+                    if not isinstance(event, dict):
+                        raise ProviderError("Pi returned a non-object JSON event")
+                    events.append(event)
+                    if on_event:
+                        await on_event(event)
+                await process.wait()
+            except BaseException:
+                if process.returncode is None:
+                    process.terminate()
+                    await process.wait()
+                raise
             finally:
                 self._processes.pop(session_id, None)
+                stderr = await stderr_task
 
         if process.returncode:
             raise ProviderError(stderr.decode(errors="replace").strip())
-        try:
-            events = tuple(
-                json.loads(line) for line in stdout.decode().splitlines() if line.strip()
-            )
-        except json.JSONDecodeError as error:
-            raise ProviderError("Pi returned malformed JSON events") from error
+        event_tuple = tuple(events)
         return AgentResult(
             session_id=session_id,
-            output=_final_output(events),
-            events=events,
+            output=_final_output(event_tuple),
+            events=event_tuple,
             exit_code=process.returncode or 0,
         )
 

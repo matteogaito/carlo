@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,6 +13,8 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
     executable.write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
+        "print(json.dumps({'type': 'agent_start'}))\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'read', 'args': {'path': 'README.md'}}))\n"
         "print(json.dumps({'type': 'final', 'output': json.dumps({'brief_markdown': 'B', 'plan_markdown': 'P', 'metadata': {}}), 'argv': sys.argv[1:]}))\n"
     )
     executable.chmod(0o755)
@@ -27,10 +30,19 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
         skills=("carlo-planning",),
     )
 
-    result = await provider.run(profile, "Inspect the repo", str(tmp_path), "CAR-1-plan-1")
+    seen: list[str] = []
+
+    async def collect(event: dict[str, Any]) -> None:
+        seen.append(str(event["type"]))
+
+    result = await provider.run(
+        profile, "Inspect the repo", str(tmp_path), "CAR-1-plan-1", collect
+    )
 
     assert json.loads(result.output)["plan_markdown"] == "P"
-    argv = result.events[0]["argv"]
+    assert seen == ["agent_start", "tool_execution_start", "final"]
+    assert [event["type"] for event in result.events] == seen
+    argv = result.events[-1]["argv"]
     assert argv == [
         "--mode", "json", "--print", "--approve", "--session-id", "CAR-1-plan-1",
         "--session-dir", str(sessions), "--model", "openai/gpt-5",

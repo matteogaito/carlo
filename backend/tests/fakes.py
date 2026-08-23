@@ -1,4 +1,4 @@
-from carlo.provider import AgentProfile, AgentResult
+from carlo.provider import AgentEventHandler, AgentProfile, AgentResult
 
 
 class FakeProvider:
@@ -12,6 +12,7 @@ class FakeProvider:
         instruction: str,
         cwd: str,
         session_id: str,
+        on_event: AgentEventHandler | None = None,
     ) -> AgentResult:
         self.calls.append((profile, instruction, cwd, session_id))
         return AgentResult(session_id=session_id, output=self.output, events=(), exit_code=0)
