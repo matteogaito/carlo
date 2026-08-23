@@ -6,6 +6,7 @@ from pathlib import Path
 from .action_runner import ActionExecutor, ActionOrchestrator
 from .config import Settings
 from .db import make_engine, make_session_factory
+from .discovery_runtime import DiscoveryRuntime
 from .maintenance import maintenance_loop, record_startup
 from .orchestrator import ImplementationPipeline, Orchestrator
 from .provider import PiProvider
@@ -49,6 +50,13 @@ async def run() -> None:
     )
     action_orchestrator = ActionOrchestrator(engine, factory, action_executor.run)
     action_task = asyncio.create_task(_action_loop(action_orchestrator))
+    discovery_runtime = DiscoveryRuntime(
+        factory,
+        provider,
+        Path(__file__).resolve().parents[2] / "extensions" / "carlo-discovery-guard.mjs",
+    )
+    await discovery_runtime.recover()
+    discovery_task = asyncio.create_task(_discovery_loop(discovery_runtime))
     notifier_task: asyncio.Task[None] | None = None
     command_task: asyncio.Task[None] | None = None
     notifier: TelegramNotifier | None = None
@@ -102,6 +110,10 @@ async def run() -> None:
         action_task.cancel()
         with suppress(asyncio.CancelledError):
             await action_task
+        discovery_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await discovery_task
+        await discovery_runtime.close()
         if notifier_task is not None:
             notifier_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -120,6 +132,21 @@ async def _action_loop(orchestrator: ActionOrchestrator) -> None:
         except Exception:
             logger.exception("action cycle interrupted; persisted run will be recovered")
             await asyncio.sleep(2)
+
+
+async def _discovery_loop(runtime: DiscoveryRuntime) -> None:
+    async def consume() -> None:
+        while True:
+            try:
+                discovery_id = await runtime.run_next()
+            except Exception:
+                logger.exception("discovery cycle interrupted; persisted turn will be recovered")
+                await asyncio.sleep(2)
+                continue
+            if discovery_id is None:
+                await asyncio.sleep(1)
+
+    await asyncio.gather(*(consume() for _ in range(6)))
             continue
         if run_id is None:
             await asyncio.sleep(2)
