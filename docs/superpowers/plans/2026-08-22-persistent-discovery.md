@@ -10,6 +10,19 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-22-persistent-discovery-design.md`
 
+## Implementation status — 2026-08-23
+
+Implemented on `main`: persistence and migration, shared Task creation, Pi RPC
+provider, technical read-only guard, `carlo-discovery` skill, Discovery API and
+Task handoff, restart-safe worker with three-per-project idle LRU, structured
+memory/transcript, focused Task-planning questions, desktop/mobile chat UI,
+oMLX-inspired `carlo-ui-design` skill, and installable PWA.
+
+Verification: 5 Node contract checks, 86 backend tests, Alembic clean check, 8
+frontend tests, Vite production build, and a real no-model Pi RPC startup smoke
+that loaded the Discovery extension/tool. Automated browser control was not
+available in this session, so no browser screenshot is claimed as validation.
+
 ## Global Constraints
 
 - Discovery never enables Pi `edit` or `write` and never silently becomes implementation.

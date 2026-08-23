@@ -11,12 +11,20 @@ PostgreSQL owns lifecycle state; Git owns source changes and checkpoints.
 - Git-backed projects and permanent IDs such as `CAR-1`;
 - concurrent repository-aware Brief/Plan sessions through Pi using the bundled
   `carlo-planning` skill;
+- persistent repository-aware Discoveries through Pi RPC, with complete chat
+  and tool transcript, structured findings/decisions, restart recovery, and an
+  atomic `MEMORY.md` projection;
+- direct creation of one or many ordinary Tasks from Discovery proposals;
+- focused planner questions for Tasks whose goal is not yet sufficiently clear;
 - explicit Plan and Plan Amendment approval;
 - one globally serialized implementation via PostgreSQL advisory lock;
 - dedicated branch/worktree and validation-linked checkpoint commits;
 - progress-aware retries, repeated-loop detection, GPT-profile escalation;
 - restart recovery from persisted task, attempt, Git, and validation state;
-- HTTP API, persisted WebSocket event replay, and six-column React Kanban;
+- HTTP API, persisted WebSocket event replay, six-column React Kanban, Actions,
+  and a desktop/mobile Discovery chat;
+- installable PWA with standalone mode, explicit frontend updates, offline app
+  shell, and network-only API/chat traffic;
 - in-application administrator login with durable revocable sessions;
 - restart-safe Telegram notifications for informational and blocking events;
 - configurable provider/model/effort/tool profiles.
@@ -79,6 +87,30 @@ Open `http://localhost:5173`. Add a project whose repository already has a
 committed `carlo-Dev` branch, create a task, build its Brief/Plan, approve it, and
 let the worker claim it.
 
+## Discoveries
+
+Use **Discoveries** when the change is not clear yet. Pick a project and start a
+conversation; Pi can inspect the repository, Git history, logs, and declared
+diagnostic commands, but the bundled extension blocks source writes, commits,
+destructive shell syntax, and undeclared commands. Discovery turns run beside
+Task execution and Actions.
+
+PostgreSQL preserves the full user/assistant/tool transcript and structured
+state. Pi's resumable JSONL lives below `CARLO_ARTIFACT_ROOT/pi-sessions`; CARLO
+also writes `CARLO_ARTIFACT_ROOT/discoveries/<id>/MEMORY.md` atomically. After a
+restart, running turns return to the durable queue and reuse the same Pi session
+identity. CARLO keeps at most three live Pi Discovery processes per project and
+evicts only the least-recently-used idle process.
+
+When the conversation has produced a concrete change, Pi proposes self-contained
+megaprompts. **Create task** or **Create all** sends them through the normal Task
+identity, prompt artifact, planning, approval, and execution lifecycle. Closing
+a Discovery archives it read-only; it is not deleted.
+
+The runtime uses [`skills/carlo-discovery`](skills/carlo-discovery/) for the
+conversation contract. [`skills/carlo-ui-design`](skills/carlo-ui-design/)
+stores CARLO's durable visual reference and UI rules for later Pi-driven work.
+
 ## Verification
 
 ```bash
@@ -124,6 +156,12 @@ Open the configured VPN URL. The API, SPA, and WebSocket share the same origin.
 When HTTPS is added, change the origin to `https://...` and set
 `CARLO_COOKIE_SECURE=true`.
 
+The built frontend is a PWA. On iPhone/iPad choose **Share → Add to Home
+Screen**; on supported desktop browsers use the install action in the address
+bar. Dynamic `/api` traffic, WebSockets, and Discovery chat are never served
+from the service-worker cache. When a new frontend is available CARLO shows an
+explicit **Update now** banner instead of refreshing during a conversation.
+
 ### macOS boot service
 
 On macOS the complete production setup can instead be installed as two system
@@ -164,13 +202,17 @@ blocks task execution.
 ## Runtime shape
 
 ```text
-React ──HTTP/WebSocket──> FastAPI ──SQLAlchemy──> PostgreSQL
+React PWA ──HTTP/WebSocket──> FastAPI ──SQLAlchemy──> PostgreSQL
                               │                      │
                               └── persisted events ──┘
 
 async worker ──global DB lock──> one task ──> Git worktree
                                       ├─────> Pi provider
                                       └─────> local validation
+
+async worker ──Discovery queue──> Pi RPC sessions (max 3/project)
+                                  ├─────> read-only repository tools
+                                  └─────> transcript + MEMORY.md
 ```
 
 WebSocket delivery is resumable by event sequence. On restart the worker first
