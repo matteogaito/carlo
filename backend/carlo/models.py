@@ -51,6 +51,9 @@ class Project(TimestampMixin, Base):
     tasks: Mapped[list["Task"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
+    discoveries: Mapped[list["Discovery"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class User(TimestampMixin, Base):
@@ -243,6 +246,9 @@ class Task(TimestampMixin, Base):
     active_profile_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_profiles.id")
     )
+    planning_session_id: Mapped[str | None] = mapped_column(String(160))
+    planning_cursor: Mapped[str | None] = mapped_column(String(160))
+    planning_question: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     project: Mapped[Project] = relationship(back_populates="tasks", lazy="selectin")
     plans: Mapped[list["PlanRevision"]] = relationship(
@@ -251,6 +257,112 @@ class Task(TimestampMixin, Base):
     events: Mapped[list["Event"]] = relationship(
         back_populates="task", cascade="all, delete-orphan", passive_deletes=True
     )
+
+
+class Discovery(TimestampMixin, Base):
+    __tablename__ = "discoveries"
+    __table_args__ = (
+        CheckConstraint("status IN ('OPEN', 'CLOSED')", name="ck_discoveries_status"),
+        Index("ix_discoveries_project_status_activity", "project_id", "status", "last_active_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240))
+    status: Mapped[str] = mapped_column(String(10), default="OPEN", index=True)
+    profile_id: Mapped[int | None] = mapped_column(ForeignKey("agent_profiles.id"))
+    provider_session_id: Mapped[str] = mapped_column(String(160), unique=True)
+    session_path: Mapped[str | None] = mapped_column(Text)
+    provider_cursor: Mapped[str | None] = mapped_column(String(160))
+    state: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    memory_path: Mapped[str] = mapped_column(Text)
+    final_summary: Mapped[str | None] = mapped_column(Text)
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    project: Mapped[Project] = relationship(back_populates="discoveries", lazy="selectin")
+    messages: Mapped[list["DiscoveryMessage"]] = relationship(
+        back_populates="discovery",
+        order_by="DiscoveryMessage.sequence",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+    turns: Mapped[list["DiscoveryTurn"]] = relationship(
+        back_populates="discovery",
+        order_by="DiscoveryTurn.id",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+    events: Mapped[list["Event"]] = relationship(
+        back_populates="discovery", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class DiscoveryMessage(Base):
+    __tablename__ = "discovery_messages"
+    __table_args__ = (
+        UniqueConstraint("discovery_id", "sequence"),
+        UniqueConstraint("discovery_id", "provider_entry_id"),
+        CheckConstraint(
+            "role IN ('user', 'assistant', 'tool', 'system')",
+            name="ck_discovery_messages_role",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    discovery_id: Mapped[int] = mapped_column(
+        ForeignKey("discoveries.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    provider_entry_id: Mapped[str | None] = mapped_column(String(160))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    discovery: Mapped[Discovery] = relationship(back_populates="messages")
+    turn: Mapped["DiscoveryTurn | None"] = relationship(
+        back_populates="input_message", uselist=False
+    )
+
+
+class DiscoveryTurn(TimestampMixin, Base):
+    __tablename__ = "discovery_turns"
+    __table_args__ = (
+        CheckConstraint("kind IN ('CHAT', 'CLOSE')", name="ck_discovery_turns_kind"),
+        CheckConstraint(
+            "status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'INTERRUPTED', 'FAILED')",
+            name="ck_discovery_turns_status",
+        ),
+        Index("ix_discovery_turns_queue", "status", "created_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    discovery_id: Mapped[int] = mapped_column(
+        ForeignKey("discoveries.id", ondelete="CASCADE"), index=True
+    )
+    input_message_id: Mapped[int] = mapped_column(
+        ForeignKey("discovery_messages.id", ondelete="CASCADE"), unique=True
+    )
+    kind: Mapped[str] = mapped_column(String(10), default="CHAT")
+    status: Mapped[str] = mapped_column(String(20), default="QUEUED", index=True)
+    provider_request_id: Mapped[str | None] = mapped_column(String(160))
+    provider_cursor: Mapped[str | None] = mapped_column(String(160))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+
+    discovery: Mapped[Discovery] = relationship(back_populates="turns")
+    input_message: Mapped[DiscoveryMessage] = relationship(back_populates="turn")
 
 
 class PlanRevision(TimestampMixin, Base):
@@ -328,6 +440,9 @@ class Event(Base):
     task_id: Mapped[str | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="CASCADE"), index=True
     )
+    discovery_id: Mapped[int | None] = mapped_column(
+        ForeignKey("discoveries.id", ondelete="CASCADE"), index=True
+    )
     type: Mapped[str] = mapped_column(String(100), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
@@ -335,6 +450,7 @@ class Event(Base):
     )
 
     task: Mapped[Task | None] = relationship(back_populates="events")
+    discovery: Mapped[Discovery | None] = relationship(back_populates="events")
 
 
 class NotificationCursor(TimestampMixin, Base):
