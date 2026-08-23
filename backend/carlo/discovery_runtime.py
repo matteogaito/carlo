@@ -113,6 +113,10 @@ class DiscoveryRuntime:
         tools: list[dict[str, Any]] = []
         try:
             async for event in live.session.prompt(f"{memory}\n\n# User message\n{message}"):
+                if await self._should_stop(turn_id, discovery_id):
+                    await live.session.abort()
+                    await self._interrupt(turn_id, discovery_id)
+                    return
                 delta = _event_delta(event)
                 if delta:
                     output.append(delta)
@@ -129,6 +133,9 @@ class DiscoveryRuntime:
                     tool = pending_tools.pop(tool_key)
                     tool["result"] = event.payload.get("result")
                     tools.append(tool)
+            if await self._should_stop(turn_id, discovery_id):
+                await self._interrupt(turn_id, discovery_id)
+                return
             provider_state = await live.session.get_state()
             await self._complete(turn_id, discovery_id, "".join(output), state, provider_state.session_file, tools)
         except Exception as error:
@@ -195,6 +202,33 @@ class DiscoveryRuntime:
                 turn.error = error[:2000]
                 turn.finished_at = datetime.now(UTC)
                 session.add(Event(discovery_id=discovery_id, type="discovery.turn.failed", payload={"turn_id": turn_id, "error": turn.error}))
+                await session.commit()
+
+    async def _should_stop(self, turn_id: int, discovery_id: int) -> bool:
+        async with self.session_factory() as session:
+            turn = await session.get(DiscoveryTurn, turn_id)
+            discovery = await session.get(Discovery, discovery_id)
+            return (
+                turn is None
+                or discovery is None
+                or discovery.status != "OPEN"
+                or turn.status == "INTERRUPTED"
+                or turn.cancel_requested_at is not None
+            )
+
+    async def _interrupt(self, turn_id: int, discovery_id: int) -> None:
+        async with self.session_factory() as session:
+            turn = await session.get(DiscoveryTurn, turn_id)
+            if turn is not None:
+                turn.status = "INTERRUPTED"
+                turn.finished_at = datetime.now(UTC)
+                session.add(
+                    Event(
+                        discovery_id=discovery_id,
+                        type="discovery.turn.interrupted",
+                        payload={"turn_id": turn_id},
+                    )
+                )
                 await session.commit()
 
 

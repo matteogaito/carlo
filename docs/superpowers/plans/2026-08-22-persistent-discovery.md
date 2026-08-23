@@ -18,7 +18,7 @@ Task handoff, restart-safe worker with three-per-project idle LRU, structured
 memory/transcript, focused Task-planning questions, desktop/mobile chat UI,
 oMLX-inspired `carlo-ui-design` skill, and installable PWA.
 
-Verification: 5 Node contract checks, 86 backend tests, Alembic clean check, 8
+Verification: 5 Node contract checks, 87 backend tests, Alembic clean check, 8
 frontend tests, Vite production build, and a real no-model Pi RPC startup smoke
 that loaded the Discovery extension/tool. Automated browser control was not
 available in this session, so no browser screenshot is claimed as validation.
