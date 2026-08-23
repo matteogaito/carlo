@@ -18,7 +18,10 @@ class Worktree:
 
 class GitWorkspace:
     def __init__(
-        self, repository: Path, worktree_root: Path, integration_branch: str
+        self,
+        repository: Path,
+        worktree_root: Path,
+        integration_branch: str,
     ) -> None:
         self.repository = repository.resolve()
         self.worktree_root = worktree_root.resolve()
@@ -26,9 +29,7 @@ class GitWorkspace:
 
     async def prepare(self, task_id: str, title: str) -> Worktree:
         await self._git("rev-parse", "--git-dir", cwd=self.repository)
-        await self._git(
-            "rev-parse", "--verify", self.integration_branch, cwd=self.repository
-        )
+        await self._ensure_integration_branch()
         branch = f"{task_id}-{slug(title)}"
         path = (self.worktree_root / branch).resolve()
         if path.parent != self.worktree_root:
@@ -51,6 +52,22 @@ class GitWorkspace:
             args = ("worktree", "add", "-b", branch, str(path), self.integration_branch)
         await self._git(*args, cwd=self.repository)
         return Worktree(branch, path)
+
+    async def _ensure_integration_branch(self) -> None:
+        integration_ref = f"refs/heads/{self.integration_branch}"
+        if (
+            await self._git_status(
+                "show-ref", "--verify", integration_ref, cwd=self.repository
+            )
+            == 0
+        ):
+            return
+        if await self._git_status("rev-parse", "--verify", "HEAD", cwd=self.repository):
+            raise GitError(
+                f"integration branch '{self.integration_branch}' is missing and "
+                "the repository has no commit at HEAD"
+            )
+        await self._git("branch", self.integration_branch, cwd=self.repository)
 
     async def checkpoint(self, worktree: Worktree, message: str) -> str:
         self._validate(worktree)

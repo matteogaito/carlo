@@ -5,6 +5,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.domain import TaskStage, TaskStatus
+from carlo.git import GitError
 from carlo.models import Base, Event, Project, Task
 from carlo.orchestrator import Orchestrator
 
@@ -174,4 +175,51 @@ async def test_runner_crash_keeps_task_recoverable() -> None:
     assert await Orchestrator(engine, factory, recover).run_next() == "CAR-1"
     async with factory() as session:
         assert (await session.get(Task, "CAR-1")).status == TaskStatus.DONE
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_git_error_fails_task_instead_of_recovering_forever() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/tmp/carlo-test")
+        session.add(
+            Task(
+                id="CAR-1",
+                project=project,
+                sequence=1,
+                title="Broken Git",
+                goal="Fail once",
+                status=TaskStatus.READY,
+                stage=TaskStage.QUEUED,
+            )
+        )
+        await session.commit()
+
+    async def broken_git(task_id: str) -> str:
+        raise GitError("default branch missing")
+
+    orchestrator = Orchestrator(engine, factory, broken_git)
+    assert await orchestrator.run_next() == "CAR-1"
+    assert await orchestrator.run_next() is None
+    async with factory() as session:
+        task = await session.get(Task, "CAR-1")
+        events = (
+            await session.scalars(select(Event).where(Event.task_id == "CAR-1"))
+        ).all()
+        assert task.status == TaskStatus.FAILED
+        assert task.stage == TaskStage.BLOCKED
+        assert [event.type for event in events][-2:] == [
+            "execution.interrupted",
+            "execution.failed",
+        ]
     await engine.dispose()

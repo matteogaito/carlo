@@ -24,6 +24,7 @@ export interface Plan {
   metadata: {
     validation_commands?: string[]
     skills?: string[]
+    implementation_phases?: string[]
     [key: string]: unknown
   }
   approved_at: string | null

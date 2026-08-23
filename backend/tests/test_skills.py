@@ -11,6 +11,7 @@ def test_carlo_planning_skill_has_pi_contract() -> None:
     for required in (
         "brief_markdown",
         "plan_markdown",
+        "implementation_phases",
         "validation_commands",
         "browser_validation",
         "affected_areas",

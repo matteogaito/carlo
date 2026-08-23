@@ -131,6 +131,7 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
   "plan_markdown": "# Implementation plan\n...",
   "metadata": {
     "skills": [],
+    "implementation_phases": [],
     "validation_commands": [],
     "browser_validation": false,
     "build_required": false,
@@ -142,9 +143,11 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
 }
 ```
 
-`validation_commands` contains only commands verified from repository evidence.
-Use booleans for the four flags and arrays of strings for every list. Keep the
-human-readable rationale in the Brief or Plan, not in metadata.
+`implementation_phases` contains concise, ordered implementation outcomes that
+the executor can complete one by one. `validation_commands` contains only
+commands verified from repository evidence. Use booleans for the four flags and
+arrays of strings for every list. Keep the human-readable rationale in the Brief
+or Plan, not in metadata.
 
 ## Plan revisions
 

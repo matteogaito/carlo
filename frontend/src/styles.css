@@ -133,6 +133,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .planner-question button { justify-self: start; border: 0; border-radius: 8px; padding: 9px 12px; color: white; background: var(--ink); font-weight: 700; }
 .planning-live { background: #f4f4f1; }
 .planning-live .thinking { margin-bottom: 12px; }
+.implementation-phases { margin: 0; padding: 0; list-style: none; }
+.implementation-phases li { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.implementation-phases li span { display: grid; flex: 0 0 24px; height: 24px; place-items: center; border-radius: 50%; color: white; background: var(--pine); font: 700 11px ui-monospace, monospace; }
+.implementation-phases p { margin: 2px 0 0; }
 
 .actions-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 122px); }
 .actions-workspace.detail-open { grid-template-columns: minmax(0, 1fr) 460px; }

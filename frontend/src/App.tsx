@@ -375,6 +375,7 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning, width
   resize: (width: number) => void
 }) {
   const validations = task.plan?.metadata.validation_commands || []
+  const phases = task.plan?.metadata.implementation_phases || []
   const [resizing, setResizing] = useState(false)
   const planningActivity = (task.events || [])
     .filter((event) => event.type.startsWith('planning.'))
@@ -433,6 +434,9 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning, width
       {task.prompt_path && <section><h3>Megaprompt file</h3><code>{task.prompt_path}</code></section>}
       <section><h3>Brief</h3>{task.plan ? <TaskMarkdown>{task.plan.brief_markdown}</TaskMarkdown> : <p>Planning has not produced a Brief yet.</p>}</section>
       <section><h3>Plan</h3>{task.plan ? <TaskMarkdown>{task.plan.plan_markdown}</TaskMarkdown> : <p>No Plan yet.</p>}</section>
+      {!!phases.length && <section><h3>Implementation phases</h3><ol className="implementation-phases">
+        {phases.map((phase, index) => <li key={`${index}-${phase}`}><span>{index + 1}</span><p>{phase}</p></li>)}
+      </ol></section>}
       <section>
         <h3>Validation</h3>
         {task.validations?.length ? task.validations.map((validation) => (

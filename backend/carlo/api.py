@@ -116,6 +116,7 @@ class ProfileUpdate(BaseModel):
 
 class PlanMetadata(BaseModel):
     skills: list[str]
+    implementation_phases: list[str] = Field(default_factory=list)
     validation_commands: list[str]
     browser_validation: bool
     build_required: bool
@@ -1150,6 +1151,7 @@ def _planning_instruction(task: Task) -> str:
         "plan_markdown": "concrete implementation plan",
         "metadata": {
             "skills": [],
+            "implementation_phases": [],
             "validation_commands": [],
             "browser_validation": False,
             "build_required": False,

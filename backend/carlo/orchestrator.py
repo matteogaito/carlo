@@ -20,7 +20,7 @@ from .domain import (
     fingerprint,
     transition,
 )
-from .git import GitWorkspace, Worktree
+from .git import GitError, GitWorkspace, Worktree
 from .models import (
     AgentProfile as AgentProfileRecord,
     Attempt,
@@ -67,6 +67,10 @@ class Orchestrator:
                     return None
                 try:
                     outcome = await self.runner(task_id)
+                except GitError as error:
+                    await self._interrupt(task_id, error)
+                    await self._finish(task_id, "failed")
+                    return task_id
                 except Exception as error:
                     await self._interrupt(task_id, error)
                     raise

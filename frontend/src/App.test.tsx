@@ -37,7 +37,7 @@ const task: Task = {
     revision: 1,
     brief_markdown: '# Brief',
     plan_markdown: '# Plan',
-    metadata: { validation_commands: ['pytest -q'], skills: ['testing'] },
+    metadata: { validation_commands: ['pytest -q'], skills: ['testing'], implementation_phases: ['Add the login endpoint', 'Validate the browser flow'] },
     approved_at: '2026-08-16T08:00:00Z',
   },
   validations: [{
@@ -103,6 +103,7 @@ describe('CARLO board', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
     expect(screen.getByRole('heading', { name: 'Brief', level: 1 })).toBeTruthy()
+    expect(screen.getByText('Add the login endpoint')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Plan', level: 1 })).toBeTruthy()
 
     const detail = screen.getByRole('complementary', { name: 'CAR-1 details' })
