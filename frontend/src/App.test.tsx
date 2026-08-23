@@ -69,6 +69,7 @@ const api: Api = {
   createProject: async () => { throw new Error('unused') },
   createTask: async () => { throw new Error('unused') },
   startPlanning: async () => task,
+  reworkTask: async () => task,
   answerPlanning: async () => task,
   approvePlan: async () => task,
   listProjectActions: async () => ({ project_id: 1, commit_sha: 'abc', branch: 'main', dirty_paths: [], actions: [], error: null }),
@@ -200,6 +201,32 @@ describe('CARLO board', () => {
     await userEvent.type(await screen.findByLabelText('Planner answer'), 'Use the existing envelope')
     await userEvent.click(screen.getByRole('button', { name: 'Answer planner' }))
     expect(answerPlanning).toHaveBeenCalledWith('CAR-1', 'Use the existing envelope')
+  })
+
+  it('starts rework from the failed task action bar at the top', async () => {
+    const failed = { ...task, status: 'FAILED' as const, stage: 'blocked' }
+    const reworkTask = vi.fn(async () => ({
+      ...failed,
+      status: 'NOT_READY' as const,
+      stage: 'planning',
+      approved_plan_revision: null,
+      branch_name: null,
+      worktree_path: null,
+      checkpoint_sha: null,
+    }))
+    render(<App api={{
+      ...api,
+      listTasks: async () => [failed],
+      getTask: async () => failed,
+      reworkTask,
+    } as Api} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    const rework = await screen.findByRole('button', { name: 'Rework from original request' })
+    const goal = screen.getByRole('heading', { name: 'Goal' })
+    expect(rework.compareDocumentPosition(goal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    await userEvent.click(rework)
+    expect(reworkTask).toHaveBeenCalledWith('CAR-1')
   })
 
   it('groups repository actions, confirms a run and opens its console history', async () => {

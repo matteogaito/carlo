@@ -164,6 +164,35 @@ class RunnerTrust(BaseModel):
 SESSION_COOKIE = "carlo_session"
 
 
+async def recover_interrupted_reworks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        tasks = (
+            await session.scalars(
+                select(Task).where(
+                    Task.status == TaskStatus.NOT_READY,
+                    Task.stage == TaskStage.PLANNING,
+                    Task.planning_session_id.like("%-plan-rework-%"),
+                    Task.planning_question.is_(None),
+                )
+            )
+        ).all()
+        for task in tasks:
+            task.status = TaskStatus.FAILED
+            task.stage = TaskStage.BLOCKED
+            task.version += 1
+            session.add(
+                Event(
+                    task=task,
+                    type="task.rework.recovered_after_restart",
+                    payload={},
+                )
+            )
+        if tasks:
+            await session.commit()
+
+
 def create_app(
     session_factory: async_sessionmaker[AsyncSession],
     provider: CodingAgentProvider,
@@ -177,6 +206,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await recover_interrupted_reworks(session_factory)
         if telegram_enabled(settings.telegram_bot_token, settings.telegram_chat_id):
             await TelegramNotifier(
                 session_factory,
@@ -1030,6 +1060,70 @@ def create_app(
             f"The user answered your planning question.\nQuestion: {question}\nAnswer: {payload.answer}\nContinue repository analysis. Ask one further high-impact question if necessary; otherwise return the complete plan JSON.",
         )
 
+    @api.post("/tasks/{task_id}/rework")
+    async def rework_task(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        if task is None:
+            raise HTTPException(404, "task not found")
+        try:
+            task.status, task.stage = transition(task.status, task.stage, "rework")
+            task.status, task.stage = transition(task.status, task.stage, "briefed")
+        except InvalidTransition as error:
+            raise HTTPException(409, str(error)) from error
+        cycle = int(
+            await session.scalar(
+                select(func.count(Event.sequence)).where(
+                    Event.task_id == task.id, Event.type == "task.rework.started"
+                )
+            )
+            or 0
+        ) + 1
+        previous_attempt = int(
+            await session.scalar(
+                select(func.coalesce(func.max(Attempt.number), 0)).where(
+                    Attempt.task_id == task.id
+                )
+            )
+            or 0
+        )
+        history = {
+            "cycle": cycle,
+            "previous_attempt": previous_attempt,
+            "previous_branch": task.branch_name,
+            "previous_worktree": task.worktree_path,
+            "previous_checkpoint": task.checkpoint_sha,
+        }
+        task.approved_plan_revision = None
+        task.active_profile_id = None
+        task.branch_name = None
+        task.worktree_path = None
+        task.checkpoint_sha = None
+        task.planning_cursor = None
+        task.planning_question = None
+        task.planning_session_id = f"{task.id}-plan-rework-{cycle}"
+        task.version += 1
+        session.add(Event(task=task, type="task.rework.started", payload=history))
+        await session.commit()
+        try:
+            return await continue_planning(
+                task,
+                session,
+                _planning_instruction(task, fresh_rework=True),
+            )
+        except HTTPException:
+            task.status = TaskStatus.FAILED
+            task.stage = TaskStage.BLOCKED
+            task.version += 1
+            session.add(
+                Event(task=task, type="task.rework.planning_failed", payload={"cycle": cycle})
+            )
+            await session.commit()
+            raise
+
     @api.post("/tasks/{task_id}/approve")
     async def approve_plan(
         task_id: str,
@@ -1047,6 +1141,13 @@ def create_app(
         )
         if plan is None:
             raise HTTPException(404, "plan revision not found")
+        latest_revision = await session.scalar(
+            select(func.max(PlanRevision.revision)).where(
+                PlanRevision.task_id == task_id
+            )
+        )
+        if payload.revision != latest_revision:
+            raise HTTPException(409, "only the latest plan revision can be approved")
         try:
             action = (
                 "approve_amendment"
@@ -1186,7 +1287,7 @@ def _provider_profile(record: AgentProfileRecord) -> AgentProfile:
     )
 
 
-def _planning_instruction(task: Task) -> str:
+def _planning_instruction(task: Task, *, fresh_rework: bool = False) -> str:
     contract = {
         "brief_markdown": "evidence-oriented repository understanding",
         "plan_markdown": "concrete implementation plan",
@@ -1202,8 +1303,17 @@ def _planning_instruction(task: Task) -> str:
             "affected_areas": [],
         },
     }
+    rework = (
+        "This is a fresh rework. Start again from the original request and current "
+        "repository; do not continue the failed implementation or treat its old plan "
+        "as authoritative.\n"
+        if fresh_rework
+        else ""
+    )
+    prompt = f"Original Markdown request: {task.prompt_path}\n" if task.prompt_path else ""
     return (
-        f"Inspect the repository and plan task {task.id}: {task.goal}\n"
+        rework + f"Inspect the repository and plan task {task.id}: {task.goal}\n"
+        f"{prompt}"
         f"Project policies: {json.dumps(task.project.policies)}\n"
         "If one high-impact answer is still required, return only "
         '{"question":"the single focused question"}. Ask no low-risk implementation questions. '

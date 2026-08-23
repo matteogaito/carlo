@@ -61,8 +61,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .login-error { padding: 10px 12px; color: white; background: var(--fault); font-size: 13px; }
 
 .create-strip { min-height: 48px; display: flex; align-items: flex-start; gap: 8px; padding: 8px 24px; border-bottom: 1px solid var(--line); background: var(--paper); }
-.create-strip > button, .task-detail footer button { border: 1px solid var(--ink); color: var(--ink); background: transparent; padding: 7px 12px; font-weight: 700; }
-.create-strip > button:hover, .task-detail footer button:hover { background: var(--ink); color: white; }
+.create-strip > button, .task-actions button { border: 1px solid var(--ink); color: var(--ink); background: transparent; padding: 7px 12px; font-weight: 700; }
+.create-strip > button:hover, .task-actions button:hover { background: var(--ink); color: white; }
 .create-strip > form { display: flex; gap: 10px; align-items: end; padding-left: 12px; }
 .create-strip label { display: grid; gap: 3px; font: 600 10px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .05em; }
 .create-strip input, .create-strip textarea, .create-strip select { min-width: 120px; max-width: 240px; border: 1px solid #86928b; background: var(--paper); padding: 6px; }
@@ -95,7 +95,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .task-detail-resizer { position: fixed; z-index: 4; top: 124px; bottom: 0; width: 10px; cursor: col-resize; touch-action: none; }
 .task-detail-resizer::after { content: ""; position: absolute; inset: 0 4px; background: transparent; }
 .task-detail-resizer:hover::after, .task-detail-resizer:focus-visible::after { background: var(--brass); }
-.task-detail > header { position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; padding: 22px 24px 16px; background: var(--paper); border-bottom: 1px solid var(--line); }
+.task-detail-top { position: sticky; top: 0; z-index: 2; background: var(--paper); }
+.task-detail-top > header { display: flex; justify-content: space-between; padding: 22px 24px 16px; border-bottom: 1px solid var(--line); }
 .task-detail h2 { margin: 4px 0 0; font: 750 24px "Avenir Next", ui-rounded, sans-serif; }
 .task-detail h3 { margin: 0 0 8px; color: var(--pine); font: 700 10px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .11em; }
 .task-detail section { padding: 18px 24px; border-bottom: 1px solid #d6dcd8; }
@@ -122,11 +123,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .timeline-row { display: grid; grid-template-columns: 66px 1fr; gap: 8px; margin: 7px 0; font-size: 12px; }
 .timeline-row time { color: #69756e; font-family: ui-monospace, monospace; }
 .detail-stage { margin: 0; padding: 10px 24px; color: white; background: var(--pine); font: 650 11px ui-monospace, monospace; text-transform: uppercase; }
+.task-actions { display: flex; gap: 8px; padding: 10px 24px; border-bottom: 1px solid var(--line); background: var(--paper); }
+.task-actions:empty { display: none; }
 .close { border: 0; background: transparent; font-size: 30px; line-height: 1; }
 .git-evidence dl { display: grid; grid-template-columns: 90px 1fr; gap: 8px; margin: 0; font-size: 12px; }
 .git-evidence dt { color: #69756e; }
 .git-evidence dd { margin: 0; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
-.task-detail footer { padding: 18px 24px 30px; }
 .planner-question { background: #f4f4f1; }
 .planner-question form, .planner-question label { display: grid; gap: 8px; }
 .planner-question textarea { width: 100%; resize: vertical; border: 1px solid #aaa; border-radius: 8px; padding: 9px; }

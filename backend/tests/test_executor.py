@@ -271,3 +271,59 @@ async def test_three_runner_interruptions_fail_task() -> None:
         assert sum(event.type == "execution.interrupted" for event in events) == 3
         assert events[-1].type == "execution.failed"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rework_resets_the_three_interruption_limit() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/tmp/carlo-test")
+        task = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="Repeated crash",
+            goal="Retry cleanly",
+            status=TaskStatus.READY,
+            stage=TaskStage.QUEUED,
+        )
+        session.add_all(
+            [
+                task,
+                *[
+                    Event(
+                        task=task,
+                        type="execution.interrupted",
+                        payload={"interruption": number},
+                    )
+                    for number in range(1, 4)
+                ],
+                Event(
+                    task=task,
+                    type="task.rework.started",
+                    payload={"cycle": 1, "previous_attempt": 0},
+                ),
+            ]
+        )
+        await session.commit()
+
+    async def crash(task_id: str) -> str:
+        raise RuntimeError("new cycle crash")
+
+    orchestrator = Orchestrator(engine, factory, crash)
+    with pytest.raises(RuntimeError, match="new cycle crash"):
+        await orchestrator.run_next()
+    async with factory() as session:
+        task = await session.get(Task, "CAR-1")
+        assert task is not None
+        assert task.status == TaskStatus.IN_PROGRESS
+    await engine.dispose()

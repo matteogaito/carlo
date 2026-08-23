@@ -84,6 +84,10 @@ _TRANSITIONS = {
         TaskStatus.IN_PROGRESS,
         TaskStage.IMPLEMENTING,
     ),
+    (TaskStatus.FAILED, TaskStage.BLOCKED, "rework"): (
+        TaskStatus.NOT_READY,
+        TaskStage.BRIEFING,
+    ),
 }
 
 

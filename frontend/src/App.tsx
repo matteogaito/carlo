@@ -204,6 +204,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             task={selected}
             close={() => setSelected(null)}
             startPlanning={() => void act(() => api.startPlanning(selected.id))}
+            rework={() => void act(() => api.reworkTask(selected.id))}
             approve={() => selected.plan && void act(() =>
               api.approvePlan(selected.id, selected.plan!.revision, selected.version)
             )}
@@ -372,10 +373,11 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, approve, answerPlanning, width, resize }: {
+function TaskDetail({ task, close, startPlanning, rework, approve, answerPlanning, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
+  rework: () => void
   approve: () => void
   answerPlanning: (answer: string) => void
   width: number
@@ -413,11 +415,19 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning, width
           else if (event.key === 'ArrowRight') resize(clampDetailWidth(width - 32))
         }}
       />
-      <header>
-        <div><span className="task-id">{task.id}</span><h2>{task.title}</h2></div>
-        <button className="close" onClick={close} aria-label="Close task detail">×</button>
-      </header>
-      <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
+      <div className="task-detail-top">
+        <header>
+          <div><span className="task-id">{task.id}</span><h2>{task.title}</h2></div>
+          <button className="close" onClick={close} aria-label="Close task detail">×</button>
+        </header>
+        <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
+        <nav className="task-actions" aria-label="Task actions">
+          {task.stage === 'created' && <button onClick={startPlanning}>Build Brief & Plan</button>}
+          {task.stage === 'awaiting_approval' && task.plan && <button onClick={approve}>Approve Plan → Ready</button>}
+          {task.status === 'IN_PROGRESS' && task.stage === 'blocked' && Boolean(task.plan?.metadata.amendment) && <button onClick={approve}>Approve amendment</button>}
+          {task.status === 'FAILED' && <button onClick={rework}>Rework from original request</button>}
+        </nav>
+      </div>
       {task.stage === 'planning' && !task.planning_question && <section className="planning-live" aria-live="polite">
         <h3>Pi is planning</h3>
         <div className="thinking"><i aria-hidden="true" />Repository-aware planning is active</div>
@@ -472,11 +482,6 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning, width
       {!!task.events?.length && <section><h3>Activity</h3>{task.events.slice(0, 12).map((event) => (
         <p className="timeline-row" key={event.sequence}><time>{new Date(event.created_at).toLocaleTimeString()}</time>{event.type.replaceAll('.', ' ')}</p>
       ))}</section>}
-      <footer>
-        {task.stage === 'created' && <button onClick={startPlanning}>Build Brief & Plan</button>}
-        {task.stage === 'awaiting_approval' && task.plan && <button onClick={approve}>Approve Plan → Ready</button>}
-        {task.stage === 'blocked' && Boolean(task.plan?.metadata.amendment) && <button onClick={approve}>Approve amendment</button>}
-      </footer>
     </aside>
   )
 }

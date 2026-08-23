@@ -18,6 +18,7 @@ from carlo.models import (
     Attempt,
     Base,
     Escalation,
+    Event,
     PlanRevision,
     Project,
     Task,
@@ -79,6 +80,112 @@ def test_major_deviation_is_extracted_from_provider_output() -> None:
         "summary": "Public API must change",
         "reason": "Existing interface cannot support the goal",
     }
+
+
+@pytest.mark.asyncio
+async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (repository / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-m", "base"], check=True)
+    subprocess.run(["git", "-C", str(repository), "branch", "carlo-Dev"], check=True)
+
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        implementation = AgentProfileRecord(name="implementation", provider="pi")
+        escalation = AgentProfileRecord(name="escalation", provider="pi")
+        project = Project(
+            name="CARLO",
+            key="CAR",
+            repository_path=str(repository),
+            integration_branch="carlo-Dev",
+        )
+        task = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="Feature",
+            goal="Create feature.txt",
+            status="READY",
+            stage="QUEUED",
+            approved_plan_revision=2,
+        )
+        plan = PlanRevision(
+            task=task,
+            revision=2,
+            brief_markdown="Brief",
+            plan_markdown="Plan",
+            metadata_json={"skills": [], "validation_commands": ["test -f feature.txt"]},
+        )
+        session.add_all([implementation, escalation, project, task, plan])
+        await session.flush()
+        session.add_all(
+            [
+                *[
+                    Attempt(
+                        task_id=task.id,
+                        number=number,
+                        profile_id=implementation.id,
+                        instruction="failed cycle",
+                        outcome="validation_failed",
+                    )
+                    for number in range(1, 4)
+                ],
+                Event(
+                    task=task,
+                    type="task.rework.started",
+                    payload={"cycle": 1, "previous_attempt": 3},
+                ),
+            ]
+        )
+        await session.commit()
+
+    class Provider:
+        async def run(self, profile, instruction, cwd, session_id):
+            Path(cwd, "feature.txt").write_text("fresh\n")
+            return AgentResult(session_id, "done", (), 0)
+
+        async def stop(self, session_id: str) -> None:
+            return None
+
+        def status(self, session_id: str) -> str:
+            return "idle"
+
+    pipeline = ImplementationPipeline(
+        factory,
+        Provider(),
+        tmp_path / "worktrees",
+        tmp_path / "artifacts",
+        max_attempts=1,
+    )
+    await Orchestrator(engine, factory, pipeline.run).run_next()
+
+    async with factory() as session:
+        reworked = await session.get(Task, "CAR-1")
+        assert reworked is not None
+        assert reworked.status.value == "DONE"
+        assert reworked.branch_name == "CAR-1-feature-rework-1"
+        attempts = (
+            await session.scalars(select(Attempt).order_by(Attempt.number))
+        ).all()
+        assert [attempt.number for attempt in attempts] == [1, 2, 3, 4]
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

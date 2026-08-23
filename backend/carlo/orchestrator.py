@@ -145,11 +145,21 @@ class Orchestrator:
             task = await session.get(Task, task_id)
             if task is None:
                 return 0
+            cycle_start = int(
+                await session.scalar(
+                    select(func.coalesce(func.max(Event.sequence), 0)).where(
+                        Event.task_id == task_id,
+                        Event.type == "task.rework.started",
+                    )
+                )
+                or 0
+            )
             interruptions = (
                 await session.scalar(
                     select(func.count(Event.sequence)).where(
                         Event.task_id == task_id,
                         Event.type == "execution.interrupted",
+                        Event.sequence > cycle_start,
                     )
                 )
                 or 0
@@ -193,10 +203,13 @@ class ImplementationPipeline:
             self.worktree_root,
             task.project.integration_branch,
         )
+        rework_cycle, previous_cycle_attempt = await self._rework_context(task_id)
         if task.worktree_path and task.branch_name:
             worktree = Worktree(task.branch_name, Path(task.worktree_path))
         else:
-            worktree = await workspace.prepare(task.id, task.title)
+            worktree = await workspace.prepare(
+                task.id, task.title, rework_cycle=rework_cycle
+            )
             async with self.session_factory() as session:
                 current = await session.get(Task, task_id)
                 if current is None:
@@ -248,7 +261,9 @@ class ImplementationPipeline:
                 return "validated"
             previous = recovered.snapshot
         start = await self._next_attempt_number(task_id)
-        for number in range(start, self.max_attempts + 1):
+        attempts_used = max(0, start - 1 - previous_cycle_attempt)
+        attempts_left = max(0, self.max_attempts - attempts_used)
+        for number in range(start, start + attempts_left):
             instruction = self._implementation_instruction(task, plan, strategy)
             attempt_id = await self._start_attempt(
                 task_id, implementation.id, number, instruction
@@ -339,6 +354,21 @@ class ImplementationPipeline:
                 )
             )
             return int(maximum or 0) + 1
+
+    async def _rework_context(self, task_id: str) -> tuple[int, int]:
+        async with self.session_factory() as session:
+            event = await session.scalar(
+                select(Event)
+                .where(
+                    Event.task_id == task_id,
+                    Event.type == "task.rework.started",
+                )
+                .order_by(Event.sequence.desc())
+                .limit(1)
+            )
+            if event is None:
+                return 0, 0
+            return int(event.payload["cycle"]), int(event.payload["previous_attempt"])
 
     async def _start_attempt(
         self, task_id: str, profile_id: int, number: int, instruction: str

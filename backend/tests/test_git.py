@@ -61,6 +61,32 @@ async def test_prepare_creates_missing_integration_branch_from_head(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_rework_prepares_clean_numbered_worktree_from_integration(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.com")
+    (repository / "app.txt").write_text("base\n")
+    git(repository, "add", "app.txt")
+    git(repository, "commit", "-m", "base")
+    git(repository, "branch", "carlo-Dev")
+    workspace = GitWorkspace(repository, tmp_path / "worktrees", "carlo-Dev")
+    failed = await workspace.prepare("CAR-4", "Login Flow")
+    (failed.path / "failed.txt").write_text("failed attempt\n")
+    await workspace.checkpoint(failed, "failed attempt")
+
+    rework = await workspace.prepare("CAR-4", "Login Flow", rework_cycle=1)
+
+    assert rework.branch == "CAR-4-login-flow-rework-1"
+    assert rework.path != failed.path
+    assert not (rework.path / "failed.txt").exists()
+    assert git(rework.path, "rev-parse", "HEAD") == git(repository, "rev-parse", "carlo-Dev")
+
+
+@pytest.mark.asyncio
 async def test_prepare_reports_repository_without_commits(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()

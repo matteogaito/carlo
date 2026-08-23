@@ -2,9 +2,10 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from carlo import models
+from carlo import api, models
+from carlo.domain import TaskStage, TaskStatus
 from carlo.models import Base, Event, Project, Task
 
 
@@ -43,6 +44,80 @@ async def test_task_identity_and_event_survive_a_new_session() -> None:
         await session.delete(task.project)
         await session.commit()
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_returns_orphaned_rework_planning_to_failed() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    key = f"R{uuid4().hex[:6].upper()}"
+    task_id = f"{key}-1"
+    questioning_task_id = f"{key}-2"
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(
+            name="Rework project", key=key, repository_path=f"/tmp/{key}"
+        )
+        task = Task(
+            id=task_id,
+            project=project,
+            sequence=1,
+            title="Login",
+            goal="Add login",
+            status=TaskStatus.NOT_READY,
+            stage=TaskStage.PLANNING,
+            planning_session_id=f"{task_id}-plan-rework-1",
+        )
+        questioning = Task(
+            id=questioning_task_id,
+            project=project,
+            sequence=2,
+            title="Question",
+            goal="Clarify login",
+            status=TaskStatus.NOT_READY,
+            stage=TaskStage.PLANNING,
+            planning_session_id=f"{questioning_task_id}-plan-rework-1",
+            planning_question={"text": "Which authentication provider?"},
+        )
+        session.add_all(
+            [
+                task,
+                questioning,
+                Event(task=task, type="task.rework.started", payload={"cycle": 1}),
+                Event(
+                    task=questioning,
+                    type="task.rework.started",
+                    payload={"cycle": 1},
+                ),
+            ]
+        )
+        await session.commit()
+
+    recover = getattr(api, "recover_interrupted_reworks", None)
+    assert recover is not None
+    await recover(factory)
+
+    async with factory() as session:
+        task = await session.get(Task, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.FAILED
+        assert task.stage == TaskStage.BLOCKED
+        event = await session.scalar(
+            select(Event).where(
+                Event.task_id == task_id,
+                Event.type == "task.rework.recovered_after_restart",
+            )
+        )
+        assert event is not None
+        questioning = await session.get(Task, questioning_task_id)
+        assert questioning is not None
+        assert questioning.status == TaskStatus.NOT_READY
+        assert questioning.stage == TaskStage.PLANNING
+        assert questioning.planning_question == {
+            "text": "Which authentication provider?"
+        }
     await engine.dispose()
 
 

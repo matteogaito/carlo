@@ -27,10 +27,13 @@ class GitWorkspace:
         self.worktree_root = worktree_root.resolve()
         self.integration_branch = integration_branch
 
-    async def prepare(self, task_id: str, title: str) -> Worktree:
+    async def prepare(
+        self, task_id: str, title: str, *, rework_cycle: int = 0
+    ) -> Worktree:
         await self._git("rev-parse", "--git-dir", cwd=self.repository)
         await self._ensure_integration_branch()
-        branch = f"{task_id}-{slug(title)}"
+        suffix = f"-rework-{rework_cycle}" if rework_cycle else ""
+        branch = f"{task_id}-{slug(title)}{suffix}"
         path = (self.worktree_root / branch).resolve()
         if path.parent != self.worktree_root:
             raise GitError("invalid worktree path")

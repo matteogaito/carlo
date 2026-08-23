@@ -21,6 +21,8 @@ PostgreSQL owns lifecycle state; Git owns source changes and checkpoints.
 - dedicated branch/worktree and validation-linked checkpoint commits;
 - progress-aware retries, repeated-loop detection, GPT-profile escalation;
 - restart recovery from persisted task, attempt, Git, and validation state;
+- failed-task Rework from the original request, with fresh Pi planning and a
+  clean numbered worktree while preserving prior evidence;
 - HTTP API, persisted WebSocket event replay, six-column React Kanban, Actions,
   and a streaming desktop/mobile Discovery chat;
 - installable PWA with standalone mode, explicit frontend updates, offline app
