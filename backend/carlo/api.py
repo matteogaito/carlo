@@ -31,7 +31,6 @@ from .auth import InvalidCredentials, LoginThrottled, login, resolve_session, re
 from .actions import ActionConfigError, load_catalog, preflight
 from .config import Settings
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
-from .git import slug
 from .models import AgentProfile as AgentProfileRecord
 from .maintenance import record_startup
 from .models import (
@@ -50,6 +49,7 @@ from .models import (
 from .provider import AgentProfile, CodingAgentProvider, ProviderError
 from .ssh import HostScan, SshError, SshTransport, validate_runner
 from .telegram import TelegramNotifier, TelegramTransport, telegram_enabled
+from .tasks import TaskCreationError, create_task as create_task_record
 
 
 class ProjectCreate(BaseModel):
@@ -623,50 +623,17 @@ def create_app(
     async def create_task(
         payload: TaskCreate, session: AsyncSession = Depends(get_session)
     ) -> dict[str, Any]:
-        project = await session.scalar(
-            select(Project).where(Project.id == payload.project_id).with_for_update()
-        )
-        if project is None:
-            raise HTTPException(404, "project not found")
-        sequence = project.next_task_sequence
-        project.next_task_sequence += 1
-        task_id = f"{project.key}-{sequence}"
-        if len(payload.goal.encode()) > 1024 * 1024:
-            raise HTTPException(413, "megaprompt must be at most 1 MiB")
-        repository = Path(project.repository_path).resolve()
-        prompt_directory = repository / "prompts"
         try:
-            prompt_directory.mkdir(parents=True, exist_ok=True)
-            if not prompt_directory.resolve().is_relative_to(repository):
-                raise HTTPException(422, "project prompts path leaves the repository")
-            prompt_path = prompt_directory / (
-                f"{datetime.now().astimezone().date().isoformat()}-"
-                f"{task_id}-{slug(payload.title)}.md"
+            task = await create_task_record(
+                session,
+                payload.project_id,
+                payload.title,
+                payload.goal,
+                priority=payload.priority,
+                created_source=payload.created_source,
             )
-            with prompt_path.open("x", encoding="utf-8") as destination:
-                destination.write(payload.goal)
-        except FileExistsError as error:
-            raise HTTPException(409, "task prompt already exists") from error
-        except OSError as error:
-            raise HTTPException(500, "could not save task prompt") from error
-        task = Task(
-            id=task_id,
-            project=project,
-            sequence=sequence,
-            title=payload.title,
-            goal=payload.goal,
-            prompt_path=str(prompt_path.relative_to(repository)),
-            priority=payload.priority,
-            created_source=payload.created_source,
-        )
-        session.add_all(
-            [task, Event(task=task, type="task.created", payload={"source": payload.created_source})]
-        )
-        try:
-            await session.commit()
-        except Exception:
-            prompt_path.unlink(missing_ok=True)
-            raise
+        except TaskCreationError as error:
+            raise HTTPException(error.status_code, error.detail) from error
         return await _task_view(session, task)
 
     @api.get("/tasks")
