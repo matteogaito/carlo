@@ -767,11 +767,31 @@ def create_app(
         selected = set(payload.proposal_ids)
         if selected and not selected.issubset({str(item.get("id")) for item in proposals}):
             raise HTTPException(422, "unknown task proposal")
+        pending = [
+            proposal
+            for proposal in proposals
+            if not proposal.get("created_task_id")
+            and (not selected or str(proposal.get("id")) in selected)
+        ]
+        planned: list[PlanPayload] = []
+        for proposal in pending:
+            try:
+                planned.append(
+                    PlanPayload.model_validate(
+                        {
+                            "brief_markdown": proposal.get("brief_markdown"),
+                            "plan_markdown": proposal.get("plan_markdown"),
+                            "metadata": proposal.get("metadata"),
+                        }
+                    )
+                )
+            except ValueError as error:
+                raise HTTPException(
+                    409,
+                    f"task proposal '{proposal.get('title', 'untitled')}' is not fully planned",
+                ) from error
         created: list[Task] = []
-        for proposal in proposals:
-            proposal_id = str(proposal.get("id"))
-            if (selected and proposal_id not in selected) or proposal.get("created_task_id"):
-                continue
+        for proposal, approved_plan in zip(pending, planned, strict=True):
             try:
                 task = await create_task_record(
                     session,
@@ -784,6 +804,27 @@ def create_app(
                 if isinstance(error, TaskCreationError):
                     raise HTTPException(error.status_code, error.detail) from error
                 raise HTTPException(422, "invalid task proposal") from error
+            task.status, task.stage = transition(task.status, task.stage, "plan")
+            task.status, task.stage = transition(task.status, task.stage, "briefed")
+            task.status, task.stage = transition(task.status, task.stage, "planned")
+            task.status, task.stage = transition(task.status, task.stage, "approve")
+            task.approved_plan_revision = 1
+            task.version += 1
+            now = datetime.now(UTC)
+            session.add_all(
+                [
+                    PlanRevision(
+                        task=task,
+                        revision=1,
+                        brief_markdown=approved_plan.brief_markdown,
+                        plan_markdown=approved_plan.plan_markdown,
+                        metadata_json=approved_plan.metadata.model_dump(),
+                        approved_at=now,
+                    ),
+                    Event(task=task, type="planning.completed", payload={"revision": 1}),
+                    Event(task=task, type="plan.approved", payload={"revision": 1}),
+                ]
+            )
             proposal["created_task_id"] = task.id
             created.append(task)
         discovery.state = {**discovery.state, "task_proposals": proposals}

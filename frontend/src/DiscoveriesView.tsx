@@ -75,6 +75,8 @@ export function DiscoveriesView({ api, projects, event, setError }: {
   }
 
   const state = selected?.state
+  const pendingProposals = state?.task_proposals.filter((proposal) => !proposal.created_task_id) || []
+  const allProposalsReady = pendingProposals.length > 0 && pendingProposals.every(proposalReady)
   return <main className={`discoveries-page${selected ? ' conversation-open' : ''}`}>
     <aside className="discovery-list">
       <header><div><span>UNDERSTAND</span><h1>Discoveries</h1></div><button onClick={() => setCreating(true)}>New</button></header>
@@ -116,12 +118,26 @@ export function DiscoveriesView({ api, projects, event, setError }: {
       <Context title="Open questions" values={state?.unresolved_questions || []} />
       <Context title="Files explored" values={state?.inspected_resources || []} code />
       <Context title="Commands" values={state?.commands || []} code />
-      {!!state?.task_proposals.length && <section><h3>Tasks</h3>{state.task_proposals.map((proposal) => <article className="proposal" key={proposal.id}><strong>{proposal.title}</strong>{proposal.created_task_id ? <a href="#">{proposal.created_task_id}</a> : <button onClick={() => void api.createDiscoveryTasks(selected.id, [proposal.id]).then(refresh)}>Create task</button>}</article>)}<button className="create-all" onClick={() => void api.createDiscoveryTasks(selected.id).then(refresh)}>Create all</button></section>}
+      {!!state?.task_proposals.length && <section><h3>Ready tasks</h3>{state.task_proposals.map((proposal) => <article className="proposal" key={proposal.id}>
+        {proposal.created_task_id ? <><strong>{proposal.title}</strong><span className="proposal-state">Created · {proposal.created_task_id}</span></> : <>
+          <details>
+            <summary><strong>{proposal.title}</strong><span className="proposal-state">{proposalReady(proposal) ? 'Plan ready' : 'Planning in Discovery…'}</span></summary>
+            {proposalReady(proposal) && <div className="proposal-plan"><h4>Brief</h4><Markdown>{proposal.brief_markdown}</Markdown><h4>Plan</h4><Markdown>{proposal.plan_markdown}</Markdown>
+              {!!proposal.metadata?.implementation_phases?.length && <ol>{proposal.metadata.implementation_phases.map((phase) => <li key={phase}>{phase}</li>)}</ol>}
+            </div>}
+          </details>
+          <button disabled={!proposalReady(proposal)} onClick={() => void api.createDiscoveryTasks(selected.id, [proposal.id]).then(refresh)}>Create Ready task</button>
+        </>}
+      </article>)}<button className="create-all" disabled={!allProposalsReady} onClick={() => void api.createDiscoveryTasks(selected.id).then(refresh)}>Create all Ready tasks</button></section>}
       {selected.status === 'OPEN' && <footer><button className="danger" onClick={() => void api.closeDiscovery(selected.id).then(setSelected)}>Close Discovery</button></footer>}
     </aside>}
 
     {creating && <div className="modal-backdrop"><section className="modal-panel discovery-create" role="dialog" aria-modal="true" aria-labelledby="new-discovery"><header><div><span>NEW CONVERSATION</span><h2 id="new-discovery">Start Discovery</h2></div><button className="close" onClick={() => setCreating(false)}>×</button></header><form onSubmit={create}><label>Project<select name="project_id">{projects.map((project) => <option key={project.id} value={project.id}>{project.key} · {project.name}</option>)}</select></label><label>Title<input name="title" required autoFocus /></label><label>First message<textarea name="message" rows={7} required /></label><footer><button type="button" onClick={() => setCreating(false)}>Cancel</button><button className="primary" type="submit">Start Discovery</button></footer></form></section></div>}
   </main>
+}
+
+function proposalReady(proposal: Discovery['state']['task_proposals'][number]): boolean {
+  return Boolean(proposal.brief_markdown?.trim() && proposal.plan_markdown?.trim() && proposal.metadata)
 }
 
 function Context({ title, values, code = false }: { title: string; values: string[]; code?: boolean }) {

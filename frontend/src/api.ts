@@ -78,6 +78,9 @@ export interface DiscoveryProposal {
   title: string
   megaprompt: string
   depends_on: string[]
+  brief_markdown?: string
+  plan_markdown?: string
+  metadata?: Plan['metadata']
   created_task_id?: string
 }
 

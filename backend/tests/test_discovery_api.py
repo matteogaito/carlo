@@ -44,6 +44,24 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
         async with factory() as session:
             record = await session.get(Discovery, discovery["id"])
             record.state = {
+                "task_proposals": [
+                    {
+                        "id": "csv",
+                        "title": "Add CSV import",
+                        "megaprompt": "Implement CSV import.",
+                        "depends_on": [],
+                    }
+                ]
+            }
+            await session.commit()
+        unplanned = await client.post(
+            f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": []}
+        )
+        assert unplanned.status_code == 409
+
+        async with factory() as session:
+            record = await session.get(Discovery, discovery["id"])
+            record.state = {
                 "summary": "CSV import should reuse the existing ingestion service.",
                 "findings": ["src/ingest.py owns ingestion"],
                 "decisions": ["CSV first"],
@@ -51,8 +69,20 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
                 "inspected_resources": ["src/ingest.py"],
                 "commands": ["pytest -q: passed"],
                 "task_proposals": [
-                    {"id": "csv", "title": "Add CSV import", "megaprompt": "Implement CSV import using src/ingest.py.", "depends_on": []},
-                    {"id": "ui", "title": "Add import UI", "megaprompt": "Add the CSV import UI after the backend.", "depends_on": ["csv"]},
+                    {
+                        "id": "csv", "title": "Add CSV import",
+                        "megaprompt": "Implement CSV import using src/ingest.py.",
+                        "depends_on": [], "brief_markdown": "# Brief\nReuse ingestion.",
+                        "plan_markdown": "# Plan\nImplement CSV parsing, then test it.",
+                        "metadata": {"skills": [], "implementation_phases": ["Implement parsing", "Validate imports"], "validation_commands": ["pytest -q"], "browser_validation": False, "build_required": False, "run_required": False, "deployment_expected": False, "risk_flags": [], "affected_areas": ["src/ingest.py"]},
+                    },
+                    {
+                        "id": "ui", "title": "Add import UI",
+                        "megaprompt": "Add the CSV import UI after the backend.",
+                        "depends_on": ["csv"], "brief_markdown": "# Brief\nUse the existing UI.",
+                        "plan_markdown": "# Plan\nAdd and browser-test the import flow.",
+                        "metadata": {"skills": [], "implementation_phases": ["Add import UI"], "validation_commands": ["npm test"], "browser_validation": True, "build_required": True, "run_required": True, "deployment_expected": False, "risk_flags": [], "affected_areas": ["frontend"]},
+                    },
                 ],
             }
             await session.commit()
@@ -60,22 +90,14 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
         tasks = await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": []})
         assert tasks.status_code == 201
         assert [task["id"] for task in tasks.json()] == ["REP-1", "REP-2"]
+        assert [task["status"] for task in tasks.json()] == ["READY", "READY"]
+        assert [task["stage"] for task in tasks.json()] == ["queued", "queued"]
+        assert tasks.json()[0]["approved_plan_revision"] == 1
+        assert tasks.json()[0]["plan"]["plan_markdown"].startswith("# Plan")
+        assert tasks.json()[0]["plan"]["approved_at"] is not None
         detail = (await client.get(f'/api/discoveries/{discovery["id"]}')).json()
         assert detail["status"] == "OPEN"
         assert [proposal["created_task_id"] for proposal in detail["state"]["task_proposals"]] == ["REP-1", "REP-2"]
-
-        planning = await client.post("/api/tasks/REP-1/plan")
-        assert planning.status_code == 200
-        assert planning.json()["planning_question"]["text"] == "Which error format should the API use?"
-        provider.output = json.dumps({
-            "brief_markdown": "# Brief\nUse the existing error envelope.",
-            "plan_markdown": "# Plan\nImplement and test it.",
-            "metadata": {"skills": [], "validation_commands": ["pytest -q"], "browser_validation": False, "build_required": False, "run_required": False, "deployment_expected": False, "risk_flags": [], "affected_areas": ["backend"]},
-        })
-        answered = await client.post("/api/tasks/REP-1/plan/answer", json={"answer": "Use the existing envelope."})
-        assert answered.status_code == 200
-        assert answered.json()["stage"] == "awaiting_approval"
-        assert provider.calls[0][3] == provider.calls[1][3]
 
         closed = await client.post(f'/api/discoveries/{discovery["id"]}/close')
         assert closed.status_code == 200

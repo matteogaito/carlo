@@ -113,10 +113,13 @@ restart, running turns return to the durable queue and reuse the same Pi session
 identity. CARLO keeps at most three live Pi Discovery processes per project and
 evicts only the least-recently-used idle process.
 
-When the conversation has produced a concrete change, Pi proposes self-contained
-megaprompts. **Create task** or **Create all** sends them through the normal Task
-identity, prompt artifact, planning, approval, and execution lifecycle. Closing
-a Discovery archives it read-only; it is not deleted.
+When the conversation has produced a concrete change, Pi prepares each Task's
+self-contained megaprompt, Brief, Plan, structured phases, and validation
+metadata while the repository context is still available. The Context panel
+previews that handoff. **Create Ready task** or **Create all Ready tasks** is the
+user's approval: CARLO persists the approved plan and queues the Task directly,
+without repeating planning. Incomplete proposals cannot be created. Closing a
+Discovery archives it read-only; it is not deleted.
 
 The runtime uses [`skills/carlo-discovery`](skills/carlo-discovery/) for the
 conversation contract. [`skills/carlo-ui-design`](skills/carlo-ui-design/)

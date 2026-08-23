@@ -366,6 +366,28 @@ describe('CARLO board', () => {
     expect(sendDiscoveryMessage).toHaveBeenCalledWith(7, 'What about errors?')
   })
 
+  it('previews a completed Discovery plan before creating its Ready task', async () => {
+    const proposal = {
+      id: 'csv', title: 'Add CSV import', megaprompt: 'Implement CSV import.', depends_on: [],
+      brief_markdown: 'Reuse the **existing ingestion service**.',
+      plan_markdown: 'Implement parsing and preserve the error envelope.',
+      metadata: { skills: [], implementation_phases: ['Implement parsing', 'Validate imports'], validation_commands: ['pytest -q'], browser_validation: false, build_required: false, run_required: false, deployment_expected: false, risk_flags: [], affected_areas: ['src/ingest.py'] },
+    }
+    const discovery: Discovery = {
+      id: 9, project_id: 1, title: 'Plan CSV', status: 'OPEN',
+      state: { summary: 'CSV is understood.', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [proposal] },
+      final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
+    }
+    const createDiscoveryTasks = vi.fn(async () => [])
+    render(<DiscoveriesView api={{ ...api, listDiscoveries: async () => [discovery], getDiscovery: async () => discovery, createDiscoveryTasks }} projects={[]} event={null} setError={() => undefined} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Plan CSV/ }))
+    await userEvent.click(screen.getByText('Add CSV import'))
+    expect(screen.getByText('existing ingestion service')).toBeTruthy()
+    expect(screen.getByText('Implement parsing and preserve the error envelope.')).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Create all Ready tasks' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
   it('renders aggregated realtime Discovery deltas', async () => {
     const discovery: Discovery = {
       id: 8, project_id: 1, title: 'Streaming', status: 'OPEN',

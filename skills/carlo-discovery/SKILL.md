@@ -35,15 +35,29 @@ Do not use memory as a substitute for the transcript. Correct stale state when l
 
 When a concrete change emerges, identify distinct Tasks and ask only for missing high-impact information. Once sufficient:
 
-1. Clearly propose each Task in chat.
-2. Put the same proposals in `task_proposals`.
-3. Wait for user confirmation; CARLO creates the real Tasks.
+1. Build an evidence-oriented Brief and implementation Plan while repository
+   context is already available in the Discovery.
+2. Clearly propose each fully planned Task in chat.
+3. Put the same proposals in `task_proposals`.
+4. Wait for user confirmation; CARLO creates and approves the real Tasks.
 
 Each proposal contains:
 
 - `title`: concise goal title;
 - `megaprompt`: self-contained implementation input with goal, scope, relevant findings and decisions, evidence, files/symbols, acceptance criteria, dependencies, constraints, and validation commands;
-- `depends_on`: titles of proposals that must finish first.
+- `depends_on`: titles of proposals that must finish first;
+- `brief_markdown`: repository understanding, evidence, constraints, risks,
+  assumptions, relevant files and symbols;
+- `plan_markdown`: ordered, technical implementation strategy with invariants,
+  error handling, validation and stopping conditions;
+- `metadata`: `skills`, concise ordered `implementation_phases`, verified
+  `validation_commands`, the four validation/deployment booleans, `risk_flags`,
+  and `affected_areas`, using the same contract as CARLO planning.
+
+Only emit a proposal after high-impact questions are resolved. The plan should
+shift costly decisions upstream without brittle line-by-line pseudocode. The
+user's Create action approves the displayed plans, so incomplete proposals must
+remain questions in the conversation instead of entering `task_proposals`.
 
 Do not create placeholder candidates, split work merely for organizational neatness, or include unrelated Discovery history. A Discovery may create zero, one, or many Tasks and remain open afterward.
 
@@ -53,4 +67,5 @@ Do not create placeholder candidates, split work merely for organizational neatn
 - Repeating the whole transcript: update concise structured state instead.
 - Treating a hypothesis as a finding: label it and verify where practical.
 - Sneaking implementation into diagnostics: stop and propose a Task.
-- Producing an underspecified megaprompt: include the evidence already gathered so the planner need not repeat Discovery.
+- Producing an underspecified handoff: include the evidence and complete plan so
+  the Task does not repeat Discovery or planning.
