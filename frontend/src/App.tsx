@@ -105,7 +105,13 @@ export function App({ api = httpApi }: { api?: Api }) {
         return
       }
       setError(cause instanceof Error ? cause.message : 'Action failed')
+      await refresh()
     }
+  }
+
+  async function beginPlanning(task: Task) {
+    setSelected(task)
+    await act(() => api.startPlanning(task.id))
   }
 
   if (user === undefined) {
@@ -148,7 +154,7 @@ export function App({ api = httpApi }: { api?: Api }) {
         <button className={view === 'discoveries' ? 'active' : ''} onClick={() => { setView('discoveries'); setSelected(null) }}>Discoveries</button>
         <button className={view === 'actions' ? 'active' : ''} onClick={() => { setView('actions'); setSelected(null) }}>Actions</button>
       </nav>
-      {view === 'board' && <CreateStrip api={api} projects={projects} refresh={refresh} setError={setError} />}
+      {view === 'board' && <CreateStrip api={api} projects={projects} refresh={refresh} setError={setError} onTaskCreated={beginPlanning} />}
       {error && <div className="error-banner" role="alert">{error}</div>}
       {installUpdate && <div className="update-banner">A CARLO update is ready.<button onClick={installUpdate}>Update now</button></div>}
 
@@ -238,11 +244,12 @@ function LoginForm({ api, authenticated }: {
   )
 }
 
-function CreateStrip({ api, projects, refresh, setError }: {
+function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   api: Api
   projects: Project[]
   refresh: () => Promise<void>
   setError: (message: string) => void
+  onTaskCreated: (task: Task) => Promise<void>
 }) {
   const [projectOpen, setProjectOpen] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
@@ -283,7 +290,7 @@ function CreateStrip({ api, projects, refresh, setError }: {
         promptFilename = file.name
       }
       if (!goal.trim()) throw new Error('Megaprompt cannot be empty')
-      await api.createTask({
+      const task = await api.createTask({
         project_id: Number(data.get('project_id')),
         title: String(data.get('title')),
         goal,
@@ -292,7 +299,7 @@ function CreateStrip({ api, projects, refresh, setError }: {
       form.reset()
       setPromptMode('text')
       setTaskOpen(false)
-      await refresh()
+      await onTaskCreated(task)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not create task')
     }
@@ -362,6 +369,10 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning }: {
   answerPlanning: (answer: string) => void
 }) {
   const validations = task.plan?.metadata.validation_commands || []
+  const planningActivity = (task.events || [])
+    .filter((event) => event.type.startsWith('planning.'))
+    .slice(0, 8)
+    .reverse()
   return (
     <aside className="task-detail" aria-label={`${task.id} details`}>
       <header>
@@ -369,6 +380,14 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning }: {
         <button className="close" onClick={close} aria-label="Close task detail">×</button>
       </header>
       <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
+      {task.stage === 'planning' && !task.planning_question && <section className="planning-live" aria-live="polite">
+        <h3>Pi is planning</h3>
+        <div className="thinking"><i aria-hidden="true" />Repository-aware planning is active</div>
+        {planningActivity.map((event) => <p className="timeline-row" key={event.sequence}>
+          <time>{new Date(event.created_at).toLocaleTimeString()}</time>
+          {planningEventLabel(event)}
+        </p>)}
+      </section>}
       <section><h3>Goal</h3><p>{task.goal}</p></section>
       {task.planning_question && <section className="planner-question">
         <h3>Planner question</h3>
@@ -419,4 +438,14 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning }: {
       </footer>
     </aside>
   )
+}
+
+function planningEventLabel(event: Event): string {
+  const tool = String(event.payload.tool || 'Tool')
+  const detail = String(event.payload.detail || '')
+  if (event.type === 'planning.exploring') return 'Exploring repository'
+  if (event.type === 'planning.tool.started') return `${tool}${detail ? ` · ${detail}` : ''}`
+  if (event.type === 'planning.tool.completed') return `${tool} ${event.payload.failed ? 'failed' : 'completed'}`
+  if (event.type === 'planning.drafting') return 'Drafting Brief and Plan'
+  return event.type.replaceAll('.', ' ')
 }

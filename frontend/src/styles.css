@@ -63,7 +63,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .create-strip { min-height: 48px; display: flex; align-items: flex-start; gap: 8px; padding: 8px 24px; border-bottom: 1px solid var(--line); background: var(--paper); }
 .create-strip > button, .task-detail footer button { border: 1px solid var(--ink); color: var(--ink); background: transparent; padding: 7px 12px; font-weight: 700; }
 .create-strip > button:hover, .task-detail footer button:hover { background: var(--ink); color: white; }
-.create-strip form { display: flex; gap: 10px; align-items: end; padding-left: 12px; }
+.create-strip > form { display: flex; gap: 10px; align-items: end; padding-left: 12px; }
 .create-strip label { display: grid; gap: 3px; font: 600 10px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .05em; }
 .create-strip input, .create-strip textarea, .create-strip select { min-width: 120px; max-width: 240px; border: 1px solid #86928b; background: var(--paper); padding: 6px; }
 .create-strip form button { border: 0; background: var(--pine); color: white; padding: 8px 12px; font-weight: 700; }
@@ -115,6 +115,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .planner-question form, .planner-question label { display: grid; gap: 8px; }
 .planner-question textarea { width: 100%; resize: vertical; border: 1px solid #aaa; border-radius: 8px; padding: 9px; }
 .planner-question button { justify-self: start; border: 0; border-radius: 8px; padding: 9px 12px; color: white; background: var(--ink); font-weight: 700; }
+.planning-live { background: #f4f4f1; }
+.planning-live .thinking { margin-bottom: 12px; }
 
 .actions-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 122px); }
 .actions-workspace.detail-open { grid-template-columns: minmax(0, 1fr) 460px; }

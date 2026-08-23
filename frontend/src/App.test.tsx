@@ -107,19 +107,36 @@ describe('CARLO board', () => {
       integration_branch: 'carlo-Dev',
       validation_commands: [],
     }
-    const createTask = vi.fn(async () => ({
+    const createdTask: Task = {
       ...task,
       id: 'ECA-1',
       project_id: 1,
       title: 'Vinted integration',
       goal: '# Megaprompt\nImplement Vinted.',
       prompt_path: 'prompts/2026-08-21-ECA-1-vinted-integration.md',
+      status: 'NOT_READY',
+      stage: 'created',
+      plan: null,
+    }
+    const createTask = vi.fn(async () => createdTask)
+    const startPlanning = vi.fn(async () => ({
+      ...createdTask,
+      stage: 'planning',
+      events: [{
+        sequence: 1,
+        task_id: 'ECA-1',
+        discovery_id: null,
+        type: 'planning.exploring',
+        payload: {},
+        created_at: '2026-08-23T08:00:00Z',
+      }],
     }))
     render(<App api={{
       ...api,
       listProjects: async () => [project],
       listTasks: async () => [],
       createTask,
+      startPlanning,
     }} />)
 
     await userEvent.click(await screen.findByRole('button', { name: '+ Task' }))
@@ -146,8 +163,12 @@ describe('CARLO board', () => {
         goal: '# Megaprompt\nImplement Vinted.',
         prompt_filename: 'vinted.md',
       })
+      expect(startPlanning).toHaveBeenCalledWith('ECA-1')
       expect(screen.queryByRole('dialog', { name: 'Create task' })).toBeNull()
     })
+    expect(await screen.findByRole('complementary', { name: 'ECA-1 details' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Pi is planning' })).toBeTruthy()
+    expect(screen.getByText('Exploring repository')).toBeTruthy()
   })
 
   it('answers a focused planner question from task detail', async () => {
