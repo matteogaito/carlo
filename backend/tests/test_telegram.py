@@ -89,10 +89,26 @@ def test_format_includes_task_and_severity() -> None:
     assert "revision: 2" in message
 
 
+def test_planning_failure_only_includes_the_short_error() -> None:
+    event = Event(
+        type="planning.failed",
+        task_id="CAR-7",
+        payload={"error": "Pi event exceeded 4 MiB", "internal": "noisy detail"},
+    )
+
+    message, severity = format_event(event)
+
+    assert severity == "blocking"
+    assert "error: Pi event exceeded 4 MiB" in message
+    assert "internal" not in message
+    assert "noisy detail" not in message
+
+
 @pytest.mark.parametrize(
     "event_type",
     [
         "planning.failed",
+        "planning.question",
         "execution.blocked",
         "execution.failed",
         "execution.interrupted",
@@ -217,6 +233,35 @@ async def test_delivery_skips_history_and_is_not_duplicated_after_restart(factor
         )
         assert delivery is not None
         assert delivery.status == "sent"
+
+
+@pytest.mark.asyncio
+async def test_all_level_skips_internal_planning_activity(factory) -> None:
+    transport = FakeTransport()
+    notifier = TelegramNotifier(factory, transport, "token", "123", "all")
+    await notifier.initialize_cursor()
+    started = await add_event(factory, "planning.tool.started")
+    completed = await add_event(factory, "planning.tool.completed")
+    await add_event(factory, "planning.completed")
+
+    assert await notifier.deliver_next() is True
+    assert await notifier.deliver_next() is True
+    assert await notifier.deliver_next() is True
+    assert len(transport.messages) == 1
+    assert "Plan completed" in transport.messages[0][2]
+    async with factory() as session:
+        deliveries = (
+            await session.scalars(
+                select(NotificationDelivery)
+                .where(
+                    NotificationDelivery.event_sequence.in_(
+                        (started.sequence, completed.sequence)
+                    )
+                )
+                .order_by(NotificationDelivery.event_sequence)
+            )
+        ).all()
+        assert [delivery.status for delivery in deliveries] == ["skipped", "skipped"]
 
 
 @pytest.mark.asyncio

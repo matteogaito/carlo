@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from carlo.provider import AgentProfile, PiProvider
+from carlo.provider import AgentProfile, PiProvider, ProviderError
 
 
 @pytest.mark.asyncio
@@ -50,6 +50,53 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
         "--skill", str(skill_root / "carlo-planning"),
         "Inspect the repo",
     ]
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_accepts_json_events_larger_than_asyncio_default(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'result': 'x' * 70000}))\n"
+        "print(json.dumps({'type': 'final', 'output': 'plan ready'}))\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+
+    result = await provider.run(
+        AgentProfile("plan", None, None, (), ()),
+        "Plan",
+        str(tmp_path),
+        "CAR-2-plan-1",
+    )
+
+    assert result.output == "plan ready"
+    assert len(result.events[0]["result"]) == 70000
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_rejects_a_json_event_larger_than_four_mebibytes(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'result': 'x' * (4 * 1024 * 1024)}))\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+
+    with pytest.raises(ProviderError, match="larger than 4 MiB"):
+        await provider.run(
+            AgentProfile("plan", None, None, (), ()),
+            "Plan",
+            str(tmp_path),
+            "CAR-3-plan-1",
+        )
 
 
 @pytest.mark.asyncio

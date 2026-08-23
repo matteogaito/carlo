@@ -8,6 +8,8 @@ from typing import Any, Protocol
 
 from .maintenance import pi_process_lock
 
+PI_JSON_EVENT_LIMIT = 4 * 1024 * 1024
+
 
 class ProviderError(RuntimeError):
     pass
@@ -171,12 +173,21 @@ class PiProvider:
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=PI_JSON_EVENT_LIMIT,
             )
             self._processes[session_id] = process
             stderr_task = asyncio.create_task(process.stderr.read())
             events: list[dict[str, Any]] = []
             try:
-                while line := await process.stdout.readline():
+                while True:
+                    try:
+                        line = await process.stdout.readline()
+                    except ValueError as error:
+                        raise ProviderError(
+                            "Pi emitted a JSON event larger than 4 MiB"
+                        ) from error
+                    if not line:
+                        break
                     try:
                         event = json.loads(line)
                     except (json.JSONDecodeError, UnicodeDecodeError) as error:

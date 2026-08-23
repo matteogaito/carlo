@@ -20,6 +20,7 @@ LABELS = {
     "planning.started": "Planning started",
     "planning.completed": "Plan completed",
     "planning.failed": "Planning failed",
+    "planning.question": "Planner question needs an answer",
     "plan.approved": "Plan approved",
     "execution.started": "Execution started",
     "execution.completed": "Task completed",
@@ -33,6 +34,20 @@ LABELS = {
     "pi.update_completed": "Pi weekly update completed",
     "pi.update_failed": "Pi weekly update failed",
 }
+NOTIFY_EVENTS = frozenset(LABELS)
+DETAIL_FIELDS = {
+    "planning.completed": ("revision",),
+    "planning.failed": ("error",),
+    "planning.question": ("text",),
+    "execution.blocked": ("outcome", "reason", "error"),
+    "execution.failed": ("outcome", "error"),
+    "execution.interrupted": ("interruption", "limit", "error"),
+    "plan.amendment_proposed": ("summary", "reason"),
+    "system.started": ("hostname", "pi_version"),
+    "worker.started": ("hostname", "pi_version"),
+    "pi.update_completed": ("version", "previous_version"),
+    "pi.update_failed": ("error", "exit_code"),
+}
 ALWAYS_NOTIFY_EVENTS = {
     "system.started",
     "worker.started",
@@ -41,6 +56,7 @@ ALWAYS_NOTIFY_EVENTS = {
 }
 BLOCKING_EVENTS = {
     "planning.failed",
+    "planning.question",
     "execution.blocked",
     "execution.failed",
     "execution.interrupted",
@@ -123,7 +139,10 @@ def format_event(event: Event) -> tuple[str, str]:
     label = LABELS.get(event.type, event.type.replace(".", " ").capitalize())
     identity = event.task_id or "CARLO"
     lines = [f"[{severity.upper()}] {identity} — {label}"]
-    for key, value in list(event.payload.items())[:6]:
+    for key in DETAIL_FIELDS.get(event.type, ()):
+        if key not in event.payload:
+            continue
+        value = event.payload[key]
         rendered = str(value).replace("\n", " ")[:240]
         lines.append(f"{key}: {rendered}")
     return "\n".join(lines)[:3900], severity
@@ -200,6 +219,12 @@ class TelegramNotifier:
                 return True
             if delivery.next_attempt_at is not None and delivery.next_attempt_at > now:
                 return False
+
+            if event.type not in NOTIFY_EVENTS:
+                delivery.status = "skipped"
+                cursor.last_sequence = event.sequence
+                await session.commit()
+                return True
 
             message, severity = format_event(event)
             if (
