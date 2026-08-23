@@ -14,6 +14,7 @@ export function DiscoveriesView({ api, projects, event, setError }: {
   const [creating, setCreating] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
   const [stream, setStream] = useState('')
+  const [activity, setActivity] = useState('')
 
   const refresh = useCallback(async () => {
     const discoveries = await api.listDiscoveries()
@@ -26,13 +27,27 @@ export function DiscoveriesView({ api, projects, event, setError }: {
     if (!selected || event?.discovery_id !== selected.id) return
     if (event.type === 'discovery.message.delta' && typeof event.payload.delta === 'string') {
       setStream((value) => value + event.payload.delta)
+      setActivity('Pi is drafting a response…')
+    } else if (event.type === 'discovery.tool.started') {
+      const tool = String(event.payload.tool || 'Tool')
+      const detail = String(event.payload.detail || '')
+      setActivity(`${tool}${detail ? ` · ${detail}` : ''}`)
+    } else if (event.type === 'discovery.tool.completed') {
+      setActivity(`${String(event.payload.tool || 'Tool')} ${event.payload.failed ? 'failed' : 'completed'}`)
+    } else if (event.type === 'discovery.turn.started') {
+      setActivity('Pi is starting the repository session…')
     } else if (event.type === 'discovery.turn.completed' || event.type === 'discovery.turn.interrupted' || event.type === 'discovery.turn.failed') {
       setStream('')
+      setActivity('')
     }
   }, [event?.sequence, selected?.id])
 
   async function open(discovery: Discovery) {
-    try { setSelected(await api.getDiscovery(discovery.id)) } catch (error) { setError(String(error)) }
+    try {
+      setStream('')
+      setActivity('')
+      setSelected(await api.getDiscovery(discovery.id))
+    } catch (error) { setError(String(error)) }
   }
 
   async function create(event: FormEvent<HTMLFormElement>) {
@@ -85,7 +100,7 @@ export function DiscoveriesView({ api, projects, event, setError }: {
             <Markdown>{message.content}</Markdown>
           </article>)}
         {stream && <article className="chat-message assistant streaming"><span>CARLO</span><Markdown>{stream}</Markdown></article>}
-        {selected.current_turn?.status === 'QUEUED' || selected.current_turn?.status === 'RUNNING' ? <div className="thinking"><i />Pi is exploring the repository… <button onClick={() => void api.stopDiscovery(selected.id).then(setSelected)}>Stop</button></div> : null}
+        {selected.current_turn?.status === 'QUEUED' || selected.current_turn?.status === 'RUNNING' ? <div className="thinking" aria-live="polite"><i />{activity || 'Pi is exploring the repository…'} <button onClick={() => void api.stopDiscovery(selected.id).then(setSelected)}>Stop</button></div> : null}
       </div>
       {selected.status === 'OPEN' ? <form className="chat-composer" onSubmit={send}>
         <label><span>Message</span><textarea aria-label="Message" name="message" rows={2} placeholder="Continue the Discovery…" required /></label>

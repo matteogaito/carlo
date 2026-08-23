@@ -141,8 +141,18 @@ class DiscoveryRuntime:
                         "tool": str(event.payload.get("toolName") or "tool"),
                         "args": event.payload.get("args", {}),
                     }
+                    await self._emit_tool_activity(
+                        discovery_id,
+                        "discovery.tool.started",
+                        pending_tools[tool_key],
+                    )
                 elif event.type == "tool_execution_end" and tool_key in pending_tools:
                     tool = pending_tools.pop(tool_key)
+                    await self._emit_tool_activity(
+                        discovery_id,
+                        "discovery.tool.completed",
+                        {"tool": tool["tool"], "failed": bool(event.payload.get("isError"))},
+                    )
                     tool["result"] = event.payload.get("result")
                     tools.append(tool)
             if await self._should_stop(turn_id, discovery_id):
@@ -264,6 +274,22 @@ class DiscoveryRuntime:
                     payload={"turn_id": turn_id, "delta": delta},
                 )
             )
+            await session.commit()
+
+    async def _emit_tool_activity(
+        self, discovery_id: int, event_type: str, tool: dict[str, Any]
+    ) -> None:
+        payload = {"tool": str(tool.get("tool") or "tool")[:80]}
+        if event_type == "discovery.tool.started":
+            args = tool.get("args") if isinstance(tool.get("args"), dict) else {}
+            payload["detail"] = next(
+                (str(args[key]) for key in ("path", "query", "command") if key in args),
+                "",
+            )[:500]
+        else:
+            payload["failed"] = bool(tool.get("failed"))
+        async with self.session_factory() as session:
+            session.add(Event(discovery_id=discovery_id, type=event_type, payload=payload))
             await session.commit()
 
 

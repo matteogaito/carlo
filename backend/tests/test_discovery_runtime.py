@@ -87,6 +87,17 @@ async def test_discovery_turn_persists_reply_state_and_memory(tmp_path: Path) ->
         assert Path(discovery.memory_path).read_text().startswith("# Discovery memory")
         events = (await session.scalars(select(Event).where(Event.discovery_id == discovery_id))).all()
         assert "Use the ingestion service." == "".join(event.payload["delta"] for event in events if event.type == "discovery.message.delta")
+        assert any(
+            event.type == "discovery.tool.started"
+            and event.payload == {"tool": "read", "detail": "src/ingest.py"}
+            for event in events
+        )
+        assert any(
+            event.type == "discovery.tool.completed"
+            and event.payload == {"tool": "read", "failed": False}
+            for event in events
+        )
+        assert "source" not in str([event.payload for event in events])
     await runtime.close()
     await engine.dispose()
 

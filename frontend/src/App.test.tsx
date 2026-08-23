@@ -317,6 +317,8 @@ describe('CARLO board', () => {
     const discoveryApi = { ...api, listDiscoveries: async () => [discovery], getDiscovery: async () => discovery }
     const { rerender } = render(<DiscoveriesView api={discoveryApi} projects={[]} event={null} setError={() => undefined} />)
     await userEvent.click(await screen.findByRole('button', { name: /Streaming/ }))
+    rerender(<DiscoveriesView api={discoveryApi} projects={[]} event={{ sequence: 98, task_id: null, discovery_id: 8, type: 'discovery.tool.started', payload: { tool: 'read', detail: 'src/ingest.py' }, created_at: '2026-08-23T08:00:30Z' }} setError={() => undefined} />)
+    expect(await screen.findByText('read · src/ingest.py')).toBeTruthy()
     rerender(<DiscoveriesView api={discoveryApi} projects={[]} event={{ sequence: 99, task_id: null, discovery_id: 8, type: 'discovery.message.delta', payload: { turn_id: 4, delta: 'Repository evidence' }, created_at: '2026-08-23T08:01:00Z' }} setError={() => undefined} />)
     expect(await screen.findByText('Repository evidence')).toBeTruthy()
   })
