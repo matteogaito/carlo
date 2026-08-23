@@ -33,6 +33,7 @@ ui:
 
 test:
 	node --test extensions/*.test.mjs
+	cd backend && uv run python -m compileall -q carlo
 	cd backend && uv run pytest -q
 	cd backend && uv run alembic check
 	cd frontend && npm test

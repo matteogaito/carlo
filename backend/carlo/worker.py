@@ -132,6 +132,9 @@ async def _action_loop(orchestrator: ActionOrchestrator) -> None:
         except Exception:
             logger.exception("action cycle interrupted; persisted run will be recovered")
             await asyncio.sleep(2)
+            continue
+        if run_id is None:
+            await asyncio.sleep(2)
 
 
 async def _discovery_loop(runtime: DiscoveryRuntime) -> None:
@@ -147,9 +150,6 @@ async def _discovery_loop(runtime: DiscoveryRuntime) -> None:
                 await asyncio.sleep(1)
 
     await asyncio.gather(*(consume() for _ in range(6)))
-            continue
-        if run_id is None:
-            await asyncio.sleep(2)
 
 
 def main() -> None:
