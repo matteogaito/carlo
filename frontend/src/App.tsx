@@ -11,6 +11,7 @@ import {
   type User,
 } from './api'
 import { ActionsView } from './ActionsView'
+import { DiscoveriesView } from './DiscoveriesView'
 import './styles.css'
 
 const columns: { status: TaskStatus; label: string; code: string }[] = [
@@ -38,8 +39,15 @@ export function App({ api = httpApi }: { api?: Api }) {
   const [selected, setSelected] = useState<Task | null>(null)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
-  const [view, setView] = useState<'board' | 'actions'>('board')
+  const [view, setView] = useState<'board' | 'discoveries' | 'actions'>('board')
   const [lastEvent, setLastEvent] = useState<Event | null>(null)
+  const [installUpdate, setInstallUpdate] = useState<(() => void) | null>(null)
+
+  useEffect(() => {
+    const ready = (event: globalThis.Event) => setInstallUpdate(() => (event as CustomEvent<() => void>).detail)
+    window.addEventListener('carlo-update-ready', ready)
+    return () => window.removeEventListener('carlo-update-ready', ready)
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
@@ -137,10 +145,12 @@ export function App({ api = httpApi }: { api?: Api }) {
 
       <nav className="view-tabs" aria-label="Main views">
         <button className={view === 'board' ? 'active' : ''} onClick={() => { setView('board'); setSelected(null) }}>Board</button>
+        <button className={view === 'discoveries' ? 'active' : ''} onClick={() => { setView('discoveries'); setSelected(null) }}>Discoveries</button>
         <button className={view === 'actions' ? 'active' : ''} onClick={() => { setView('actions'); setSelected(null) }}>Actions</button>
       </nav>
       {view === 'board' && <CreateStrip api={api} projects={projects} refresh={refresh} setError={setError} />}
       {error && <div className="error-banner" role="alert">{error}</div>}
+      {installUpdate && <div className="update-banner">A CARLO update is ready.<button onClick={installUpdate}>Update now</button></div>}
 
       {view === 'board' ? <main className={selected ? 'workspace detail-open' : 'workspace'}>
         <section className="board" aria-label="Task board">
@@ -184,7 +194,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             )}
           />
         )}
-      </main> : <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} />}
+      </main> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} /> : <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} />}
     </div>
   )
 }

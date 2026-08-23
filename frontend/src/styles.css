@@ -1,15 +1,15 @@
 :root {
   color: #15201c;
-  background: #e8ece9;
+  background: #f7f7f5;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-synthesis: none;
   --ink: #15201c;
-  --fog: #e8ece9;
-  --paper: #f8faf8;
+  --fog: #f7f7f5;
+  --paper: #fff;
   --pine: #205c4a;
   --brass: #c9913a;
   --fault: #a64b43;
-  --line: #b8c1bc;
+  --line: #dededb;
 }
 
 * { box-sizing: border-box; }
@@ -21,31 +21,31 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   outline-offset: 2px;
 }
 
-.shell { min-height: 100vh; }
+.shell { position: relative; min-height: 100vh; }
 .masthead {
-  min-height: 76px;
+  min-height: 82px;
   display: flex;
   align-items: center;
   gap: 24px;
   padding: 14px 24px;
-  color: var(--paper);
-  background: var(--ink);
-  border-bottom: 4px solid var(--pine);
+  color: var(--ink);
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
 }
 .wordmark { font-family: "Avenir Next", ui-rounded, sans-serif; letter-spacing: .08em; font-weight: 800; font-size: 24px; }
 .wordmark sup { margin-left: 5px; color: var(--brass); font: 600 11px ui-monospace, monospace; }
-.masthead p { margin: 0; color: #aebbb4; font-style: italic; }
+.masthead p { margin: 0; color: #898989; font-style: italic; }
 .runtime-state { margin-left: auto; display: flex; align-items: center; gap: 10px; font: 600 12px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .06em; }
 .pulse { width: 9px; height: 9px; border-radius: 50%; background: #718078; }
 .pulse.active { background: var(--brass); box-shadow: 0 0 0 5px rgb(201 145 58 / .15); animation: slow-pulse 3.8s ease-in-out infinite; }
 .connection { margin-left: 14px; color: #d4a19c; }
 .connection.online { color: #8bc6ad; }
 .signed-user { color: #aebbb4; }
-.sign-out { border: 1px solid #718078; color: var(--paper); background: transparent; padding: 5px 8px; font: inherit; text-transform: uppercase; }
-.sign-out:hover { border-color: var(--paper); }
-.view-tabs { display: flex; gap: 4px; padding: 8px 24px 0; background: #dce2de; border-bottom: 1px solid var(--line); }
-.view-tabs button { min-width: 100px; border: 1px solid transparent; border-bottom: 3px solid transparent; padding: 9px 14px 7px; color: #536159; background: transparent; font-weight: 750; }
-.view-tabs button.active { color: var(--ink); border-bottom-color: var(--pine); background: var(--paper); }
+.sign-out { border: 1px solid var(--line); color: var(--ink); background: transparent; padding: 7px 10px; border-radius: 9px; font: inherit; text-transform: uppercase; }
+.sign-out:hover { border-color: var(--ink); }
+.view-tabs { position: absolute; z-index: 3; top: 17px; left: 50%; transform: translateX(-50%); display: flex; gap: 3px; padding: 4px; background: #f1f1ef; border: 1px solid #ededeb; border-radius: 999px; }
+.view-tabs button { min-width: 104px; min-height: 40px; border: 0; border-radius: 999px; padding: 8px 16px; color: #666; background: transparent; font-weight: 700; }
+.view-tabs button.active { color: var(--ink); background: var(--paper); box-shadow: 0 1px 5px rgb(0 0 0 / .08); }
 
 .auth-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: var(--ink); }
 .auth-shell > p { color: #aebbb4; font: 600 12px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; }
@@ -60,7 +60,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .login-panel button:disabled { cursor: wait; opacity: .65; }
 .login-error { padding: 10px 12px; color: white; background: var(--fault); font-size: 13px; }
 
-.create-strip { min-height: 48px; display: flex; align-items: flex-start; gap: 8px; padding: 8px 24px; border-bottom: 1px solid var(--line); background: #dce2de; }
+.create-strip { min-height: 48px; display: flex; align-items: flex-start; gap: 8px; padding: 8px 24px; border-bottom: 1px solid var(--line); background: var(--paper); }
 .create-strip > button, .task-detail footer button { border: 1px solid var(--ink); color: var(--ink); background: transparent; padding: 7px 12px; font-weight: 700; }
 .create-strip > button:hover, .task-detail footer button:hover { background: var(--ink); color: white; }
 .create-strip form { display: flex; gap: 10px; align-items: end; padding-left: 12px; }
@@ -68,6 +68,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .create-strip input, .create-strip textarea, .create-strip select { min-width: 120px; max-width: 240px; border: 1px solid #86928b; background: var(--paper); padding: 6px; }
 .create-strip form button { border: 0; background: var(--pine); color: white; padding: 8px 12px; font-weight: 700; }
 .error-banner { margin: 12px 24px 0; padding: 10px 14px; color: #fff; background: var(--fault); font-weight: 650; }
+.update-banner { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 9px 14px; color: white; background: var(--ink); font-size: 13px; }
+.update-banner button { border: 1px solid white; border-radius: 7px; padding: 5px 8px; color: white; background: transparent; }
 
 .workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 124px); }
 .workspace.detail-open { grid-template-columns: minmax(0, 1fr) 430px; }
@@ -183,12 +185,72 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .runner-form input { width: 100%; border: 1px solid #86928b; padding: 8px; }
 .runner-form button { align-self: end; }
 
+.discoveries-page { display: grid; grid-template-columns: 300px minmax(420px, 1fr); min-height: calc(100vh - 82px); background: var(--paper); }
+.discoveries-page.conversation-open { grid-template-columns: 300px minmax(420px, 1fr) 330px; }
+.discovery-list { min-width: 0; padding: 22px 14px; background: #fafaf8; border-right: 1px solid var(--line); }
+.discovery-list > header, .discovery-chat > header, .discovery-context > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.discovery-list > header { padding: 0 8px 18px; }
+.discovery-list header span, .discovery-chat header span, .discovery-context header span, .discovery-welcome > span { color: #999; font: 750 9px ui-monospace, monospace; letter-spacing: .16em; }
+.discovery-list h1, .discovery-chat h2, .discovery-context h2 { margin: 3px 0 0; font: 760 22px "Avenir Next", ui-rounded, sans-serif; }
+.discovery-list header button, .discovery-chat header button, .discovery-context header button, .discovery-welcome button { min-height: 40px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; color: var(--ink); background: white; font-weight: 700; }
+.discovery-list > button { display: grid; gap: 6px; width: 100%; min-height: 100px; margin-bottom: 7px; padding: 14px; text-align: left; color: var(--ink); background: transparent; border: 1px solid transparent; border-radius: 14px; }
+.discovery-list > button:hover, .discovery-list > button.active { background: white; border-color: var(--line); box-shadow: 0 4px 16px rgb(0 0 0 / .04); }
+.discovery-list > button span { color: #888; font: 700 9px ui-monospace, monospace; letter-spacing: .08em; }
+.discovery-list > button strong { font-size: 15px; }
+.discovery-list > button small { overflow: hidden; color: #777; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.discovery-chat { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; height: calc(100vh - 82px); }
+.discovery-chat > header { min-height: 74px; padding: 14px 22px; border-bottom: 1px solid var(--line); }
+.mobile-back { display: none; }
+.message-stream { overflow-y: auto; padding: 30px max(24px, calc((100% - 760px) / 2)); scroll-behavior: smooth; }
+.chat-message { margin: 0 0 26px; color: #222; line-height: 1.65; }
+.chat-message > span { display: block; margin-bottom: 7px; color: #999; font: 750 9px ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; }
+.chat-message.user { width: fit-content; max-width: 82%; margin-left: auto; padding: 12px 16px; background: #f1f1ef; border-radius: 18px 18px 5px 18px; }
+.chat-message.user > span { text-align: right; }
+.chat-message p { margin: 0 0 12px; }
+.chat-message pre, .tool-message pre { max-width: 100%; overflow-x: auto; padding: 14px; color: #eee; background: #171717; border-radius: 10px; font: 12px/1.55 ui-monospace, monospace; }
+.chat-message code { font-family: ui-monospace, monospace; }
+.tool-message { margin: 0 0 18px; border: 1px solid var(--line); border-radius: 10px; background: #fafaf8; }
+.tool-message summary { padding: 10px 13px; cursor: pointer; color: #666; font: 650 11px ui-monospace, monospace; }
+.tool-message pre { margin: 0; border-radius: 0 0 9px 9px; }
+.thinking { display: flex; align-items: center; gap: 9px; margin: 0 0 24px; color: #777; font-size: 13px; }
+.thinking i { width: 8px; height: 8px; border-radius: 50%; background: var(--pine); animation: slow-pulse 1.8s infinite; }
+.thinking button { margin-left: auto; border: 0; color: var(--fault); background: transparent; }
+.chat-composer { display: flex; align-items: end; gap: 10px; margin: 0 max(18px, calc((100% - 800px) / 2)) 18px; padding: 10px; background: white; border: 1px solid #d2d2cf; border-radius: 18px; box-shadow: 0 8px 32px rgb(0 0 0 / .08); }
+.chat-composer label { flex: 1; }
+.chat-composer label > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.chat-composer textarea { width: 100%; resize: none; border: 0; outline: 0; padding: 8px; line-height: 1.45; }
+.chat-composer button { min-width: 72px; min-height: 44px; border: 0; border-radius: 12px; color: white; background: var(--ink); font-weight: 750; }
+.closed-note { margin: 0; padding: 18px; text-align: center; color: #777; border-top: 1px solid var(--line); }
+.discovery-context { height: calc(100vh - 82px); overflow-y: auto; background: #fafaf8; border-left: 1px solid var(--line); }
+.discovery-context > header { padding: 18px; border-bottom: 1px solid var(--line); }
+.discovery-context > header button { display: none; border: 0; font-size: 24px; }
+.discovery-context > section { padding: 17px 18px; border-bottom: 1px solid var(--line); }
+.discovery-context h3 { margin: 0 0 9px; color: #888; font: 750 9px ui-monospace, monospace; letter-spacing: .13em; text-transform: uppercase; }
+.discovery-context ul { display: grid; gap: 8px; margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.45; }
+.discovery-context code { overflow-wrap: anywhere; font-size: 11px; }
+.discovery-context footer { padding: 18px; }
+.proposal { display: grid; gap: 7px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.proposal button, .create-all { width: fit-content; border: 1px solid var(--ink); border-radius: 8px; padding: 6px 9px; background: white; }
+.create-all { margin-top: 12px; color: white; background: var(--ink); }
+.discovery-welcome { align-self: center; justify-self: center; width: min(570px, calc(100% - 40px)); }
+.discovery-welcome h2 { margin: 8px 0 14px; font: 780 clamp(32px, 4vw, 56px)/1.05 "Avenir Next", ui-rounded, sans-serif; letter-spacing: -.04em; }
+.discovery-welcome p { color: #777; font-size: 17px; line-height: 1.6; }
+.discovery-welcome button { margin-top: 12px; color: white; background: var(--ink); }
+.discovery-create form { display: grid; gap: 16px; padding: 20px 24px 24px; }
+.discovery-create label { display: grid; gap: 6px; color: #777; font: 700 10px ui-monospace, monospace; text-transform: uppercase; }
+.discovery-create input, .discovery-create select, .discovery-create textarea { width: 100%; border: 1px solid #bbb; border-radius: 8px; padding: 10px; text-transform: none; }
+.discovery-create footer { display: flex; justify-content: end; gap: 8px; }
+
 @keyframes slow-pulse { 50% { opacity: .48; transform: scale(.84); } }
 @keyframes runtime-rail { to { background-position: 0 200%; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 @media (max-width: 900px) {
-  .masthead { flex-wrap: wrap; gap: 8px 18px; }
-  .runtime-state { width: 100%; margin-left: 0; }
+  body { padding-bottom: 64px; }
+  .masthead { min-height: 62px; padding: 10px 14px; }
+  .masthead > p, .runtime-state > span:not(.connection), .signed-user, .sign-out { display: none; }
+  .runtime-state { width: auto; margin-left: auto; }
+  .view-tabs { position: fixed; top: auto; bottom: 0; left: 0; right: 0; z-index: 20; transform: none; justify-content: space-around; width: 100%; padding: 7px max(8px, env(safe-area-inset-right)) calc(7px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border: 0; border-top: 1px solid var(--line); border-radius: 0; background: rgb(255 255 255 / .96); }
+  .view-tabs button { min-width: 0; min-height: 46px; flex: 1; padding: 7px; font-size: 12px; }
   .create-strip { overflow-x: auto; }
   .create-strip form { min-width: max-content; }
   .workspace.detail-open { display: block; }
@@ -199,4 +261,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .run-history { display: none; }
   .runner-form { grid-template-columns: 1fr; }
   .task-create-fields, .prompt-source { grid-template-columns: 1fr; }
+  .discoveries-page, .discoveries-page.conversation-open { display: block; min-height: calc(100dvh - 126px); }
+  .discovery-list { min-height: calc(100dvh - 126px); border-right: 0; }
+  .conversation-open .discovery-list, .conversation-open .discovery-welcome { display: none; }
+  .discovery-chat { height: calc(100dvh - 126px); }
+  .discovery-chat > header { min-height: 62px; padding: 8px 12px; }
+  .discovery-chat > header h2 { max-width: 52vw; overflow: hidden; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-back { display: block; border: 0 !important; padding: 8px !important; font-size: 20px; }
+  .message-stream { padding: 20px 15px; }
+  .chat-message.user { max-width: 90%; }
+  .chat-composer { position: sticky; bottom: 0; margin: 8px; border-radius: 15px; }
+  .discovery-context { position: fixed; z-index: 30; inset: 12% 0 0; height: auto; display: none; border: 0; border-radius: 20px 20px 0 0; box-shadow: 0 -16px 50px rgb(0 0 0 / .18); }
+  .discovery-context.open { display: block; }
+  .discovery-context > header button { display: block; }
 }

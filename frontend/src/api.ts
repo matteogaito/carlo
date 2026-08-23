@@ -71,9 +71,50 @@ export interface Task {
   events?: Event[]
 }
 
+export interface DiscoveryProposal {
+  id: string
+  title: string
+  megaprompt: string
+  depends_on: string[]
+  created_task_id?: string
+}
+
+export interface DiscoveryState {
+  summary: string
+  findings: string[]
+  decisions: string[]
+  unresolved_questions: string[]
+  inspected_resources: string[]
+  commands: string[]
+  task_proposals: DiscoveryProposal[]
+}
+
+export interface DiscoveryMessage {
+  id: number
+  sequence: number
+  role: 'user' | 'assistant' | 'tool' | 'system'
+  content: string
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface Discovery {
+  id: number
+  project_id: number
+  title: string
+  status: 'OPEN' | 'CLOSED'
+  state: DiscoveryState
+  final_summary: string | null
+  last_active_at: string
+  closed_at: string | null
+  current_turn: { id: number; status: string; kind: string; cancel_requested_at: string | null; error: string | null } | null
+  messages?: DiscoveryMessage[]
+}
+
 export interface Event {
   sequence: number
   task_id: string | null
+  discovery_id: number | null
   type: string
   payload: Record<string, unknown>
   created_at: string
@@ -168,6 +209,13 @@ export interface Api {
   logout(): Promise<void>
   listProjects(): Promise<Project[]>
   listTasks(): Promise<Task[]>
+  listDiscoveries(projectId?: number): Promise<Discovery[]>
+  getDiscovery(id: number): Promise<Discovery>
+  createDiscovery(input: { project_id: number; title: string; message: string }): Promise<Discovery>
+  sendDiscoveryMessage(id: number, content: string): Promise<Discovery>
+  stopDiscovery(id: number): Promise<Discovery>
+  closeDiscovery(id: number): Promise<Discovery>
+  createDiscoveryTasks(id: number, proposalIds?: string[]): Promise<Task[]>
   getTask(id: string): Promise<Task>
   createProject(input: Pick<Project, 'name' | 'key' | 'repository_path'>): Promise<Project>
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'> & { prompt_filename?: string }): Promise<Task>
@@ -215,6 +263,13 @@ export const httpApi: Api = {
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   listProjects: () => request('/api/projects'),
   listTasks: () => request('/api/tasks'),
+  listDiscoveries: (projectId) => request(`/api/discoveries${projectId ? `?project_id=${projectId}` : ''}`),
+  getDiscovery: (id) => request(`/api/discoveries/${id}`),
+  createDiscovery: (input) => request('/api/discoveries', { method: 'POST', body: JSON.stringify(input) }),
+  sendDiscoveryMessage: (id, content) => request(`/api/discoveries/${id}/messages`, { method: 'POST', body: JSON.stringify({ content }) }),
+  stopDiscovery: (id) => request(`/api/discoveries/${id}/stop`, { method: 'POST' }),
+  closeDiscovery: (id) => request(`/api/discoveries/${id}/close`, { method: 'POST' }),
+  createDiscoveryTasks: (id, proposalIds = []) => request(`/api/discoveries/${id}/tasks`, { method: 'POST', body: JSON.stringify({ proposal_ids: proposalIds }) }),
   getTask: (id) => request(`/api/tasks/${id}`),
   createProject: (input) => request('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),

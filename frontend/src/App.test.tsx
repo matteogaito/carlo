@@ -8,6 +8,7 @@ import {
   type ActionCatalog,
   type ActionRun,
   type Api,
+  type Discovery,
   type Project,
   type Runner,
   type Task,
@@ -54,6 +55,13 @@ const api: Api = {
   logout: async () => undefined,
   listProjects: async () => [],
   listTasks: async () => [task],
+  listDiscoveries: async () => [],
+  getDiscovery: async () => { throw new Error('unused') },
+  createDiscovery: async () => { throw new Error('unused') },
+  sendDiscoveryMessage: async () => { throw new Error('unused') },
+  stopDiscovery: async () => { throw new Error('unused') },
+  closeDiscovery: async () => { throw new Error('unused') },
+  createDiscoveryTasks: async () => [],
   getTask: async () => task,
   createProject: async () => { throw new Error('unused') },
   createTask: async () => { throw new Error('unused') },
@@ -219,6 +227,31 @@ describe('CARLO board', () => {
     expect(screen.getByRole('heading', { name: 'Runners' })).toBeTruthy()
     expect(screen.getByText('local')).toBeTruthy()
     expect(screen.queryByLabelText(/private key contents/i)).toBeNull()
+  })
+
+  it('continues a persistent Discovery conversation', async () => {
+    const discovery: Discovery = {
+      id: 7, project_id: 1, title: 'CSV direction', status: 'OPEN',
+      state: { summary: 'Reuse ingestion.', findings: ['src/ingest.py'], decisions: [], unresolved_questions: [], inspected_resources: ['src/ingest.py'], commands: [], task_proposals: [] },
+      final_summary: null, last_active_at: '2026-08-23T08:00:00Z', closed_at: null,
+      current_turn: null,
+      messages: [{ id: 1, sequence: 1, role: 'assistant', content: '**Use ingestion.**', metadata: {}, created_at: '2026-08-23T08:00:00Z' }],
+    }
+    const sendDiscoveryMessage = vi.fn(async () => discovery)
+    render(<App api={{
+      ...api,
+      listProjects: async () => [{ id: 1, name: 'Repo', key: 'REP', repository_path: '/repo', default_branch: 'main', integration_branch: 'carlo-Dev', validation_commands: [] }],
+      listDiscoveries: async () => [discovery],
+      getDiscovery: async () => discovery,
+      sendDiscoveryMessage,
+    }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Discoveries' }))
+    await userEvent.click(await screen.findByRole('button', { name: /CSV direction/ }))
+    expect(screen.getByText('Use ingestion.')).toBeTruthy()
+    await userEvent.type(screen.getByLabelText('Message'), 'What about errors?')
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(sendDiscoveryMessage).toHaveBeenCalledWith(7, 'What about errors?')
   })
 
   it('shows login before loading the board', async () => {
