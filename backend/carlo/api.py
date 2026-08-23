@@ -888,12 +888,24 @@ def create_app(
         session_id = task.planning_session_id or f"{task.id}-plan"
         task.planning_session_id = session_id
         await session.commit()
+        drafting_announced = False
+
+        async def publish(provider_event: dict[str, Any]) -> None:
+            nonlocal drafting_announced
+            activity = _planning_activity(provider_event)
+            if activity is None or (activity[0] == "planning.drafting" and drafting_announced):
+                return
+            drafting_announced |= activity[0] == "planning.drafting"
+            session.add(Event(task=task, type=activity[0], payload=activity[1]))
+            await session.commit()
+
         try:
             result = await provider.run(
                 provider_profile,
                 instruction,
                 task.project.repository_path,
                 session_id,
+                on_event=publish,
             )
             raw = json.loads(result.output)
         except (ProviderError, ValueError) as error:
@@ -1155,6 +1167,33 @@ def _planning_instruction(task: Task) -> str:
         "Return only JSON matching this shape:\n"
         f"{json.dumps(contract)}"
     )
+
+
+def _planning_activity(
+    event: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    kind = event.get("type")
+    if kind == "agent_start":
+        return "planning.exploring", {}
+    if kind in {"tool_execution_start", "tool_execution_end"}:
+        tool = str(event.get("toolName") or event.get("tool") or "tool")[:80]
+        args = event.get("args") if isinstance(event.get("args"), dict) else {}
+        detail = next(
+            (str(args[key]) for key in ("path", "query", "command") if key in args),
+            "",
+        )[:500]
+        payload: dict[str, Any] = {"tool": tool, "detail": detail}
+        if kind == "tool_execution_end":
+            payload["failed"] = bool(event.get("isError"))
+        event_type = (
+            "planning.tool.started"
+            if kind == "tool_execution_start"
+            else "planning.tool.completed"
+        )
+        return event_type, payload
+    if kind == "message_update":
+        return "planning.drafting", {}
+    return None
 
 
 def _project_view(project: Project) -> dict[str, Any]:

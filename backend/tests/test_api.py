@@ -55,6 +55,22 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
             }
         )
     )
+    provider.events = (
+        {"type": "agent_start"},
+        {
+            "type": "tool_execution_start",
+            "toolName": "read",
+            "args": {"path": "README.md"},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolName": "read",
+            "isError": False,
+            "result": "do not persist",
+        },
+        {"type": "message_update", "delta": "{"},
+        {"type": "message_update", "delta": '"brief_markdown"'},
+    )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
     app = create_app(factory, provider, Settings(app_origin="http://test"))
@@ -93,6 +109,14 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         planned = (await client.get(f'/api/tasks/{task["id"]}')).json()
         assert planned["stage"] == "awaiting_approval"
         assert planned["plan"]["metadata"]["validation_commands"] == ["pytest -q"]
+        activity = [event for event in planned["events"] if event["type"].startswith("planning.")]
+        assert sum(event["type"] == "planning.drafting" for event in activity) == 1
+        assert any(
+            event["type"] == "planning.tool.started"
+            and event["payload"] == {"tool": "read", "detail": "README.md"}
+            for event in activity
+        )
+        assert "do not persist" not in json.dumps(activity)
 
         approved = await client.post(
             f'/api/tasks/{task["id"]}/approve', json={"revision": 1, "version": planned["version"]}
@@ -246,6 +270,7 @@ async def test_planning_runs_concurrently_without_the_implementation_lock(
             instruction: str,
             cwd: str,
             session_id: str,
+            on_event=None,
         ) -> AgentResult:
             self.entered += 1
             if self.entered == 2:

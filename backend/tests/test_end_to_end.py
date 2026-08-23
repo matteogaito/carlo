@@ -64,6 +64,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
             instruction: str,
             cwd: str,
             session_id: str,
+            on_event=None,
         ) -> AgentResult:
             if profile.name == "plan":
                 output = json.dumps(

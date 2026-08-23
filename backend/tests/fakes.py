@@ -4,6 +4,7 @@ from carlo.provider import AgentEventHandler, AgentProfile, AgentResult
 class FakeProvider:
     def __init__(self, output: str) -> None:
         self.output = output
+        self.events: tuple[dict[str, object], ...] = ()
         self.calls: list[tuple[AgentProfile, str, str, str]] = []
 
     async def run(
@@ -15,4 +16,9 @@ class FakeProvider:
         on_event: AgentEventHandler | None = None,
     ) -> AgentResult:
         self.calls.append((profile, instruction, cwd, session_id))
-        return AgentResult(session_id=session_id, output=self.output, events=(), exit_code=0)
+        if on_event:
+            for event in self.events:
+                await on_event(event)
+        return AgentResult(
+            session_id=session_id, output=self.output, events=self.events, exit_code=0
+        )
