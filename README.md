@@ -84,8 +84,16 @@ make ui
 ```
 
 Open `http://localhost:5173`. Add a project whose repository already has a
-committed `carlo-Dev` branch, create a task, build its Brief/Plan, approve it, and
-let the worker claim it.
+committed `carlo-Dev` branch. The Task flow is:
+
+```text
+Create Task → live Pi planning → zero or more focused questions → Brief/Plan review → explicit approval → Ready
+```
+
+Task creation starts planning automatically. The half-screen Task panel shows
+repository activity over WebSocket, renders Goal, Brief, and Plan as Markdown,
+and can be resized from its left edge. Closing it does not cancel or delete the
+Task; its state and planning activity remain available from the Board.
 
 ## Discoveries
 
@@ -93,7 +101,10 @@ Use **Discoveries** when the change is not clear yet. Pick a project and start a
 conversation; Pi can inspect the repository, Git history, logs, and declared
 diagnostic commands, but the bundled extension blocks source writes, commits,
 destructive shell syntax, and undeclared commands. Discovery turns run beside
-Task execution and Actions.
+Task execution and Actions. While Pi works, the chat shows its current safe
+repository activity—such as the file being read or command being run—without
+exposing reasoning or raw tool output. The central chat and right-side Context
+panel remain the primary desktop layout.
 
 PostgreSQL preserves the full user/assistant/tool transcript and structured
 state. Pi's resumable JSONL lives below `CARLO_ARTIFACT_ROOT/pi-sessions`; CARLO
