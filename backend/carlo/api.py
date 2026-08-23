@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+from uuid import uuid4
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -38,6 +39,9 @@ from .models import (
     ActionStep,
     Attempt,
     Escalation,
+    Discovery,
+    DiscoveryMessage,
+    DiscoveryTurn,
     Event,
     PlanRevision,
     Project,
@@ -75,6 +79,20 @@ class TaskCreate(BaseModel):
         if value is not None and Path(value).suffix.lower() != ".md":
             raise ValueError("prompt_filename must be a Markdown file")
         return value
+
+
+class DiscoveryCreate(BaseModel):
+    project_id: int
+    title: str = Field(min_length=1, max_length=240)
+    message: str = Field(min_length=1, max_length=1024 * 1024)
+
+
+class DiscoveryMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=1024 * 1024)
+
+
+class DiscoveryTaskCreate(BaseModel):
+    proposal_ids: list[str] = []
 
 
 class Approval(BaseModel):
@@ -636,6 +654,163 @@ def create_app(
             raise HTTPException(error.status_code, error.detail) from error
         return await _task_view(session, task)
 
+    @api.post("/discoveries", status_code=status.HTTP_201_CREATED)
+    async def create_discovery(
+        payload: DiscoveryCreate, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        project = await session.get(Project, payload.project_id)
+        if project is None:
+            raise HTTPException(404, "project not found")
+        profile = await _profile(session, "discovery")
+        discovery = Discovery(
+            project=project,
+            title=payload.title,
+            profile_id=profile.id,
+            provider_session_id=f"discovery-{uuid4().hex}",
+            state=_empty_discovery_state(),
+            memory_path="pending",
+        )
+        session.add(discovery)
+        await session.flush()
+        discovery.memory_path = str(
+            Path(settings.artifact_root).resolve()
+            / "discoveries"
+            / str(discovery.id)
+            / "MEMORY.md"
+        )
+        message = DiscoveryMessage(
+            discovery=discovery, sequence=1, role="user", content=payload.message
+        )
+        session.add(message)
+        await session.flush()
+        session.add_all(
+            [
+                DiscoveryTurn(discovery=discovery, input_message=message),
+                Event(discovery=discovery, type="discovery.created", payload={}),
+            ]
+        )
+        await session.commit()
+        return await _discovery_view(session, discovery)
+
+    @api.get("/discoveries")
+    async def list_discoveries(
+        project_id: int | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        statement = select(Discovery).order_by(Discovery.last_active_at.desc(), Discovery.id.desc())
+        if project_id is not None:
+            statement = statement.where(Discovery.project_id == project_id)
+        discoveries = (await session.scalars(statement)).unique().all()
+        return [await _discovery_view(session, item, detail=False) for item in discoveries]
+
+    @api.get("/discoveries/{discovery_id}")
+    async def get_discovery(
+        discovery_id: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        return await _discovery_view(session, await _discovery_or_404(session, discovery_id))
+
+    @api.post("/discoveries/{discovery_id}/messages", status_code=status.HTTP_202_ACCEPTED)
+    async def send_discovery_message(
+        discovery_id: int,
+        payload: DiscoveryMessageCreate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        discovery = await _discovery_or_404(session, discovery_id, lock=True)
+        if discovery.status != "OPEN":
+            raise HTTPException(409, "discovery is closed")
+        sequence = await _next_discovery_sequence(session, discovery.id)
+        message = DiscoveryMessage(
+            discovery=discovery, sequence=sequence, role="user", content=payload.content
+        )
+        session.add(message)
+        await session.flush()
+        turn = DiscoveryTurn(discovery=discovery, input_message=message)
+        discovery.last_active_at = datetime.now(UTC)
+        session.add_all([turn, Event(discovery=discovery, type="discovery.message.queued", payload={})])
+        await session.commit()
+        return await _discovery_view(session, discovery)
+
+    @api.post("/discoveries/{discovery_id}/stop")
+    async def stop_discovery(
+        discovery_id: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        discovery = await _discovery_or_404(session, discovery_id, lock=True)
+        turn = await session.scalar(
+            select(DiscoveryTurn)
+            .where(DiscoveryTurn.discovery_id == discovery.id, DiscoveryTurn.status.in_(["QUEUED", "RUNNING"]))
+            .order_by(DiscoveryTurn.id)
+            .limit(1)
+        )
+        if turn is not None:
+            if turn.status == "QUEUED":
+                turn.status = "INTERRUPTED"
+                turn.finished_at = datetime.now(UTC)
+            else:
+                turn.cancel_requested_at = datetime.now(UTC)
+            session.add(Event(discovery=discovery, type="discovery.stop_requested", payload={"turn_id": turn.id}))
+            await session.commit()
+        return await _discovery_view(session, discovery)
+
+    @api.post("/discoveries/{discovery_id}/tasks", status_code=status.HTTP_201_CREATED)
+    async def create_discovery_tasks(
+        discovery_id: int,
+        payload: DiscoveryTaskCreate,
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        discovery = await _discovery_or_404(session, discovery_id, lock=True)
+        proposals = [dict(item) for item in discovery.state.get("task_proposals", [])]
+        selected = set(payload.proposal_ids)
+        if selected and not selected.issubset({str(item.get("id")) for item in proposals}):
+            raise HTTPException(422, "unknown task proposal")
+        created: list[Task] = []
+        for proposal in proposals:
+            proposal_id = str(proposal.get("id"))
+            if (selected and proposal_id not in selected) or proposal.get("created_task_id"):
+                continue
+            try:
+                task = await create_task_record(
+                    session,
+                    discovery.project_id,
+                    str(proposal["title"]),
+                    str(proposal["megaprompt"]),
+                    created_source="discovery",
+                )
+            except (KeyError, TaskCreationError) as error:
+                if isinstance(error, TaskCreationError):
+                    raise HTTPException(error.status_code, error.detail) from error
+                raise HTTPException(422, "invalid task proposal") from error
+            proposal["created_task_id"] = task.id
+            created.append(task)
+        discovery.state = {**discovery.state, "task_proposals": proposals}
+        session.add(Event(discovery=discovery, type="discovery.tasks.created", payload={"task_ids": [task.id for task in created]}))
+        await session.commit()
+        return [await _task_view(session, task) for task in created]
+
+    @api.post("/discoveries/{discovery_id}/close")
+    async def close_discovery(
+        discovery_id: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        discovery = await _discovery_or_404(session, discovery_id, lock=True)
+        if discovery.status == "OPEN":
+            now = datetime.now(UTC)
+            discovery.status = "CLOSED"
+            discovery.closed_at = now
+            discovery.final_summary = str(discovery.state.get("summary") or "Discovery closed.")
+            turns = (
+                await session.scalars(
+                    select(DiscoveryTurn).where(
+                        DiscoveryTurn.discovery_id == discovery.id,
+                        DiscoveryTurn.status.in_(["QUEUED", "RUNNING"]),
+                    )
+                )
+            ).all()
+            for turn in turns:
+                turn.status = "INTERRUPTED"
+                turn.finished_at = now
+            session.add(Event(discovery=discovery, type="discovery.closed", payload={}))
+            await session.commit()
+        return await _discovery_view(session, discovery)
+
     @api.get("/tasks")
     async def list_tasks(
         session: AsyncSession = Depends(get_session),
@@ -834,6 +1009,41 @@ async def _task_or_404(session: AsyncSession, task_id: str) -> Task:
     return task
 
 
+async def _discovery_or_404(
+    session: AsyncSession, discovery_id: int, *, lock: bool = False
+) -> Discovery:
+    statement = select(Discovery).where(Discovery.id == discovery_id)
+    if lock:
+        statement = statement.with_for_update()
+    discovery = await session.scalar(statement)
+    if discovery is None:
+        raise HTTPException(404, "discovery not found")
+    return discovery
+
+
+def _empty_discovery_state() -> dict[str, Any]:
+    return {
+        "summary": "",
+        "findings": [],
+        "decisions": [],
+        "unresolved_questions": [],
+        "inspected_resources": [],
+        "commands": [],
+        "task_proposals": [],
+    }
+
+
+async def _next_discovery_sequence(session: AsyncSession, discovery_id: int) -> int:
+    return int(
+        await session.scalar(
+            select(func.coalesce(func.max(DiscoveryMessage.sequence), 0) + 1).where(
+                DiscoveryMessage.discovery_id == discovery_id
+            )
+        )
+        or 1
+    )
+
+
 async def _action_run_or_404(session: AsyncSession, run_id: int) -> ActionRun:
     run = await session.get(ActionRun, run_id)
     if run is None:
@@ -846,10 +1056,20 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
         select(AgentProfileRecord).where(AgentProfileRecord.name == name)
     )
     if profile is None:
+        source = None
+        if name == "discovery":
+            source = await session.scalar(
+                select(AgentProfileRecord).where(AgentProfileRecord.name == "plan")
+            )
         profile = AgentProfileRecord(
             name=name,
-            provider="pi",
-            default_skills=["carlo-planning"] if name == "plan" else [],
+            provider=source.provider if source else "pi",
+            model=source.model if source else None,
+            effort=source.effort if source else None,
+            permissions={"tools": ["read", "bash", "grep", "find", "ls", "discovery_state"]}
+            if name == "discovery"
+            else {},
+            default_skills=["carlo-planning"] if name == "plan" else ["carlo-discovery"] if name == "discovery" else [],
         )
         session.add(profile)
         await session.flush()
@@ -1068,10 +1288,59 @@ def _event_view(event: Event) -> dict[str, Any]:
     return {
         "sequence": event.sequence,
         "task_id": event.task_id,
+        "discovery_id": event.discovery_id,
         "type": event.type,
         "payload": event.payload,
         "created_at": event.created_at.isoformat(),
     }
+
+
+async def _discovery_view(
+    session: AsyncSession, discovery: Discovery, detail: bool = True
+) -> dict[str, Any]:
+    current_turn = await session.scalar(
+        select(DiscoveryTurn)
+        .where(DiscoveryTurn.discovery_id == discovery.id)
+        .order_by(DiscoveryTurn.id.desc())
+        .limit(1)
+    )
+    view: dict[str, Any] = {
+        "id": discovery.id,
+        "project_id": discovery.project_id,
+        "title": discovery.title,
+        "status": discovery.status,
+        "state": discovery.state,
+        "final_summary": discovery.final_summary,
+        "last_active_at": discovery.last_active_at.isoformat(),
+        "closed_at": discovery.closed_at.isoformat() if discovery.closed_at else None,
+        "current_turn": None if current_turn is None else {
+            "id": current_turn.id,
+            "status": current_turn.status,
+            "kind": current_turn.kind,
+            "cancel_requested_at": current_turn.cancel_requested_at.isoformat() if current_turn.cancel_requested_at else None,
+            "error": current_turn.error,
+        },
+    }
+    if detail:
+        messages = (
+            await session.scalars(
+                select(DiscoveryMessage)
+                .where(DiscoveryMessage.discovery_id == discovery.id)
+                .order_by(DiscoveryMessage.sequence)
+            )
+        ).all()
+        view["messages"] = [
+            {
+                "id": message.id,
+                "sequence": message.sequence,
+                "role": message.role,
+                "content": message.content,
+                "metadata": message.metadata_json,
+                "created_at": message.created_at.isoformat(),
+            }
+            for message in messages
+        ]
+    return view
 
 
 def _action_run_view(run: ActionRun) -> dict[str, Any]:
