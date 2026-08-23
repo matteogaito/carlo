@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -95,6 +95,25 @@ describe('CARLO board', () => {
     expect(await screen.findByRole('heading', { name: 'Validation' })).toBeTruthy()
     expect(screen.getByText('pytest -q')).toBeTruthy()
     expect(screen.getByText('2 failed')).toBeTruthy()
+  })
+
+  it('renders Task Markdown and resizes the half-screen detail panel', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+    render(<App api={api} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    expect(screen.getByRole('heading', { name: 'Brief', level: 1 })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Plan', level: 1 })).toBeTruthy()
+
+    const detail = screen.getByRole('complementary', { name: 'CAR-1 details' })
+    const separator = screen.getByRole('separator', { name: 'Resize task details' })
+    expect(detail.style.width).toBe('512px')
+    await userEvent.type(separator, '{ArrowLeft}')
+    expect(detail.style.width).toBe('544px')
+    fireEvent.pointerDown(separator, { pointerId: 1 })
+    fireEvent.pointerMove(separator, { pointerId: 1, clientX: 400 })
+    fireEvent.pointerUp(separator, { pointerId: 1 })
+    expect(detail.style.width).toBe('624px')
   })
 
   it('creates a task from an uploaded Markdown megaprompt', async () => {

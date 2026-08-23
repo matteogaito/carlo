@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import Markdown from 'react-markdown'
 
 import {
   AuthenticationRequired,
@@ -42,6 +43,7 @@ export function App({ api = httpApi }: { api?: Api }) {
   const [view, setView] = useState<'board' | 'discoveries' | 'actions'>('board')
   const [lastEvent, setLastEvent] = useState<Event | null>(null)
   const [installUpdate, setInstallUpdate] = useState<(() => void) | null>(null)
+  const [detailWidth, setDetailWidth] = useState(() => Math.round(window.innerWidth / 2))
 
   useEffect(() => {
     const ready = (event: globalThis.Event) => setInstallUpdate(() => (event as CustomEvent<() => void>).detail)
@@ -199,6 +201,8 @@ export function App({ api = httpApi }: { api?: Api }) {
               api.approvePlan(selected.id, selected.plan!.revision, selected.version)
             )}
             answerPlanning={(answer) => void act(() => api.answerPlanning(selected.id, answer))}
+            width={detailWidth}
+            resize={setDetailWidth}
           />
         )}
       </main> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} /> : <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} />}
@@ -361,20 +365,43 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, approve, answerPlanning }: {
+function TaskDetail({ task, close, startPlanning, approve, answerPlanning, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
   approve: () => void
   answerPlanning: (answer: string) => void
+  width: number
+  resize: (width: number) => void
 }) {
   const validations = task.plan?.metadata.validation_commands || []
+  const [resizing, setResizing] = useState(false)
   const planningActivity = (task.events || [])
     .filter((event) => event.type.startsWith('planning.'))
     .slice(0, 8)
     .reverse()
   return (
-    <aside className="task-detail" aria-label={`${task.id} details`}>
+    <aside className="task-detail" aria-label={`${task.id} details`} style={{ width }}>
+      <div
+        className="task-detail-resizer"
+        role="separator"
+        aria-label="Resize task details"
+        aria-orientation="vertical"
+        aria-valuenow={width}
+        tabIndex={0}
+        style={{ left: window.innerWidth - width - 5 }}
+        onPointerDown={(event) => {
+          setResizing(true)
+          event.currentTarget.setPointerCapture?.(event.pointerId)
+        }}
+        onPointerMove={(event) => resizing && resize(clampDetailWidth(window.innerWidth - event.clientX))}
+        onPointerUp={() => setResizing(false)}
+        onPointerCancel={() => setResizing(false)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowLeft') resize(clampDetailWidth(width + 32))
+          if (event.key === 'ArrowRight') resize(clampDetailWidth(width - 32))
+        }}
+      />
       <header>
         <div><span className="task-id">{task.id}</span><h2>{task.title}</h2></div>
         <button className="close" onClick={close} aria-label="Close task detail">×</button>
@@ -388,7 +415,7 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning }: {
           {planningEventLabel(event)}
         </p>)}
       </section>}
-      <section><h3>Goal</h3><p>{task.goal}</p></section>
+      <section><h3>Goal</h3><TaskMarkdown>{task.goal}</TaskMarkdown></section>
       {task.planning_question && <section className="planner-question">
         <h3>Planner question</h3>
         <p>{task.planning_question.text}</p>
@@ -401,8 +428,8 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning }: {
         </form>
       </section>}
       {task.prompt_path && <section><h3>Megaprompt file</h3><code>{task.prompt_path}</code></section>}
-      <section><h3>Brief</h3><pre>{task.plan?.brief_markdown || 'Planning has not produced a Brief yet.'}</pre></section>
-      <section><h3>Plan</h3><pre>{task.plan?.plan_markdown || 'No Plan yet.'}</pre></section>
+      <section><h3>Brief</h3>{task.plan ? <TaskMarkdown>{task.plan.brief_markdown}</TaskMarkdown> : <p>Planning has not produced a Brief yet.</p>}</section>
+      <section><h3>Plan</h3>{task.plan ? <TaskMarkdown>{task.plan.plan_markdown}</TaskMarkdown> : <p>No Plan yet.</p>}</section>
       <section>
         <h3>Validation</h3>
         {task.validations?.length ? task.validations.map((validation) => (
@@ -438,6 +465,14 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning }: {
       </footer>
     </aside>
   )
+}
+
+function clampDetailWidth(width: number): number {
+  return Math.min(Math.max(width, 360), Math.max(360, window.innerWidth - 320))
+}
+
+function TaskMarkdown({ children }: { children: string }) {
+  return <div className="task-markdown"><Markdown>{children}</Markdown></div>
 }
 
 function planningEventLabel(event: Event): string {
