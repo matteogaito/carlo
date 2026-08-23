@@ -387,6 +387,8 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning, width
         role="separator"
         aria-label="Resize task details"
         aria-orientation="vertical"
+        aria-valuemin={360}
+        aria-valuemax={Math.max(360, window.innerWidth - 320)}
         aria-valuenow={width}
         tabIndex={0}
         style={{ left: window.innerWidth - width - 5 }}
@@ -398,8 +400,9 @@ function TaskDetail({ task, close, startPlanning, approve, answerPlanning, width
         onPointerUp={() => setResizing(false)}
         onPointerCancel={() => setResizing(false)}
         onKeyDown={(event) => {
+          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') event.preventDefault()
           if (event.key === 'ArrowLeft') resize(clampDetailWidth(width + 32))
-          if (event.key === 'ArrowRight') resize(clampDetailWidth(width - 32))
+          else if (event.key === 'ArrowRight') resize(clampDetailWidth(width - 32))
         }}
       />
       <header>
