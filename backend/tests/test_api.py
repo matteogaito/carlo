@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.admin import bootstrap_admin
 from carlo.api import create_app
 from carlo.config import Settings
 from carlo.models import AgentProfile as AgentProfileRecord
-from carlo.models import Base, ValidationRun
+from carlo.models import Base, Task, ValidationRun
 from carlo.provider import AgentProfile, AgentResult
 from tests.fakes import FakeProvider
 
@@ -83,6 +83,10 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         task = task_response.json()
         assert task["id"] == "CAR-1"
         assert task["status"] == "NOT_READY"
+        assert task["prompt_path"].endswith("-CAR-1-login.md")
+        prompt = repository / task["prompt_path"]
+        assert prompt.parent == repository / "prompts"
+        assert prompt.read_text() == "Add login"
 
         plan_response = await client.post(f'/api/tasks/{task["id"]}/plan')
         assert plan_response.status_code == 200
@@ -125,6 +129,63 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
     assert provider.calls[0][0].skills == ("carlo-planning",)
     assert provider.calls[0][1].startswith("/skill:carlo-planning ")
     assert provider.calls[0][2] == str(repository)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_rejects_non_markdown_upload_without_creating_file(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "carlo-Dev", str(repository)],
+        check=True,
+        capture_output=True,
+    )
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+                "user_sessions, project_memberships, users, events, validation_runs, "
+                "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    app = create_app(factory, FakeProvider("{}"), Settings(app_origin="http://test"))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        project = (
+            await client.post(
+                "/api/projects",
+                json={"name": "CARLO", "key": "CAR", "repository_path": str(repository)},
+            )
+        ).json()
+        response = await client.post(
+            "/api/tasks",
+            json={
+                "project_id": project["id"],
+                "title": "Bad prompt",
+                "goal": "content",
+                "prompt_filename": "prompt.txt",
+            },
+        )
+
+    assert response.status_code == 422
+    assert not (repository / "prompts").exists()
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Task)) == 0
     await engine.dispose()
 
 

@@ -3,6 +3,7 @@ import json
 import os
 import re
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -30,7 +31,9 @@ from .auth import InvalidCredentials, LoginThrottled, login, resolve_session, re
 from .actions import ActionConfigError, load_catalog, preflight
 from .config import Settings
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
+from .git import slug
 from .models import AgentProfile as AgentProfileRecord
+from .maintenance import record_startup
 from .models import (
     ActionRun,
     ActionStep,
@@ -46,6 +49,7 @@ from .models import (
 )
 from .provider import AgentProfile, CodingAgentProvider, ProviderError
 from .ssh import HostScan, SshError, SshTransport, validate_runner
+from .telegram import TelegramNotifier, TelegramTransport, telegram_enabled
 
 
 class ProjectCreate(BaseModel):
@@ -60,9 +64,17 @@ class ProjectCreate(BaseModel):
 class TaskCreate(BaseModel):
     project_id: int
     title: str = Field(min_length=1, max_length=240)
-    goal: str = Field(min_length=1)
+    goal: str = Field(min_length=1, max_length=1024 * 1024)
+    prompt_filename: str | None = Field(default=None, max_length=255)
     priority: int = 0
     created_source: str = "web"
+
+    @field_validator("prompt_filename")
+    @classmethod
+    def markdown_filename(cls, value: str | None) -> str | None:
+        if value is not None and Path(value).suffix.lower() != ".md":
+            raise ValueError("prompt_filename must be a Markdown file")
+        return value
 
 
 class Approval(BaseModel):
@@ -139,7 +151,21 @@ def create_app(
     ssh_transport = ssh_transport or SshTransport(
         Path(settings.ssh_known_hosts), connect_timeout=settings.ssh_connect_timeout
     )
-    app = FastAPI(title="CARLO v3")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if telegram_enabled(settings.telegram_bot_token, settings.telegram_chat_id):
+            await TelegramNotifier(
+                session_factory,
+                TelegramTransport(),
+                settings.telegram_bot_token,
+                settings.telegram_chat_id,
+                settings.telegram_level,
+            ).initialize_cursor()
+        await record_startup(session_factory, settings.pi_executable)
+        yield
+
+    app = FastAPI(title="CARLO v3", lifespan=lifespan)
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
@@ -604,19 +630,43 @@ def create_app(
             raise HTTPException(404, "project not found")
         sequence = project.next_task_sequence
         project.next_task_sequence += 1
+        task_id = f"{project.key}-{sequence}"
+        if len(payload.goal.encode()) > 1024 * 1024:
+            raise HTTPException(413, "megaprompt must be at most 1 MiB")
+        repository = Path(project.repository_path).resolve()
+        prompt_directory = repository / "prompts"
+        try:
+            prompt_directory.mkdir(parents=True, exist_ok=True)
+            if not prompt_directory.resolve().is_relative_to(repository):
+                raise HTTPException(422, "project prompts path leaves the repository")
+            prompt_path = prompt_directory / (
+                f"{datetime.now().astimezone().date().isoformat()}-"
+                f"{task_id}-{slug(payload.title)}.md"
+            )
+            with prompt_path.open("x", encoding="utf-8") as destination:
+                destination.write(payload.goal)
+        except FileExistsError as error:
+            raise HTTPException(409, "task prompt already exists") from error
+        except OSError as error:
+            raise HTTPException(500, "could not save task prompt") from error
         task = Task(
-            id=f"{project.key}-{sequence}",
+            id=task_id,
             project=project,
             sequence=sequence,
             title=payload.title,
             goal=payload.goal,
+            prompt_path=str(prompt_path.relative_to(repository)),
             priority=payload.priority,
             created_source=payload.created_source,
         )
         session.add_all(
             [task, Event(task=task, type="task.created", payload={"source": payload.created_source})]
         )
-        await session.commit()
+        try:
+            await session.commit()
+        except Exception:
+            prompt_path.unlink(missing_ok=True)
+            raise
         return await _task_view(session, task)
 
     @api.get("/tasks")
@@ -958,6 +1008,7 @@ async def _task_view(
         "project_id": task.project_id,
         "title": task.title,
         "goal": task.goal,
+        "prompt_path": task.prompt_path,
         "status": task.status.value,
         "stage": task.stage.value,
         "priority": task.priority,

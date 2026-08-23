@@ -226,6 +226,7 @@ class Task(TimestampMixin, Base):
     sequence: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(240))
     goal: Mapped[str] = mapped_column(Text)
+    prompt_path: Mapped[str | None] = mapped_column(Text)
     status: Mapped[TaskStatus] = mapped_column(
         Enum(TaskStatus, name="task_status"), default=TaskStatus.NOT_READY
     )

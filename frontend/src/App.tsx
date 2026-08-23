@@ -22,6 +22,15 @@ const columns: { status: TaskStatus; label: string; code: string }[] = [
   { status: 'FAILED', label: 'Failed', code: 'HALT' },
 ]
 
+function readText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error('Could not read Markdown file'))
+    reader.readAsText(file)
+  })
+}
+
 export function App({ api = httpApi }: { api?: Api }) {
   const [user, setUser] = useState<User | null>()
   const [projects, setProjects] = useState<Project[]>([])
@@ -226,17 +235,19 @@ function CreateStrip({ api, projects, refresh, setError }: {
 }) {
   const [projectOpen, setProjectOpen] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
+  const [promptMode, setPromptMode] = useState<'text' | 'file'>('text')
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const data = new FormData(event.currentTarget)
+    const form = event.currentTarget
+    const data = new FormData(form)
     try {
       await api.createProject({
         name: String(data.get('name')),
         key: String(data.get('key')).toUpperCase(),
         repository_path: String(data.get('repository_path')),
       })
-      event.currentTarget.reset()
+      form.reset()
       setProjectOpen(false)
       await refresh()
     } catch (cause) {
@@ -246,14 +257,29 @@ function CreateStrip({ api, projects, refresh, setError }: {
 
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const data = new FormData(event.currentTarget)
+    const form = event.currentTarget
+    const data = new FormData(form)
     try {
+      let goal = String(data.get('goal') || '')
+      let promptFilename: string | undefined
+      if (promptMode === 'file') {
+        const file = (form.elements.namedItem('prompt_file') as HTMLInputElement | null)?.files?.[0]
+        if (!file || !file.name.toLowerCase().endsWith('.md')) {
+          throw new Error('Choose a Markdown (.md) file')
+        }
+        if (file.size > 1024 * 1024) throw new Error('Megaprompt must be at most 1 MiB')
+        goal = await readText(file)
+        promptFilename = file.name
+      }
+      if (!goal.trim()) throw new Error('Megaprompt cannot be empty')
       await api.createTask({
         project_id: Number(data.get('project_id')),
         title: String(data.get('title')),
-        goal: String(data.get('goal')),
+        goal,
+        ...(promptFilename ? { prompt_filename: promptFilename } : {}),
       })
-      event.currentTarget.reset()
+      form.reset()
+      setPromptMode('text')
       setTaskOpen(false)
       await refresh()
     } catch (cause) {
@@ -274,14 +300,44 @@ function CreateStrip({ api, projects, refresh, setError }: {
         </form>
       )}
       {taskOpen && (
-        <form onSubmit={submitTask}>
-          <label>Project<select name="project_id">{projects.map((project) => (
-            <option value={project.id} key={project.id}>{project.key}</option>
-          ))}</select></label>
-          <label>Title<input name="title" required /></label>
-          <label>Goal<textarea name="goal" required /></label>
-          <button type="submit">Create task</button>
-        </form>
+        <div className="modal-backdrop">
+          <section className="modal-panel task-create-panel" role="dialog" aria-modal="true" aria-labelledby="create-task-title">
+            <header>
+              <div><span>NEW GOAL</span><h2 id="create-task-title">Create task</h2></div>
+              <button className="close" onClick={() => setTaskOpen(false)} aria-label="Close create task">×</button>
+            </header>
+            <form className="task-create-form" onSubmit={submitTask}>
+              <div className="task-create-fields">
+                <label>Project<select name="project_id">{projects.map((project) => (
+                  <option value={project.id} key={project.id}>{project.key} · {project.name}</option>
+                ))}</select></label>
+                <label>Title<input name="title" required autoFocus /></label>
+              </div>
+              <fieldset className="prompt-source">
+                <legend>Megaprompt source</legend>
+                <label className={promptMode === 'text' ? 'selected' : ''}>
+                  <input aria-label="Write text" type="radio" name="prompt_mode" value="text" checked={promptMode === 'text'} onChange={() => setPromptMode('text')} />
+                  <span><b>Write text</b><small>Compose the goal here</small></span>
+                </label>
+                <label className={promptMode === 'file' ? 'selected' : ''}>
+                  <input aria-label="Upload Markdown" type="radio" name="prompt_mode" value="file" checked={promptMode === 'file'} onChange={() => setPromptMode('file')} />
+                  <span><b>Upload Markdown</b><small>Use an existing .md file</small></span>
+                </label>
+              </fieldset>
+              <div className="prompt-input">
+                {promptMode === 'text' ? (
+                  <label>Megaprompt<textarea name="goal" rows={12} required placeholder="Describe the outcome, constraints, and evidence CARLO should use." /></label>
+                ) : (
+                  <label>Markdown file<input name="prompt_file" type="file" accept=".md,text/markdown" /></label>
+                )}
+              </div>
+              <footer>
+                <button type="button" onClick={() => setTaskOpen(false)}>Cancel</button>
+                <button className="primary" type="submit">Create task</button>
+              </footer>
+            </form>
+          </section>
+        </div>
       )}
     </section>
   )
@@ -302,6 +358,7 @@ function TaskDetail({ task, close, startPlanning, approve }: {
       </header>
       <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
       <section><h3>Goal</h3><p>{task.goal}</p></section>
+      {task.prompt_path && <section><h3>Megaprompt file</h3><code>{task.prompt_path}</code></section>}
       <section><h3>Brief</h3><pre>{task.plan?.brief_markdown || 'Planning has not produced a Brief yet.'}</pre></section>
       <section><h3>Plan</h3><pre>{task.plan?.plan_markdown || 'No Plan yet.'}</pre></section>
       <section>

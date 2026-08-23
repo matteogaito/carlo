@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -21,6 +21,7 @@ const task: Task = {
   project_id: 1,
   title: 'Login flow',
   goal: 'Add login',
+  prompt_path: null,
   status: 'IN_PROGRESS',
   stage: 'validating',
   priority: 0,
@@ -83,6 +84,59 @@ describe('CARLO board', () => {
     expect(await screen.findByRole('heading', { name: 'Validation' })).toBeTruthy()
     expect(screen.getByText('pytest -q')).toBeTruthy()
     expect(screen.getByText('2 failed')).toBeTruthy()
+  })
+
+  it('creates a task from an uploaded Markdown megaprompt', async () => {
+    const project: Project = {
+      id: 1,
+      name: 'ECADMO',
+      key: 'ECA',
+      repository_path: '/Users/Shared/Projects/ecadmo',
+      default_branch: 'main',
+      integration_branch: 'carlo-Dev',
+      validation_commands: [],
+    }
+    const createTask = vi.fn(async () => ({
+      ...task,
+      id: 'ECA-1',
+      project_id: 1,
+      title: 'Vinted integration',
+      goal: '# Megaprompt\nImplement Vinted.',
+      prompt_path: 'prompts/2026-08-21-ECA-1-vinted-integration.md',
+    }))
+    render(<App api={{
+      ...api,
+      listProjects: async () => [project],
+      listTasks: async () => [],
+      createTask,
+    }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '+ Task' }))
+    expect(screen.getByRole('dialog', { name: 'Create task' })).toBeTruthy()
+    await userEvent.type(screen.getByLabelText('Title'), 'Vinted integration')
+    await userEvent.click(screen.getByRole('radio', { name: 'Upload Markdown' }))
+    const fileInput = screen.getByLabelText('Markdown file') as HTMLInputElement
+    await userEvent.upload(
+      fileInput,
+      new File(['# Megaprompt\nImplement Vinted.'], 'vinted.md', { type: 'text/markdown' }),
+    )
+    expect(fileInput.files).toHaveLength(1)
+    expect((screen.getByLabelText('Title') as HTMLInputElement).value).toBe('Vinted integration')
+    const form = screen.getByRole('dialog', { name: 'Create task' }).querySelector('form')!
+    expect(Array.from(form.elements)
+      .filter((element) => 'checkValidity' in element && !(element as HTMLInputElement).checkValidity())
+      .map((element) => (element as HTMLInputElement).name)).toEqual([])
+    await userEvent.click(screen.getByRole('button', { name: 'Create task' }))
+
+    await waitFor(() => {
+      expect(createTask).toHaveBeenCalledWith({
+        project_id: 1,
+        title: 'Vinted integration',
+        goal: '# Megaprompt\nImplement Vinted.',
+        prompt_filename: 'vinted.md',
+      })
+      expect(screen.queryByRole('dialog', { name: 'Create task' })).toBeNull()
+    })
   })
 
   it('groups repository actions, confirms a run and opens its console history', async () => {

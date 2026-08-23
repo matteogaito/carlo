@@ -29,7 +29,7 @@ class GitWorkspace:
         await self._git(
             "rev-parse", "--verify", self.integration_branch, cwd=self.repository
         )
-        branch = f"{task_id}-{_slug(title)}"
+        branch = f"{task_id}-{slug(title)}"
         path = (self.worktree_root / branch).resolve()
         if path.parent != self.worktree_root:
             raise GitError("invalid worktree path")
@@ -118,7 +118,7 @@ class GitWorkspace:
         )
 
 
-def _slug(value: str) -> str:
+def slug(value: str) -> str:
     ascii_value = (
         unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
     )

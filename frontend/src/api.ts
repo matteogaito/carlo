@@ -34,6 +34,7 @@ export interface Task {
   project_id: number
   title: string
   goal: string
+  prompt_path: string | null
   status: TaskStatus
   stage: string
   priority: number
@@ -169,7 +170,7 @@ export interface Api {
   listTasks(): Promise<Task[]>
   getTask(id: string): Promise<Task>
   createProject(input: Pick<Project, 'name' | 'key' | 'repository_path'>): Promise<Project>
-  createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'>): Promise<Task>
+  createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'> & { prompt_filename?: string }): Promise<Task>
   startPlanning(id: string): Promise<Task>
   approvePlan(id: string, revision: number, version: number): Promise<Task>
   listProjectActions(projectId: number): Promise<ActionCatalog>

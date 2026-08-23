@@ -156,6 +156,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .modal-panel li { padding: 5px; }
 .modal-panel > footer { display: flex; justify-content: end; gap: 8px; padding: 16px 24px 22px; border-top: 1px solid var(--line); }
 .modal-panel .primary { color: white; background: var(--pine); border-color: var(--pine); }
+.task-create-panel { width: min(720px, 100%); }
+.task-create-form { display: grid; }
+.task-create-fields { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; padding: 20px 24px; }
+.task-create-form label { display: grid; gap: 5px; color: var(--pine); font: 700 10px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .07em; }
+.task-create-form input, .task-create-form select, .task-create-form textarea { width: 100%; border: 1px solid #86928b; padding: 9px 10px; color: var(--ink); background: white; text-transform: none; letter-spacing: normal; }
+.task-create-form textarea { resize: vertical; min-height: 210px; font: 13px/1.55 ui-monospace, monospace; }
+.prompt-source { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; padding: 14px 24px 16px; border: 0; border-block: 1px solid var(--line); background: #e4e9e6; }
+.prompt-source legend { float: left; width: 100%; margin-bottom: 8px; color: #657169; font: 700 9px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .12em; }
+.prompt-source label { position: relative; display: flex; align-items: center; gap: 10px; min-height: 58px; padding: 10px 12px; color: var(--ink); background: var(--paper); border: 1px solid #aeb8b2; cursor: pointer; }
+.prompt-source label.selected { border-color: var(--pine); box-shadow: inset 5px 0 0 var(--pine); }
+.prompt-source input { width: auto; accent-color: var(--pine); }
+.prompt-source b, .prompt-source small { display: block; }
+.prompt-source small { margin-top: 3px; color: #657169; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.prompt-input { padding: 20px 24px 24px; }
+.task-create-form > footer { display: flex; justify-content: end; gap: 8px; padding: 16px 24px 22px; border-top: 1px solid var(--line); }
 .runner-panel { width: min(780px, 100%); }
 .runner-list { display: grid; padding: 8px 24px; }
 .runner-list article { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr) auto; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
@@ -183,4 +198,5 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .action-row { grid-template-columns: 6px minmax(0, 1fr) auto; }
   .run-history { display: none; }
   .runner-form { grid-template-columns: 1fr; }
+  .task-create-fields, .prompt-source { grid-template-columns: 1fr; }
 }
