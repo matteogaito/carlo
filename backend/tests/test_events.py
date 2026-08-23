@@ -28,7 +28,7 @@ async def test_websocket_and_http_replay_persisted_events() -> None:
     await bootstrap_admin(factory, "admin", "admin-password")
     async with factory() as session:
         session.add_all(
-            [Event(sequence=number, type=f"event.{number}", payload={"number": number}) for number in range(1, 5)]
+            [Event(type=f"event.{number}", payload={"number": number}) for number in range(1, 5)]
         )
         await session.commit()
 
@@ -48,5 +48,6 @@ async def test_websocket_and_http_replay_persisted_events() -> None:
             assert websocket.receive_json()["sequence"] == 3
         replay = client.get("/api/events?after=3")
         assert replay.status_code == 200
-        assert [event["sequence"] for event in replay.json()] == [4]
+        assert [event["sequence"] for event in replay.json()] == [4, 5]
+        assert replay.json()[-1]["type"] == "system.started"
     await engine.dispose()

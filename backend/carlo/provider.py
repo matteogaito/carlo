@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from .maintenance import pi_process_lock
+
 
 class ProviderError(RuntimeError):
     pass
@@ -47,6 +49,7 @@ class PiProvider:
         self.executable = executable
         self.session_dir = session_dir
         self.skill_root = skill_root or Path(__file__).resolve().parents[2] / "skills"
+        self.lock_path = self.session_dir.parent / "pi-runtime.lock"
         self._processes: dict[str, asyncio.subprocess.Process] = {}
 
     async def run(
@@ -81,17 +84,18 @@ class PiProvider:
             command.extend(("--skill", str(resolved)))
         command.append(instruction)
 
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        self._processes[session_id] = process
-        try:
-            stdout, stderr = await process.communicate()
-        finally:
-            self._processes.pop(session_id, None)
+        async with pi_process_lock(self.lock_path, exclusive=False):
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self._processes[session_id] = process
+            try:
+                stdout, stderr = await process.communicate()
+            finally:
+                self._processes.pop(session_id, None)
 
         if process.returncode:
             raise ProviderError(stderr.decode(errors="replace").strip())

@@ -86,6 +86,7 @@ def test_macos_installer_creates_boot_daemons_for_service_user() -> None:
     assert "source" not in installer
     assert "existing_hidden" not in installer
     assert "<key>GroupName</key><string>$service_group</string>" in installer
+    assert '<key>PATH</key><string>$(/usr/bin/dirname "$NPM_BIN"):$SERVICE_HOME/.npm-global/bin:' in installer
 
 
 def test_production_validation_rejects_placeholders_and_missing_build(

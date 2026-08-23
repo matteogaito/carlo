@@ -4,25 +4,49 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from carlo.domain import TaskStage, TaskStatus
 from carlo.models import (
+    ActionRun,
     Base,
     Event,
     NotificationCursor,
     NotificationDelivery,
+    Project,
+    Task,
+    User,
 )
-from carlo.telegram import TelegramNotifier, format_event, telegram_enabled
+from carlo.telegram import (
+    TelegramCommandBot,
+    TelegramNotifier,
+    format_event,
+    telegram_enabled,
+)
 
 
 class FakeTransport:
-    def __init__(self, failures: int = 0) -> None:
+    def __init__(self, failures: int = 0, updates: list[dict] | None = None) -> None:
         self.failures = failures
         self.messages: list[tuple[str, str, str]] = []
+        self.updates = updates or []
+        self.commands: list[dict[str, str]] = []
+        self.offsets: list[int] = []
 
     async def send(self, token: str, chat_id: str, message: str) -> None:
         if self.failures:
             self.failures -= 1
             raise RuntimeError("telegram unavailable")
         self.messages.append((token, chat_id, message))
+
+    async def set_commands(
+        self, token: str, commands: list[dict[str, str]]
+    ) -> None:
+        self.commands = commands
+
+    async def get_updates(
+        self, token: str, offset: int, timeout: int
+    ) -> list[dict]:
+        self.offsets.append(offset)
+        return [update for update in self.updates if update["update_id"] >= offset]
 
 
 @pytest.fixture
@@ -86,6 +110,86 @@ def test_missing_placeholders_disable_telegram() -> None:
 
 
 @pytest.mark.asyncio
+async def test_status_command_is_private_reports_work_and_persists_offset(factory) -> None:
+    async with factory() as session:
+        project = Project(name="ECADMO", key="ECA", repository_path="/tmp/ecadmo")
+        user = User(username="admin", password_hash="unused", role="admin")
+        session.add_all([project, user])
+        await session.flush()
+        session.add_all(
+            [
+                Task(
+                    id="ECA-1",
+                    project_id=project.id,
+                    sequence=1,
+                    title="Marketplace integration",
+                    goal="Implement it",
+                    status=TaskStatus.IN_PROGRESS,
+                    stage=TaskStage.IMPLEMENTING,
+                ),
+                Task(
+                    id="ECA-2",
+                    project_id=project.id,
+                    sequence=2,
+                    title="Plan next feature",
+                    goal="Plan it",
+                    status=TaskStatus.NOT_READY,
+                    stage=TaskStage.PLANNING,
+                ),
+                Task(
+                    id="ECA-3",
+                    project_id=project.id,
+                    sequence=3,
+                    title="Queued work",
+                    goal="Do it",
+                    status=TaskStatus.READY,
+                    stage=TaskStage.QUEUED,
+                ),
+                ActionRun(
+                    project_id=project.id,
+                    requested_by_id=user.id,
+                    action_key="deploy-dev",
+                    action_name="Deploy to Dev",
+                    definition={},
+                    runner_name="local",
+                    status="running",
+                    internal_stage="executing",
+                    commit_sha="a" * 40,
+                    artifact_path="/tmp/action.log",
+                    current_step=2,
+                ),
+            ]
+        )
+        await session.commit()
+
+    transport = FakeTransport(
+        updates=[
+            {"update_id": 10, "message": {"chat": {"id": 999}, "text": "/status"}},
+            {"update_id": 11, "message": {"chat": {"id": 123}, "text": "/status"}},
+        ]
+    )
+    bot = TelegramCommandBot(factory, transport, "token", "123")
+
+    assert await bot.poll_once() is True
+    assert transport.commands == [
+        {"command": "status", "description": "Show what CARLO is doing"}
+    ]
+    assert len(transport.messages) == 1
+    message = transport.messages[0][2]
+    assert "ECA-1 — implementing" in message
+    assert "Deploy to Dev #1 — executing, step 2" in message
+    assert "ECA-2 — planning" in message
+    assert "Ready queue: 1" in message
+    async with factory() as session:
+        cursor = await session.get(NotificationCursor, "telegram-inbound:123")
+    assert cursor is not None
+    assert cursor.last_sequence == 11
+
+    assert await bot.poll_once() is False
+    assert len(transport.messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_delivery_skips_history_and_is_not_duplicated_after_restart(factory) -> None:
     old = await add_event(factory, "task.created")
     transport = FakeTransport()
@@ -128,6 +232,24 @@ async def test_blocking_level_skips_info_and_sends_blocker(factory) -> None:
     assert await notifier.deliver_next() is True
     assert len(transport.messages) == 1
     assert "BLOCKING" in transport.messages[0][2]
+
+
+@pytest.mark.asyncio
+async def test_explicit_system_notifications_ignore_blocking_filter(factory) -> None:
+    transport = FakeTransport()
+    notifier = TelegramNotifier(factory, transport, "token", "123", "blocking")
+    await notifier.initialize_cursor()
+    await add_event(factory, "system.started")
+    await add_event(factory, "worker.started")
+    await add_event(factory, "pi.update_completed")
+
+    assert await notifier.deliver_next() is True
+    assert await notifier.deliver_next() is True
+    assert await notifier.deliver_next() is True
+    assert len(transport.messages) == 3
+    assert "CARLO started" in transport.messages[0][2]
+    assert "CARLO worker started" in transport.messages[1][2]
+    assert "Pi weekly update completed" in transport.messages[2][2]
 
 
 @pytest.mark.asyncio

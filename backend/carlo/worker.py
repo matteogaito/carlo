@@ -6,12 +6,15 @@ from pathlib import Path
 from .action_runner import ActionExecutor, ActionOrchestrator
 from .config import Settings
 from .db import make_engine, make_session_factory
+from .maintenance import maintenance_loop, record_startup
 from .orchestrator import ImplementationPipeline, Orchestrator
 from .provider import PiProvider
 from .ssh import SshTransport
 from .telegram import (
+    TelegramCommandBot,
     TelegramNotifier,
     TelegramTransport,
+    command_loop,
     notification_loop,
     telegram_enabled,
 )
@@ -47,20 +50,41 @@ async def run() -> None:
     action_orchestrator = ActionOrchestrator(engine, factory, action_executor.run)
     action_task = asyncio.create_task(_action_loop(action_orchestrator))
     notifier_task: asyncio.Task[None] | None = None
+    command_task: asyncio.Task[None] | None = None
+    notifier: TelegramNotifier | None = None
     if telegram_enabled(settings.telegram_bot_token, settings.telegram_chat_id):
-        notifier_task = asyncio.create_task(
-            notification_loop(
-                TelegramNotifier(
+        telegram_transport = TelegramTransport()
+        notifier = TelegramNotifier(
+            factory,
+            telegram_transport,
+            settings.telegram_bot_token,
+            settings.telegram_chat_id,
+            settings.telegram_level,
+        )
+        await notifier.initialize_cursor()
+        command_task = asyncio.create_task(
+            command_loop(
+                TelegramCommandBot(
                     factory,
-                    TelegramTransport(),
+                    telegram_transport,
                     settings.telegram_bot_token,
                     settings.telegram_chat_id,
-                    settings.telegram_level,
                 )
             )
         )
+    await record_startup(factory, settings.pi_executable, event_type="worker.started")
+    if notifier is not None:
+        notifier_task = asyncio.create_task(notification_loop(notifier))
     else:
         logger.info("Telegram notifications disabled: configure token and chat ID")
+    maintenance_task = asyncio.create_task(
+        maintenance_loop(
+            factory,
+            settings.npm_executable,
+            settings.pi_executable,
+            Path(settings.artifact_root) / "pi-runtime.lock",
+        )
+    )
     try:
         while True:
             try:
@@ -72,6 +96,9 @@ async def run() -> None:
             if task_id is None:
                 await asyncio.sleep(2)
     finally:
+        maintenance_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await maintenance_task
         action_task.cancel()
         with suppress(asyncio.CancelledError):
             await action_task
@@ -79,6 +106,10 @@ async def run() -> None:
             notifier_task.cancel()
             with suppress(asyncio.CancelledError):
                 await notifier_task
+        if command_task is not None:
+            command_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await command_task
         await engine.dispose()
 
 

@@ -129,7 +129,7 @@ write_plist() {
 <key>UserName</key><string>carlo</string>
 <key>GroupName</key><string>$service_group</string>
 <key>ProgramArguments</key><array><string>/usr/local/lib/carlo/scripts/run-mac-service.sh</string><string>$mode</string></array>
-<key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/carlo</string></dict>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/carlo</string><key>CARLO_NPM_EXECUTABLE</key><string>$NPM_BIN</string><key>PATH</key><string>$(/usr/bin/dirname "$NPM_BIN"):$SERVICE_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
 <key>WorkingDirectory</key><string>/usr/local/lib/carlo/backend</string>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>

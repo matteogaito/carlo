@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from carlo.admin import bootstrap_admin
 from carlo.api import create_app
 from carlo.config import Settings
-from carlo.models import Base, UserSession
+from carlo.models import Base, Event, UserSession
 from tests.fakes import FakeProvider
 
 
@@ -48,7 +48,6 @@ async def test_login_protects_api_and_logout_revokes_cookie(production_app) -> N
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         assert (await client.get("/api/projects")).status_code == 401
-
         response = await client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "admin-password"},
@@ -66,6 +65,18 @@ async def test_login_protects_api_and_logout_revokes_cookie(production_app) -> N
         )
         assert logout.status_code == 204
         assert (await client.get("/api/projects")).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_api_lifespan_records_carlo_startup(production_app) -> None:
+    app, factory = production_app
+
+    async with app.router.lifespan_context(app):
+        async with factory() as session:
+            event = await session.scalar(select(Event))
+
+    assert event is not None
+    assert event.type == "system.started"
 
 
 @pytest.mark.asyncio
