@@ -111,6 +111,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .git-evidence dt { color: #69756e; }
 .git-evidence dd { margin: 0; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .task-detail footer { padding: 18px 24px 30px; }
+.planner-question { background: #f4f4f1; }
+.planner-question form, .planner-question label { display: grid; gap: 8px; }
+.planner-question textarea { width: 100%; resize: vertical; border: 1px solid #aaa; border-radius: 8px; padding: 9px; }
+.planner-question button { justify-self: start; border: 0; border-radius: 8px; padding: 9px 12px; color: white; background: var(--ink); font-weight: 700; }
 
 .actions-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 122px); }
 .actions-workspace.detail-open { grid-template-columns: minmax(0, 1fr) 460px; }

@@ -192,6 +192,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             approve={() => selected.plan && void act(() =>
               api.approvePlan(selected.id, selected.plan!.revision, selected.version)
             )}
+            answerPlanning={(answer) => void act(() => api.answerPlanning(selected.id, answer))}
           />
         )}
       </main> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} /> : <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} />}
@@ -353,11 +354,12 @@ function CreateStrip({ api, projects, refresh, setError }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, approve }: {
+function TaskDetail({ task, close, startPlanning, approve, answerPlanning }: {
   task: Task
   close: () => void
   startPlanning: () => void
   approve: () => void
+  answerPlanning: (answer: string) => void
 }) {
   const validations = task.plan?.metadata.validation_commands || []
   return (
@@ -368,6 +370,17 @@ function TaskDetail({ task, close, startPlanning, approve }: {
       </header>
       <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
       <section><h3>Goal</h3><p>{task.goal}</p></section>
+      {task.planning_question && <section className="planner-question">
+        <h3>Planner question</h3>
+        <p>{task.planning_question.text}</p>
+        <form onSubmit={(event) => {
+          event.preventDefault()
+          answerPlanning(String(new FormData(event.currentTarget).get('answer')))
+        }}>
+          <label>Planner answer<textarea name="answer" rows={4} required /></label>
+          <button type="submit">Answer planner</button>
+        </form>
+      </section>}
       {task.prompt_path && <section><h3>Megaprompt file</h3><code>{task.prompt_path}</code></section>}
       <section><h3>Brief</h3><pre>{task.plan?.brief_markdown || 'Planning has not produced a Brief yet.'}</pre></section>
       <section><h3>Plan</h3><pre>{task.plan?.plan_markdown || 'No Plan yet.'}</pre></section>

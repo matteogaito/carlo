@@ -31,6 +31,7 @@ const task: Task = {
   branch_name: 'CAR-1-login-flow',
   worktree_path: '/tmp/CAR-1-login-flow',
   checkpoint_sha: 'abc1234',
+  planning_question: null,
   plan: {
     revision: 1,
     brief_markdown: '# Brief',
@@ -66,6 +67,7 @@ const api: Api = {
   createProject: async () => { throw new Error('unused') },
   createTask: async () => { throw new Error('unused') },
   startPlanning: async () => task,
+  answerPlanning: async () => task,
   approvePlan: async () => task,
   listProjectActions: async () => ({ project_id: 1, commit_sha: 'abc', branch: 'main', dirty_paths: [], actions: [], error: null }),
   listActionRuns: async () => [],
@@ -145,6 +147,16 @@ describe('CARLO board', () => {
       })
       expect(screen.queryByRole('dialog', { name: 'Create task' })).toBeNull()
     })
+  })
+
+  it('answers a focused planner question from task detail', async () => {
+    const questioning = { ...task, status: 'NOT_READY' as const, stage: 'planning', planning_question: { text: 'Which error envelope?' } }
+    const answerPlanning = vi.fn(async () => ({ ...questioning, planning_question: null }))
+    render(<App api={{ ...api, listTasks: async () => [questioning], getTask: async () => questioning, answerPlanning }} />)
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    await userEvent.type(await screen.findByLabelText('Planner answer'), 'Use the existing envelope')
+    await userEvent.click(screen.getByRole('button', { name: 'Answer planner' }))
+    expect(answerPlanning).toHaveBeenCalledWith('CAR-1', 'Use the existing envelope')
   })
 
   it('groups repository actions, confirms a run and opens its console history', async () => {

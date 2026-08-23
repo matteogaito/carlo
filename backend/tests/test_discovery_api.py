@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -23,7 +24,8 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
         await connection.execute(text("TRUNCATE projects, users, agent_profiles RESTART IDENTITY CASCADE"))
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
-    app = create_app(factory, FakeProvider("{}"), Settings(app_origin="http://test", artifact_root=str(tmp_path / "artifacts")))
+    provider = FakeProvider(json.dumps({"question": "Which error format should the API use?"}))
+    app = create_app(factory, provider, Settings(app_origin="http://test", artifact_root=str(tmp_path / "artifacts")))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
@@ -61,6 +63,19 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
         detail = (await client.get(f'/api/discoveries/{discovery["id"]}')).json()
         assert detail["status"] == "OPEN"
         assert [proposal["created_task_id"] for proposal in detail["state"]["task_proposals"]] == ["REP-1", "REP-2"]
+
+        planning = await client.post("/api/tasks/REP-1/plan")
+        assert planning.status_code == 200
+        assert planning.json()["planning_question"]["text"] == "Which error format should the API use?"
+        provider.output = json.dumps({
+            "brief_markdown": "# Brief\nUse the existing error envelope.",
+            "plan_markdown": "# Plan\nImplement and test it.",
+            "metadata": {"skills": [], "validation_commands": ["pytest -q"], "browser_validation": False, "build_required": False, "run_required": False, "deployment_expected": False, "risk_flags": [], "affected_areas": ["backend"]},
+        })
+        answered = await client.post("/api/tasks/REP-1/plan/answer", json={"answer": "Use the existing envelope."})
+        assert answered.status_code == 200
+        assert answered.json()["stage"] == "awaiting_approval"
+        assert provider.calls[0][3] == provider.calls[1][3]
 
         closed = await client.post(f'/api/discoveries/{discovery["id"]}/close')
         assert closed.status_code == 200

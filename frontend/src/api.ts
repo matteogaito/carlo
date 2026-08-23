@@ -43,6 +43,7 @@ export interface Task {
   branch_name: string | null
   worktree_path: string | null
   checkpoint_sha: string | null
+  planning_question: { text: string } | null
   plan: Plan | null
   attempts?: {
     number: number
@@ -220,6 +221,7 @@ export interface Api {
   createProject(input: Pick<Project, 'name' | 'key' | 'repository_path'>): Promise<Project>
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'> & { prompt_filename?: string }): Promise<Task>
   startPlanning(id: string): Promise<Task>
+  answerPlanning(id: string, answer: string): Promise<Task>
   approvePlan(id: string, revision: number, version: number): Promise<Task>
   listProjectActions(projectId: number): Promise<ActionCatalog>
   listActionRuns(projectId?: number): Promise<ActionRun[]>
@@ -274,6 +276,7 @@ export const httpApi: Api = {
   createProject: (input) => request('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
   startPlanning: (id) => request(`/api/tasks/${id}/plan`, { method: 'POST' }),
+  answerPlanning: (id, answer) => request(`/api/tasks/${id}/plan/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
   approvePlan: (id, revision, version) => request(`/api/tasks/${id}/approve`, {
     method: 'POST',
     body: JSON.stringify({ revision, version }),

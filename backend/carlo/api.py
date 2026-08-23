@@ -95,6 +95,10 @@ class DiscoveryTaskCreate(BaseModel):
     proposal_ids: list[str] = []
 
 
+class PlanningAnswer(BaseModel):
+    answer: str = Field(min_length=1, max_length=1024 * 1024)
+
+
 class Approval(BaseModel):
     revision: int
     version: int
@@ -874,26 +878,16 @@ def create_app(
         except WebSocketDisconnect:
             return
 
-    @api.post("/tasks/{task_id}/plan")
-    async def plan_task(
-        task_id: str, session: AsyncSession = Depends(get_session)
+    async def continue_planning(
+        task: Task, session: AsyncSession, instruction: str
     ) -> dict[str, Any]:
-        task = await _task_or_404(session, task_id)
-        try:
-            task.status, task.stage = transition(task.status, task.stage, "plan")
-            task.status, task.stage = transition(task.status, task.stage, "briefed")
-        except InvalidTransition as error:
-            raise HTTPException(409, str(error)) from error
-        task.version += 1
-        session.add(Event(task=task, type="planning.started", payload={}))
         profile = await _profile(session, "plan")
-        await session.commit()
-
-        instruction = _planning_instruction(task)
         provider_profile = _provider_profile(profile)
         if "carlo-planning" in provider_profile.skills:
             instruction = f"/skill:carlo-planning {instruction}"
-        session_id = f"{task.id}-plan-{task.version}"
+        session_id = task.planning_session_id or f"{task.id}-plan"
+        task.planning_session_id = session_id
+        await session.commit()
         try:
             result = await provider.run(
                 provider_profile,
@@ -901,13 +895,27 @@ def create_app(
                 task.project.repository_path,
                 session_id,
             )
-            output = PlanPayload.model_validate_json(result.output)
+            raw = json.loads(result.output)
         except (ProviderError, ValueError) as error:
             session.add(
                 Event(task=task, type="planning.failed", payload={"error": str(error)})
             )
             await session.commit()
             raise HTTPException(502, "planning provider failed") from error
+
+        question = raw.get("question") if isinstance(raw, dict) else None
+        if isinstance(question, str) and question.strip():
+            task.planning_question = {"text": question.strip()}
+            task.version += 1
+            session.add(Event(task=task, type="planning.question", payload=task.planning_question))
+            await session.commit()
+            return await _task_view(session, task)
+        try:
+            output = PlanPayload.model_validate(raw)
+        except ValueError as error:
+            session.add(Event(task=task, type="planning.failed", payload={"error": str(error)}))
+            await session.commit()
+            raise HTTPException(502, "planning provider returned invalid output") from error
 
         revision = (
             await session.scalar(
@@ -924,12 +932,49 @@ def create_app(
             metadata_json=output.metadata.model_dump(),
         )
         task.status, task.stage = transition(task.status, task.stage, "planned")
+        task.planning_question = None
         task.version += 1
         session.add_all(
             [plan, Event(task=task, type="planning.completed", payload={"revision": revision})]
         )
         await session.commit()
         return await _task_view(session, task)
+
+    @api.post("/tasks/{task_id}/plan")
+    async def plan_task(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await _task_or_404(session, task_id)
+        try:
+            task.status, task.stage = transition(task.status, task.stage, "plan")
+            task.status, task.stage = transition(task.status, task.stage, "briefed")
+        except InvalidTransition as error:
+            raise HTTPException(409, str(error)) from error
+        task.version += 1
+        task.planning_session_id = f"{task.id}-plan"
+        session.add(Event(task=task, type="planning.started", payload={}))
+        await session.commit()
+        return await continue_planning(task, session, _planning_instruction(task))
+
+    @api.post("/tasks/{task_id}/plan/answer")
+    async def answer_planning_question(
+        task_id: str,
+        payload: PlanningAnswer,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        task = await _task_or_404(session, task_id)
+        if task.stage != TaskStage.PLANNING or not task.planning_question:
+            raise HTTPException(409, "task is not waiting for a planning answer")
+        question = task.planning_question["text"]
+        task.planning_question = None
+        task.version += 1
+        session.add(Event(task=task, type="planning.answer", payload={"question": question}))
+        await session.commit()
+        return await continue_planning(
+            task,
+            session,
+            f"The user answered your planning question.\nQuestion: {question}\nAnswer: {payload.answer}\nContinue repository analysis. Ask one further high-impact question if necessary; otherwise return the complete plan JSON.",
+        )
 
     @api.post("/tasks/{task_id}/approve")
     async def approve_plan(
@@ -1105,6 +1150,8 @@ def _planning_instruction(task: Task) -> str:
     return (
         f"Inspect the repository and plan task {task.id}: {task.goal}\n"
         f"Project policies: {json.dumps(task.project.policies)}\n"
+        "If one high-impact answer is still required, return only "
+        '{"question":"the single focused question"}. Ask no low-risk implementation questions. '
         "Return only JSON matching this shape:\n"
         f"{json.dumps(contract)}"
     )
@@ -1204,6 +1251,7 @@ async def _task_view(
         "branch_name": task.branch_name,
         "worktree_path": task.worktree_path,
         "checkpoint_sha": task.checkpoint_sha,
+        "planning_question": task.planning_question,
         "plan": None
         if plan is None
         else {
