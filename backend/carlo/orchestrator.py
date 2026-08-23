@@ -33,6 +33,7 @@ from .models import (
 from .provider import AgentProfile, AgentResult, CodingAgentProvider
 
 IMPLEMENTATION_LOCK = 1_128_352_847
+MAX_INTERRUPTS = 3
 TaskRunner = Callable[[str], Awaitable[str]]
 
 
@@ -72,7 +73,10 @@ class Orchestrator:
                     await self._finish(task_id, "failed")
                     return task_id
                 except Exception as error:
-                    await self._interrupt(task_id, error)
+                    interruptions = await self._interrupt(task_id, error)
+                    if interruptions >= MAX_INTERRUPTS:
+                        await self._finish(task_id, "failed")
+                        return task_id
                     raise
                 await self._finish(task_id, outcome)
                 return task_id
@@ -136,11 +140,20 @@ class Orchestrator:
             session.add(Event(task=task, type=event_type, payload={"outcome": outcome}))
             await session.commit()
 
-    async def _interrupt(self, task_id: str, error: Exception) -> None:
+    async def _interrupt(self, task_id: str, error: Exception) -> int:
         async with self.session_factory() as session:
             task = await session.get(Task, task_id)
             if task is None:
-                return
+                return 0
+            interruptions = (
+                await session.scalar(
+                    select(func.count(Event.sequence)).where(
+                        Event.task_id == task_id,
+                        Event.type == "execution.interrupted",
+                    )
+                )
+                or 0
+            ) + 1
             task.version += 1
             session.add(
                 Event(
@@ -149,10 +162,13 @@ class Orchestrator:
                     payload={
                         "error_type": type(error).__name__,
                         "error": str(error)[:500],
+                        "interruption": interruptions,
+                        "limit": MAX_INTERRUPTS,
                     },
                 )
             )
             await session.commit()
+            return interruptions
 
 
 class ImplementationPipeline:

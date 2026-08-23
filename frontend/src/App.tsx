@@ -80,18 +80,25 @@ export function App({ api = httpApi }: { api?: Api }) {
 
   useEffect(() => {
     if (!user) return
+    let refreshTimer: number | undefined
     void refresh()
-    return api.events(
+    const closeEvents = api.events(
       (event) => {
         setLastEvent(event)
-        void refresh()
-        if (event.task_id && event.task_id === selected?.id) {
-          void api.getTask(event.task_id).then(setSelected)
-        }
+        if (!event.task_id) return
+        if (refreshTimer) window.clearTimeout(refreshTimer)
+        refreshTimer = window.setTimeout(() => {
+          void api.listTasks().then(setTasks)
+          if (event.task_id === selected?.id) void api.getTask(event.task_id).then(setSelected)
+        }, 150)
       },
       setConnected,
       () => setUser(null),
     )
+    return () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer)
+      closeEvents()
+    }
   }, [api, refresh, selected?.id, user])
 
   const active = useMemo(() => tasks.find((task) => task.status === 'IN_PROGRESS'), [tasks])

@@ -223,3 +223,51 @@ async def test_git_error_fails_task_instead_of_recovering_forever() -> None:
             "execution.failed",
         ]
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_three_runner_interruptions_fail_task() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/tmp/carlo-test")
+        session.add(
+            Task(
+                id="CAR-1",
+                project=project,
+                sequence=1,
+                title="Repeated crash",
+                goal="Stop looping",
+                status=TaskStatus.READY,
+                stage=TaskStage.QUEUED,
+            )
+        )
+        await session.commit()
+
+    async def crash(task_id: str) -> str:
+        raise RuntimeError("provider still unavailable")
+
+    orchestrator = Orchestrator(engine, factory, crash)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="provider still unavailable"):
+            await orchestrator.run_next()
+    assert await orchestrator.run_next() == "CAR-1"
+    assert await orchestrator.run_next() is None
+
+    async with factory() as session:
+        task = await session.get(Task, "CAR-1")
+        events = (
+            await session.scalars(select(Event).where(Event.task_id == "CAR-1"))
+        ).all()
+        assert task.status == TaskStatus.FAILED
+        assert sum(event.type == "execution.interrupted" for event in events) == 3
+        assert events[-1].type == "execution.failed"
+    await engine.dispose()

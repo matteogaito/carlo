@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
+import { ActionsView } from './ActionsView'
 import { DiscoveriesView } from './DiscoveriesView'
 import {
   AuthenticationRequired,
@@ -281,6 +282,63 @@ describe('CARLO board', () => {
     expect(screen.getByRole('heading', { name: 'Runners' })).toBeTruthy()
     expect(screen.getByText('local')).toBeTruthy()
     expect(screen.queryByLabelText(/private key contents/i)).toBeNull()
+  })
+
+  it('reads one console chunk without reloading Actions for an output event', async () => {
+    const project: Project = { id: 1, name: 'Repo', key: 'REP', repository_path: '/repo', default_branch: 'main', integration_branch: 'carlo-Dev', validation_commands: [] }
+    const run: ActionRun = {
+      id: 7, project_id: 1, action_key: 'test', action_name: 'Test',
+      definition: { key: 'test', name: 'Test', runner: 'local', env_file: null, commands: ['make test'] },
+      runner_name: 'local', runner_snapshot: {}, status: 'running', internal_stage: 'running',
+      commit_sha: 'abc', branch_name: 'main', origin: null, env_file: null, env_names: [],
+      requested_at: '', started_at: '', finished_at: null, cancel_requested_at: null,
+      current_step: 1, workspace_path: null, artifact_path: '', secret_path: null,
+      log_offset: 0, recent_output: '', exit_code: null, error: null, cleanup_pending: false,
+      steps: [],
+    }
+    const listActionRuns = vi.fn(async () => [run])
+    const getActionConsole = vi.fn(async () => ({ offset: 0, next_offset: 4, text: 'line', eof: false }))
+    const actionApi = {
+      ...api,
+      listActionRuns,
+      listProjectActions: async () => ({ project_id: 1, commit_sha: 'abc', branch: 'main', dirty_paths: [], actions: [run.definition], error: null }),
+      getActionRun: async () => ({ ...run }),
+      getActionConsole,
+    }
+    const projects = [project]
+    const setError = () => undefined
+    const view = render(<ActionsView api={actionApi} projects={projects} event={null} setError={setError} />)
+    await userEvent.click(await screen.findByRole('button', { name: /#7 running/ }))
+    listActionRuns.mockClear()
+    getActionConsole.mockClear()
+
+    view.rerender(<ActionsView api={actionApi} projects={projects} event={{ sequence: 1, task_id: null, discovery_id: null, type: 'action.output_available', payload: { run_id: 7 }, created_at: '' }} setError={setError} />)
+
+    await waitFor(() => expect(getActionConsole).toHaveBeenCalledTimes(1))
+    expect(listActionRuns).not.toHaveBeenCalled()
+  })
+
+  it('does not reload Projects and Tasks for Action output events', async () => {
+    let receive: ((event: import('./api').Event) => void) | undefined
+    const listProjects = vi.fn(async () => [])
+    const listTasks = vi.fn(async () => [])
+    render(<App api={{
+      ...api,
+      listProjects,
+      listTasks,
+      events: (onEvent) => { receive = onEvent; return () => undefined },
+    }} />)
+    await screen.findByRole('heading', { name: 'Not Ready' })
+    listProjects.mockClear()
+    listTasks.mockClear()
+
+    for (let sequence = 1; sequence <= 20; sequence += 1) {
+      receive?.({ sequence, task_id: null, discovery_id: null, type: 'action.output_available', payload: { run_id: 7 }, created_at: '' })
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, 200))
+    expect(listProjects).not.toHaveBeenCalled()
+    expect(listTasks).not.toHaveBeenCalled()
   })
 
   it('continues a persistent Discovery conversation', async () => {

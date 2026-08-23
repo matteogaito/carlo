@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 
 import type { ActionCatalog, ActionDefinition, ActionRun, Api, Event, Project, Runner } from './api'
 
@@ -14,7 +14,7 @@ export function ActionsView({ api, projects, event, setError }: {
   const [confirm, setConfirm] = useState<{ project: Project; catalog: ActionCatalog; action: ActionDefinition } | null>(null)
   const [selected, setSelected] = useState<ActionRun | null>(null)
   const [consoleText, setConsoleText] = useState('')
-  const [consoleOffset, setConsoleOffset] = useState(0)
+  const consoleOffset = useRef(0)
   const [runnersOpen, setRunnersOpen] = useState(false)
 
   const load = useCallback(async () => {
@@ -34,23 +34,26 @@ export function ActionsView({ api, projects, event, setError }: {
     const [fresh, chunk] = await Promise.all([api.getActionRun(run.id), api.getActionConsole(run.id, 0)])
     setSelected(fresh)
     setConsoleText(chunk.text)
-    setConsoleOffset(chunk.next_offset)
+    consoleOffset.current = chunk.next_offset
   }, [api])
 
   useEffect(() => { void load() }, [load])
 
   useEffect(() => {
     if (!event?.type.startsWith('action.')) return
-    void load()
-    if (!selected || Number(event.payload.run_id) !== selected.id) return
-    void api.getActionRun(selected.id).then(setSelected)
     if (event.type === 'action.output_available') {
-      void api.getActionConsole(selected.id, consoleOffset).then((chunk) => {
+      if (!selected || Number(event.payload.run_id) !== selected.id) return
+      void api.getActionConsole(selected.id, consoleOffset.current).then((chunk) => {
         setConsoleText((current) => current + chunk.text)
-        setConsoleOffset(chunk.next_offset)
+        consoleOffset.current = chunk.next_offset
       })
+      return
     }
-  }, [api, consoleOffset, event, load, selected])
+    void load()
+    if (selected && Number(event.payload.run_id) === selected.id) {
+      void api.getActionRun(selected.id).then(setSelected)
+    }
+  }, [api, event, load, selected?.id])
 
   async function queueRun() {
     if (!confirm) return
