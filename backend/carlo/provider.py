@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +79,7 @@ class CodingAgentProvider(Protocol):
         session_id: str,
         *,
         extensions: tuple[Path, ...] = (),
+        environment: dict[str, str] | None = None,
     ) -> ConversationSession: ...
 
     async def stop(self, session_id: str) -> None: ...
@@ -102,6 +104,7 @@ class PiProvider:
         session_id: str,
         *,
         extensions: tuple[Path, ...] = (),
+        environment: dict[str, str] | None = None,
     ) -> ConversationSession:
         if self.status(session_id) == "running":
             raise ProviderError(f"session is already running: {session_id}")
@@ -126,6 +129,7 @@ class PiProvider:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, **(environment or {})},
             )
         self._processes[session_id] = process
         return PiRpcSession(

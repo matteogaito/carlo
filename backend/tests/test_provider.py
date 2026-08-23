@@ -64,6 +64,7 @@ async def test_pi_provider_streams_a_persisted_rpc_conversation(tmp_path: Path) 
         str(tmp_path),
         "discovery-42",
         extensions=(guard,),
+        environment={"CARLO_DISCOVERY_COMMANDS": '["make verify"]'},
     )
     events = [event async for event in session.prompt("Inspect auth")]
     assert [event.type for event in events] == [
@@ -80,6 +81,7 @@ async def test_pi_provider_streams_a_persisted_rpc_conversation(tmp_path: Path) 
     assert state.session_id == "discovery-42"
     assert state.session_file == "/sessions/discovery-42.jsonl"
     assert state.context_percent == 12.5
+    assert state.raw["discoveryCommands"] == '["make verify"]'
     assert state.raw["argv"] == [
         "--mode", "rpc", "--approve", "--session-id", "discovery-42",
         "--session-dir", str(sessions), "--model", "openai/gpt-5.6-sol",

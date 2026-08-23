@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.discovery_runtime import DiscoveryRuntime
-from carlo.models import Base, Discovery, DiscoveryMessage, DiscoveryTurn, Project
+from carlo.models import Base, Discovery, DiscoveryMessage, DiscoveryTurn, Event, Project
 from carlo.provider import ConversationEvent, ConversationState
 
 
@@ -85,6 +85,8 @@ async def test_discovery_turn_persists_reply_state_and_memory(tmp_path: Path) ->
         assert discovery.messages[-2].metadata_json["tool"] == "read"
         assert discovery.state["summary"] == "Reuse ingestion."
         assert Path(discovery.memory_path).read_text().startswith("# Discovery memory")
+        events = (await session.scalars(select(Event).where(Event.discovery_id == discovery_id))).all()
+        assert "Use the ingestion service." == "".join(event.payload["delta"] for event in events if event.type == "discovery.message.delta")
     await runtime.close()
     await engine.dispose()
 

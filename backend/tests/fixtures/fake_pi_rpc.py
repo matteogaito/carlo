@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import sys
 
 
@@ -33,6 +34,7 @@ for line in sys.stdin:
                 "isStreaming": False,
                 "contextUsage": {"percent": 12.5},
                 "argv": sys.argv[1:],
+                "discoveryCommands": os.getenv("CARLO_DISCOVERY_COMMANDS"),
             },
         })
     elif kind == "get_entries":

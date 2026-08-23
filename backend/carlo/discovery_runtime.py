@@ -106,8 +106,16 @@ class DiscoveryRuntime:
                 tools=tuple((profile.permissions.get("tools") if profile else None) or ["read", "bash", "grep", "find", "ls", "discovery_state"]),
                 skills=tuple((profile.default_skills if profile else None) or ["carlo-discovery"]),
             )
-        live = await self._acquire(discovery_id, project.id, provider_profile, project.repository_path, discovery.provider_session_id)
+        live = await self._acquire(
+            discovery_id,
+            project.id,
+            provider_profile,
+            project.repository_path,
+            discovery.provider_session_id,
+            project.validation_commands,
+        )
         output: list[str] = []
+        stream = ""
         state: dict[str, Any] | None = None
         pending_tools: dict[str, dict[str, Any]] = {}
         tools: list[dict[str, Any]] = []
@@ -120,6 +128,10 @@ class DiscoveryRuntime:
                 delta = _event_delta(event)
                 if delta:
                     output.append(delta)
+                    stream += delta
+                    if len(stream) >= 200:
+                        await self._emit_delta(turn_id, discovery_id, stream)
+                        stream = ""
                 found = _event_state(event)
                 if found is not None:
                     state = found
@@ -136,6 +148,8 @@ class DiscoveryRuntime:
             if await self._should_stop(turn_id, discovery_id):
                 await self._interrupt(turn_id, discovery_id)
                 return
+            if stream:
+                await self._emit_delta(turn_id, discovery_id, stream)
             provider_state = await live.session.get_state()
             await self._complete(turn_id, discovery_id, "".join(output), state, provider_state.session_file, tools)
         except Exception as error:
@@ -144,7 +158,7 @@ class DiscoveryRuntime:
             live.busy = False
             live.used_at = monotonic()
 
-    async def _acquire(self, discovery_id: int, project_id: int, profile: AgentProfile, cwd: str, session_id: str) -> _LiveSession:
+    async def _acquire(self, discovery_id: int, project_id: int, profile: AgentProfile, cwd: str, session_id: str, validation_commands: list[str]) -> _LiveSession:
         while True:
             async with self._pool_lock:
                 existing = self._sessions.get(discovery_id)
@@ -153,7 +167,17 @@ class DiscoveryRuntime:
                     return existing
                 project_entries = [(key, value) for key, value in self._sessions.items() if value.project_id == project_id]
                 if len(project_entries) < self.max_sessions_per_project:
-                    session = await self.provider.open_conversation(profile, cwd, session_id, extensions=(self.guard_extension,))
+                    session = await self.provider.open_conversation(
+                        profile,
+                        cwd,
+                        session_id,
+                        extensions=(self.guard_extension,),
+                        environment={
+                            "CARLO_DISCOVERY_COMMANDS": json.dumps(
+                                validation_commands
+                            )
+                        },
+                    )
                     entry = _LiveSession(project_id, session, True, monotonic())
                     self._sessions[discovery_id] = entry
                     return entry
@@ -230,6 +254,17 @@ class DiscoveryRuntime:
                     )
                 )
                 await session.commit()
+
+    async def _emit_delta(self, turn_id: int, discovery_id: int, delta: str) -> None:
+        async with self.session_factory() as session:
+            session.add(
+                Event(
+                    discovery_id=discovery_id,
+                    type="discovery.message.delta",
+                    payload={"turn_id": turn_id, "delta": delta},
+                )
+            )
+            await session.commit()
 
 
 def _event_delta(event: ConversationEvent) -> str:

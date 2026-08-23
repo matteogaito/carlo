@@ -13,6 +13,7 @@ export function DiscoveriesView({ api, projects, event, setError }: {
   const [selected, setSelected] = useState<Discovery | null>(null)
   const [creating, setCreating] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
+  const [stream, setStream] = useState('')
 
   const refresh = useCallback(async () => {
     const discoveries = await api.listDiscoveries()
@@ -21,6 +22,14 @@ export function DiscoveriesView({ api, projects, event, setError }: {
   }, [api, selected?.id])
 
   useEffect(() => { void refresh().catch((error) => setError(String(error))) }, [refresh, event?.sequence])
+  useEffect(() => {
+    if (!selected || event?.discovery_id !== selected.id) return
+    if (event.type === 'discovery.message.delta' && typeof event.payload.delta === 'string') {
+      setStream((value) => value + event.payload.delta)
+    } else if (event.type === 'discovery.turn.completed' || event.type === 'discovery.turn.interrupted' || event.type === 'discovery.turn.failed') {
+      setStream('')
+    }
+  }, [event?.sequence, selected?.id])
 
   async function open(discovery: Discovery) {
     try { setSelected(await api.getDiscovery(discovery.id)) } catch (error) { setError(String(error)) }
@@ -75,6 +84,7 @@ export function DiscoveriesView({ api, projects, event, setError }: {
             <span>{message.role === 'user' ? 'You' : 'CARLO'}</span>
             <Markdown>{message.content}</Markdown>
           </article>)}
+        {stream && <article className="chat-message assistant streaming"><span>CARLO</span><Markdown>{stream}</Markdown></article>}
         {selected.current_turn?.status === 'QUEUED' || selected.current_turn?.status === 'RUNNING' ? <div className="thinking"><i />Pi is exploring the repository… <button onClick={() => void api.stopDiscovery(selected.id).then(setSelected)}>Stop</button></div> : null}
       </div>
       {selected.status === 'OPEN' ? <form className="chat-composer" onSubmit={send}>

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
+import { DiscoveriesView } from './DiscoveriesView'
 import {
   AuthenticationRequired,
   type ActionCatalog,
@@ -264,6 +265,20 @@ describe('CARLO board', () => {
     await userEvent.type(screen.getByLabelText('Message'), 'What about errors?')
     await userEvent.click(screen.getByRole('button', { name: 'Send' }))
     expect(sendDiscoveryMessage).toHaveBeenCalledWith(7, 'What about errors?')
+  })
+
+  it('renders aggregated realtime Discovery deltas', async () => {
+    const discovery: Discovery = {
+      id: 8, project_id: 1, title: 'Streaming', status: 'OPEN',
+      state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [] },
+      final_summary: null, last_active_at: '2026-08-23T08:00:00Z', closed_at: null,
+      current_turn: { id: 4, status: 'RUNNING', kind: 'CHAT', cancel_requested_at: null, error: null }, messages: [],
+    }
+    const discoveryApi = { ...api, listDiscoveries: async () => [discovery], getDiscovery: async () => discovery }
+    const { rerender } = render(<DiscoveriesView api={discoveryApi} projects={[]} event={null} setError={() => undefined} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Streaming/ }))
+    rerender(<DiscoveriesView api={discoveryApi} projects={[]} event={{ sequence: 99, task_id: null, discovery_id: 8, type: 'discovery.message.delta', payload: { turn_id: 4, delta: 'Repository evidence' }, created_at: '2026-08-23T08:01:00Z' }} setError={() => undefined} />)
+    expect(await screen.findByText('Repository evidence')).toBeTruthy()
   })
 
   it('shows login before loading the board', async () => {
