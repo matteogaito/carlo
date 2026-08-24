@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useState } from 'react'
 
 import type {
   AgentProfileSettings,
+  AgentPackage,
   AgentSkill,
   Api,
   AvailableModel,
@@ -20,19 +21,21 @@ export function SettingsView({ api, event, setError }: {
   const [models, setModels] = useState<AvailableModel[]>([])
   const [profiles, setProfiles] = useState<AgentProfileSettings[]>([])
   const [skills, setSkills] = useState<AgentSkill[]>([])
+  const [packages, setPackages] = useState<AgentPackage[]>([])
   const [pi, setPi] = useState<PiSettings | null>(null)
   const [adding, setAdding] = useState(false)
 
   const load = useCallback(async () => {
     try {
-      const [nextProviders, nextModels, nextPi, nextProfiles, nextSkills] = await Promise.all([
-        api.listModelProviders(), api.listModels(), api.getPiSettings(), api.listAgentProfiles(), api.listSkills(),
+      const [nextProviders, nextModels, nextPi, nextProfiles, nextSkills, nextPackages] = await Promise.all([
+        api.listModelProviders(), api.listModels(), api.getPiSettings(), api.listAgentProfiles(), api.listSkills(), api.listPackages(),
       ])
       setProviders(nextProviders)
       setModels(nextModels)
       setPi(nextPi)
       setProfiles(nextProfiles)
       setSkills(nextSkills)
+      setPackages(nextPackages)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load Settings')
     }
@@ -57,6 +60,17 @@ export function SettingsView({ api, event, setError }: {
   async function saveProfile(name: string, input: Partial<AgentProfileSettings>) {
     try {
       await api.updateAgentProfile(name, input)
+      await load()
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Settings update failed')
+      return false
+    }
+  }
+
+  async function saveDefaults(input: Partial<PiSettings>) {
+    try {
+      await api.updatePiSettings(input)
       await load()
       return true
     } catch (cause) {
@@ -101,13 +115,53 @@ export function SettingsView({ api, event, setError }: {
         </div>
       </section>
       {pi && <CompactionSettings value={pi} save={(input) => action(() => api.updatePiSettings(input))} />}
-    </> : <AgentProfiles profiles={profiles} providers={providers} models={models} skills={skills} save={saveProfile} />}
+    </> : <>{pi && <DefaultResources value={pi} packages={packages} skills={skills} save={saveDefaults} />}<AgentProfiles profiles={profiles} providers={providers} models={models} packages={packages} skills={skills} defaults={pi} save={saveProfile} /></>}
 
     {adding && <ProviderDialog close={() => setAdding(false)} create={async (input) => {
       await action(() => api.createModelProvider(input))
       setAdding(false)
     }} />}
   </main>
+}
+
+function DefaultResources({ value, packages, skills, save }: {
+  value: PiSettings
+  packages: AgentPackage[]
+  skills: AgentSkill[]
+  save: (input: Partial<PiSettings>) => Promise<boolean>
+}) {
+  const [saved, setSaved] = useState(false)
+  return <section className="settings-section default-resources">
+    <header><div><span>EVERY SESSION</span><h2>Default resources</h2></div></header>
+    <p>These packages and skills are loaded for every Pi profile. Profiles can add resources, never exclude defaults.</p>
+    <form key={`${value.default_packages.join(',')}|${value.default_skills.join(',')}`} onChange={() => setSaved(false)} onSubmit={(event) => {
+      event.preventDefault()
+      setSaved(false)
+      const data = new FormData(event.currentTarget)
+      void save({
+        default_packages: data.getAll('packages').map(String),
+        default_skills: data.getAll('skills').map(String),
+      }).then(setSaved)
+    }}>
+      <ResourceChoices legend="Packages" name="packages" values={packages} selected={value.default_packages} labelPrefix="Default" />
+      <ResourceChoices legend="Skills" name="skills" values={skills} selected={value.default_skills} labelPrefix="Default" />
+      <div className="profile-save"><button type="submit">Save default resources</button>{saved && <span role="status" aria-label="Default resources saved">Saved ✓</span>}</div>
+    </form>
+  </section>
+}
+
+function ResourceChoices({ legend, name, values, selected, disabled = [], labelPrefix }: {
+  legend: string
+  name: string
+  values: Array<{ name: string; revision: string | null }>
+  selected: string[]
+  disabled?: string[]
+  labelPrefix: string
+}) {
+  return <fieldset><legend>{legend}</legend><div className="profile-skills">{values.map((resource) => {
+    const inherited = disabled.includes(resource.name)
+    return <label key={resource.name}><input aria-label={`${labelPrefix} ${resource.name}`} name={name} value={resource.name} type="checkbox" defaultChecked={inherited || selected.includes(resource.name)} disabled={inherited} />{resource.name}{resource.revision && <small>{resource.revision.slice(0, 7)}</small>}{inherited && <small>default</small>}</label>
+  })}</div></fieldset>
 }
 
 function ModelRow({ model, api, action }: {
@@ -157,11 +211,13 @@ function CompactionSettings({ value, save }: { value: PiSettings; save: (input: 
   </section>
 }
 
-function AgentProfiles({ profiles, providers, models, skills, save }: {
+function AgentProfiles({ profiles, providers, models, packages, skills, defaults, save }: {
   profiles: AgentProfileSettings[]
   providers: ModelProvider[]
   models: AvailableModel[]
+  packages: AgentPackage[]
   skills: AgentSkill[]
+  defaults: PiSettings | null
   save: (name: string, input: Partial<AgentProfileSettings>) => Promise<boolean>
 }) {
   const [saved, setSaved] = useState<string | null>(null)
@@ -170,19 +226,30 @@ function AgentProfiles({ profiles, providers, models, skills, save }: {
     <p>Each new session receives an isolated snapshot of the selected model and proportional context policy.</p>
     <div className="profile-list">{profiles.map((profile) => {
       const initial = profile.available_model_id ? String(profile.available_model_id) : ''
-      return <form key={profile.name} onChange={() => setSaved(null)} onSubmit={(event) => {
+      const inheritedPackages = defaults?.default_packages || []
+      const inheritedSkills = defaults?.default_skills || []
+      return <form key={`${profile.name}|${inheritedPackages.join(',')}|${inheritedSkills.join(',')}`} onChange={() => setSaved(null)} onSubmit={(event) => {
         event.preventDefault()
         setSaved(null)
         const data = new FormData(event.currentTarget)
         const selection = String(data.get('model'))
-        const selectedSkills = Array.from(new Set([...profile.required_skills, ...data.getAll('skills').map(String)]))
+        const selectedPackages = Array.from(new Set([
+          ...profile.default_packages.filter((name) => inheritedPackages.includes(name)),
+          ...data.getAll('packages').map(String),
+        ]))
+        const selectedSkills = Array.from(new Set([
+          ...profile.required_skills,
+          ...profile.default_skills.filter((name) => inheritedSkills.includes(name)),
+          ...data.getAll('skills').map(String),
+        ]))
         void save(profile.name, {
           available_model_id: Number(selection),
+          default_packages: selectedPackages,
           default_skills: selectedSkills,
         }).then((ok) => ok && setSaved(profile.name))
       }}>
         <div><span>{profile.provider}</span><h3>{profile.name}</h3><small>{profile.default_skills.join(' · ') || 'No skills'}</small></div>
-        <label>Model for {profile.name}<select name="model" defaultValue={initial} required>
+        <div className="profile-controls"><label>Model for {profile.name}<select name="model" defaultValue={initial} required>
           <option value="">Not configured — choose a managed model</option>
           {providers.filter((provider) => provider.active).map((provider) => {
             const available = models.filter((model) => model.model_provider_id === provider.id && model.selectable)
@@ -191,11 +258,14 @@ function AgentProfiles({ profiles, providers, models, skills, save }: {
             </optgroup> : null
           })}
         </select></label>
+        <ResourceChoices legend={`Packages for ${profile.name}`} name="packages" values={packages} selected={profile.default_packages} disabled={inheritedPackages} labelPrefix={`${profile.name} package`} />
         <fieldset><legend>Skills for {profile.name}</legend><div className="profile-skills">{skills.map((skill) => {
           const required = profile.required_skills.includes(skill.name)
-          return <label key={skill.name}><input name="skills" value={skill.name} type="checkbox" defaultChecked={required || profile.default_skills.includes(skill.name)} disabled={required} />{skill.name}{required && <small>core</small>}</label>
+          const inherited = inheritedSkills.includes(skill.name)
+          return <label key={skill.name}><input aria-label={`${profile.name} skill ${skill.name}`} name="skills" value={skill.name} type="checkbox" defaultChecked={required || inherited || profile.default_skills.includes(skill.name)} disabled={required || inherited} />{skill.name}{required && <small>core</small>}{inherited && <small>default</small>}</label>
         })}</div></fieldset>
-        <div className="profile-save"><button type="submit">Save {profile.name}</button>{saved === profile.name && <span role="status">Saved ✓</span>}</div>
+        </div>
+        <div className="profile-save"><button type="submit">Save {profile.name}</button>{saved === profile.name && <span role="status" aria-label={`${profile.name} saved`}>Saved ✓</span>}</div>
       </form>
     })}</div>
   </section>

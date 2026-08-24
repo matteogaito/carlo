@@ -8,7 +8,9 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.maintenance import (
+    MANAGED_PI_RESOURCES,
     ManagedPiResource,
+    _resource_manifest_complete,
     pi_process_lock,
     record_startup,
     update_pi_if_due,
@@ -16,6 +18,20 @@ from carlo.maintenance import (
 )
 from carlo.model_providers import CredentialCipher
 from carlo.models import Base, Event, ModelProvider
+
+
+def test_carlo_manages_both_pi_workflow_packages() -> None:
+    packages = {resource.name: resource for resource in MANAGED_PI_RESOURCES}
+    assert packages["superpowers"].required_paths == (
+        "package.json",
+        ".pi/extensions/superpowers.ts",
+        "skills/using-superpowers/SKILL.md",
+    )
+    assert packages["ponytail"].required_paths == (
+        "package.json",
+        "pi-extension/index.js",
+        "skills/ponytail/SKILL.md",
+    )
 
 
 @pytest.fixture
@@ -41,6 +57,23 @@ def executable(path: Path, body: str) -> Path:
     path.write_text("#!/bin/sh\nset -eu\n" + body)
     path.chmod(0o755)
     return path
+
+
+def test_resource_manifest_requires_valid_revision_and_checkout(tmp_path: Path) -> None:
+    resource = ManagedPiResource("ponytail", "unused", ("package.json",))
+    root = tmp_path / "managed"
+    root.mkdir()
+    (root / "revisions.json").write_text(json.dumps({"ponytail": "invalid"}))
+    assert _resource_manifest_complete(root, (resource,)) is False
+
+    revision = "a" * 40
+    (root / "revisions.json").write_text(json.dumps({"ponytail": revision}))
+    assert _resource_manifest_complete(root, (resource,)) is False
+
+    checkout = root / "checkouts" / "ponytail" / revision
+    checkout.mkdir(parents=True)
+    (checkout / "package.json").write_text("{}")
+    assert _resource_manifest_complete(root, (resource,)) is True
 
 
 @pytest.mark.asyncio
@@ -196,6 +229,14 @@ async def test_weekly_pi_resources_are_cloned_versioned_and_updated_once(
     assert await update_pi_resources_if_due(
         factory, "git", root, tmp_path / "pi.lock", now=now, resources=resources
     ) is False
+    expanded = resources + (
+        ManagedPiResource(
+            "ponytail", str(upstream), ("skills/frontend-design/SKILL.md",)
+        ),
+    )
+    assert await update_pi_resources_if_due(
+        factory, "git", root, tmp_path / "pi.lock", now=now, resources=expanded
+    ) is True
     async with factory() as session:
         event = await session.scalar(
             select(Event).where(Event.type == "pi.resources_updated")
@@ -210,6 +251,7 @@ async def test_weekly_pi_resources_are_cloned_versioned_and_updated_once(
         / revision
         / "skills/frontend-design/SKILL.md"
     ).is_file()
+    assert json.loads((root / "revisions.json").read_text())["ponytail"] == revision
 
 
 @pytest.mark.asyncio
@@ -232,7 +274,7 @@ async def test_pi_resource_failure_keeps_the_previous_manifest(
     )
     root = tmp_path / "managed"
     root.mkdir()
-    previous = {"superpowers": "a" * 40}
+    previous: dict[str, str] = {}
     (root / "revisions.json").write_text(json.dumps(previous))
 
     assert await update_pi_resources_if_due(
@@ -257,6 +299,21 @@ async def test_pi_resource_failure_keeps_the_previous_manifest(
         )
     assert event is not None
     assert "superpowers.ts" in event.payload["error"]
+
+    assert await update_pi_resources_if_due(
+        factory,
+        "git",
+        root,
+        tmp_path / "pi.lock",
+        now=datetime(2026, 8, 24, 12, 1, tzinfo=UTC),
+        resources=(
+            ManagedPiResource(
+                "superpowers",
+                str(upstream),
+                ("package.json", ".pi/extensions/superpowers.ts"),
+            ),
+        ),
+    ) is False
 
 
 @pytest.mark.asyncio

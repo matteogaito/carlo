@@ -80,6 +80,26 @@ async def test_api_lifespan_records_carlo_startup(production_app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_lifespan_bootstraps_resources_before_serving(production_app) -> None:
+    app, factory = production_app
+    calls: list[str] = []
+
+    async def bootstrap() -> None:
+        calls.append("resources")
+
+    app = create_app(
+        factory,
+        FakeProvider("{}"),
+        Settings(app_origin="http://test"),
+        resource_bootstrap=bootstrap,
+    )
+    async with app.router.lifespan_context(app):
+        calls.append("serving")
+
+    assert calls == ["resources", "serving"]
+
+
+@pytest.mark.asyncio
 async def test_login_has_generic_failure_and_throttle_response(production_app) -> None:
     app, _ = production_app
     async with AsyncClient(

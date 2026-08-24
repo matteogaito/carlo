@@ -28,6 +28,7 @@ logger = logging.getLogger("carlo.maintenance")
 UPDATE_INTERVAL = timedelta(days=7)
 FAILURE_RETRY_INTERVAL = timedelta(hours=1)
 RESOURCE_NAME = re.compile(r"[a-z0-9-]{1,80}\Z")
+GIT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,11 +49,42 @@ MANAGED_PI_RESOURCES = (
         ),
     ),
     ManagedPiResource(
+        "ponytail",
+        "https://github.com/DietrichGebert/ponytail.git",
+        (
+            "package.json",
+            "pi-extension/index.js",
+            "skills/ponytail/SKILL.md",
+        ),
+    ),
+    ManagedPiResource(
         "frontend-design",
         "https://github.com/anthropics/skills.git",
         ("skills/frontend-design/SKILL.md",),
     ),
 )
+
+
+def _resource_manifest_complete(
+    root: Path, resources: tuple[ManagedPiResource, ...]
+) -> bool:
+    try:
+        revisions = json.loads((root / "revisions.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(revisions, dict):
+        return False
+    for resource in resources:
+        revision = revisions.get(resource.name)
+        if not isinstance(revision, str) or not GIT_REVISION.fullmatch(revision):
+            return False
+        checkout = root / "checkouts" / resource.name / revision
+        if checkout.is_symlink() or not all(
+            (checkout / required_path).is_file()
+            for required_path in resource.required_paths
+        ):
+            return False
+    return True
 
 
 @asynccontextmanager
@@ -164,10 +196,12 @@ async def update_pi_resources_if_due(
     resources: tuple[ManagedPiResource, ...] = MANAGED_PI_RESOURCES,
 ) -> bool:
     now = now or datetime.now(UTC)
-    if not await _resource_update_due(factory, now):
+    complete = _resource_manifest_complete(root, resources)
+    if not await _resource_update_due(factory, now, force=not complete):
         return False
     async with pi_process_lock(lock_path):
-        if not await _resource_update_due(factory, now):
+        complete = _resource_manifest_complete(root, resources)
+        if not await _resource_update_due(factory, now, force=not complete):
             return False
         try:
             revisions = {
@@ -200,6 +234,17 @@ async def update_pi_resources_if_due(
             session.add(event)
             await session.commit()
         return True
+
+
+async def ensure_pi_resources(
+    factory: async_sessionmaker[AsyncSession],
+    git_executable: str,
+    root: Path,
+    lock_path: Path,
+) -> None:
+    await update_pi_resources_if_due(factory, git_executable, root, lock_path)
+    if not _resource_manifest_complete(root, MANAGED_PI_RESOURCES):
+        raise RuntimeError("managed Pi resources are unavailable")
 
 
 async def maintenance_loop(
@@ -273,7 +318,7 @@ async def _update_due(
 
 
 async def _resource_update_due(
-    factory: async_sessionmaker[AsyncSession], now: datetime
+    factory: async_sessionmaker[AsyncSession], now: datetime, *, force: bool = False
 ) -> bool:
     async with factory() as session:
         last_success = await session.scalar(
@@ -286,9 +331,9 @@ async def _resource_update_due(
                 Event.type == "pi.resources_update_failed"
             )
         )
-    if last_success is not None and now - last_success < UPDATE_INTERVAL:
+    if last_failure is not None and now - last_failure < FAILURE_RETRY_INTERVAL:
         return False
-    return last_failure is None or now - last_failure >= FAILURE_RETRY_INTERVAL
+    return force or last_success is None or now - last_success >= UPDATE_INTERVAL
 
 
 async def _update_resource(

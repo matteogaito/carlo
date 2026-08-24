@@ -132,6 +132,7 @@ class DiscoveryRuntime:
                         None,
                         ("read", "bash", "grep", "find", "ls", "discovery_state"),
                         ("carlo-discovery",),
+                        packages=("superpowers", "ponytail"),
                     )
                 )
             except Exception as error:

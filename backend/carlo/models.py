@@ -314,6 +314,10 @@ class PiRuntimeSettings(TimestampMixin, Base):
     compaction_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     reserve_percent: Mapped[int] = mapped_column(Integer, default=10)
     keep_recent_percent: Mapped[int] = mapped_column(Integer, default=20)
+    default_packages: Mapped[list[str]] = mapped_column(
+        JSONB, default=lambda: ["superpowers", "ponytail"]
+    )
+    default_skills: Mapped[list[str]] = mapped_column(JSONB, default=list)
 
 
 class AgentProfile(TimestampMixin, Base):
@@ -325,6 +329,7 @@ class AgentProfile(TimestampMixin, Base):
     effort: Mapped[str | None] = mapped_column(String(20))
     permissions: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     default_skills: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    default_packages: Mapped[list[str]] = mapped_column(JSONB, default=list)
     context_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     available_model_id: Mapped[int | None] = mapped_column(

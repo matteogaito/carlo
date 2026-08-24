@@ -87,17 +87,19 @@ async def test_pi_provider_loads_managed_superpowers_and_frontend_skill(
     executable.chmod(0o755)
     root = tmp_path / "managed"
     superpowers = root / "checkouts" / "superpowers" / ("a" * 40)
+    ponytail = root / "checkouts" / "ponytail" / ("c" * 40)
     frontend = root / "checkouts" / "frontend-design" / ("b" * 40) / "skills" / "frontend-design"
     superpowers.mkdir(parents=True)
+    ponytail.mkdir(parents=True)
     frontend.mkdir(parents=True)
     (frontend / "SKILL.md").write_text("---\nname: frontend-design\n---\n")
     manifest = root / "revisions.json"
-    manifest.write_text(json.dumps({"superpowers": "a" * 40, "frontend-design": "b" * 40}))
+    manifest.write_text(json.dumps({"superpowers": "a" * 40, "frontend-design": "b" * 40, "ponytail": "c" * 40}))
     provider = PiProvider(
         str(executable),
         tmp_path / "sessions",
         resource_root=root,
-        managed_packages=("superpowers",),
+        managed_packages=("superpowers", "ponytail"),
         managed_skills={"frontend-design": "skills/frontend-design"},
         resource_manifest=manifest,
     )
@@ -110,19 +112,99 @@ async def test_pi_provider_loads_managed_superpowers_and_frontend_skill(
     )
 
     result = await provider.run(
-        AgentProfile("plan", None, None, (), ("frontend-design",)),
+        AgentProfile(
+            "plan",
+            None,
+            None,
+            (),
+            ("frontend-design",),
+            packages=("superpowers", "ponytail"),
+        ),
         "Plan the frontend",
         str(tmp_path),
         "CAR-4-plan",
     )
 
     argv = result.events[-1]["argv"]
-    assert argv[:2] == ["-e", str(superpowers)]
+    assert argv[:4] == ["-e", str(superpowers), "-e", str(ponytail)]
     assert ["--skill", str(frontend)] == argv[argv.index("--skill"):argv.index("--skill") + 2]
     assert result.resource_revisions == {
         "superpowers": "a" * 40,
         "frontend-design": "b" * 40,
+        "ponytail": "c" * 40,
     }
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_loads_only_packages_selected_by_the_profile(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "print(json.dumps({'type': 'final', 'output': 'done', 'argv': sys.argv[1:]}))\n"
+    )
+    executable.chmod(0o755)
+    root = tmp_path / "managed"
+    superpowers = root / "checkouts" / "superpowers" / ("a" * 40)
+    ponytail = root / "checkouts" / "ponytail" / ("b" * 40)
+    superpowers.mkdir(parents=True)
+    ponytail.mkdir(parents=True)
+    manifest = root / "revisions.json"
+    manifest.write_text(
+        json.dumps({"superpowers": "a" * 40, "ponytail": "b" * 40})
+    )
+    provider = PiProvider(
+        str(executable),
+        tmp_path / "sessions",
+        resource_root=root,
+        managed_packages=("superpowers", "ponytail"),
+        resource_manifest=manifest,
+    )
+
+    result = await provider.run(
+        AgentProfile("plan", None, None, (), (), packages=("ponytail",)),
+        "Plan",
+        str(tmp_path),
+        "CAR-5-plan",
+    )
+
+    argv = result.events[-1]["argv"]
+    assert ["-e", str(ponytail)] == argv[:2]
+    assert str(superpowers) not in argv
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_rejects_selected_managed_skill_missing_from_snapshot(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'final', 'output': 'done'}))\n"
+    )
+    executable.chmod(0o755)
+    root = tmp_path / "managed"
+    root.mkdir()
+    manifest = root / "revisions.json"
+    manifest.write_text("{}")
+    provider = PiProvider(
+        str(executable),
+        tmp_path / "sessions",
+        resource_root=root,
+        managed_skills={"frontend-design": "skills/frontend-design"},
+        resource_manifest=manifest,
+    )
+
+    with pytest.raises(ProviderError, match="managed Pi skill is unavailable"):
+        await provider.run(
+            AgentProfile("plan", None, None, (), ("frontend-design",)),
+            "Plan",
+            str(tmp_path),
+            "CAR-6-plan",
+        )
 
 
 @pytest.mark.asyncio

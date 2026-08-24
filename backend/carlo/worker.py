@@ -8,9 +8,9 @@ from .config import Settings
 from .db import make_engine, make_session_factory
 from .discovery_runtime import DiscoveryRuntime
 from .maintenance import (
+    ensure_pi_resources,
     maintenance_loop,
     record_startup,
-    update_pi_resources_if_due,
 )
 from .model_providers import CredentialCipher
 from .pi_runtime import PiRuntimeSnapshotBuilder
@@ -49,7 +49,7 @@ async def run() -> None:
         Path(settings.artifact_root) / "pi-sessions",
         runtime_builder=runtime_builder,
         resource_root=resource_root,
-        managed_packages=("superpowers",),
+        managed_packages=("superpowers", "ponytail"),
         managed_skills={"frontend-design": "skills/frontend-design"},
         resource_manifest=resource_root / "revisions.json",
     )
@@ -108,7 +108,7 @@ async def run() -> None:
         notifier_task = asyncio.create_task(notification_loop(notifier))
     else:
         logger.info("Telegram notifications disabled: configure token and chat ID")
-    await update_pi_resources_if_due(
+    await ensure_pi_resources(
         factory,
         "git",
         resource_root,

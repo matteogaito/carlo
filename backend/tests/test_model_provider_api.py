@@ -178,6 +178,8 @@ async def test_model_and_pi_settings_api_exposes_effective_context_preview(
             "compaction_enabled": True,
             "reserve_percent": 15,
             "keep_recent_percent": 25,
+            "default_packages": ["superpowers", "ponytail"],
+            "default_skills": [],
         }
 
 
@@ -316,9 +318,21 @@ async def test_agent_profiles_select_known_skills_and_keep_core_skills(
         )
         client.headers["Origin"] = "http://test"
         catalog = await client.get("/api/settings/skills")
+        packages = await client.get("/api/settings/packages")
+        defaults = await client.get("/api/settings/pi")
+        saved_defaults = await client.patch(
+            "/api/settings/pi",
+            json={
+                "default_packages": ["superpowers", "ponytail"],
+                "default_skills": ["carlo-ui-design"],
+            },
+        )
         updated = await client.patch(
             "/api/agent-profiles/plan",
-            json={"default_skills": ["carlo-ui-design"]},
+            json={
+                "default_packages": ["ponytail"],
+                "default_skills": ["carlo-ui-design"],
+            },
         )
         unknown = await client.patch(
             "/api/agent-profiles/plan",
@@ -333,7 +347,11 @@ async def test_agent_profiles_select_known_skills_and_keep_core_skills(
     assert skills["carlo-ui-design"]["source"] == "carlo"
     assert skills["frontend-design"]["source"] == "managed"
     assert skills["carlo-planning"]["required_profiles"] == ["brief", "plan"]
+    assert {item["name"] for item in packages.json()} == {"ponytail", "superpowers"}
+    assert defaults.json()["default_packages"] == ["superpowers", "ponytail"]
+    assert saved_defaults.json()["default_skills"] == ["carlo-ui-design"]
     assert updated.status_code == 200
+    assert updated.json()["default_packages"] == ["ponytail"]
     assert updated.json()["default_skills"] == [
         "carlo-planning",
         "carlo-ui-design",

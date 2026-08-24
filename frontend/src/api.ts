@@ -269,6 +269,8 @@ export interface PiSettings {
   compaction_enabled: boolean
   reserve_percent: number
   keep_recent_percent: number
+  default_packages: string[]
+  default_skills: string[]
 }
 
 export interface AgentProfileSettings {
@@ -277,6 +279,7 @@ export interface AgentProfileSettings {
   effort: string | null
   permissions: Record<string, unknown>
   default_skills: string[]
+  default_packages: string[]
   required_skills: string[]
   context_policy: Record<string, unknown>
   active: boolean
@@ -286,7 +289,13 @@ export interface AgentProfileSettings {
 export interface AgentSkill {
   name: string
   source: 'carlo' | 'managed'
+  revision: string | null
   required_profiles: string[]
+}
+
+export interface AgentPackage {
+  name: string
+  revision: string | null
 }
 
 export interface Api {
@@ -331,6 +340,7 @@ export interface Api {
   updatePiSettings(input: Partial<PiSettings>): Promise<PiSettings>
   listAgentProfiles(): Promise<AgentProfileSettings[]>
   listSkills(): Promise<AgentSkill[]>
+  listPackages(): Promise<AgentPackage[]>
   updateAgentProfile(name: string, input: Partial<AgentProfileSettings>): Promise<AgentProfileSettings>
   setTaskModel(id: string, availableModelId: number | null): Promise<Task>
   events(
@@ -416,6 +426,7 @@ export const httpApi: Api = {
   }),
   listAgentProfiles: () => request('/api/agent-profiles'),
   listSkills: () => request('/api/settings/skills'),
+  listPackages: () => request('/api/settings/packages'),
   updateAgentProfile: (name, input) => request(`/api/agent-profiles/${encodeURIComponent(name)}`, {
     method: 'PATCH', body: JSON.stringify(input),
   }),

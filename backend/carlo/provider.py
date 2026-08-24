@@ -48,6 +48,7 @@ class AgentProfile:
     tools: tuple[str, ...]
     skills: tuple[str, ...]
     resolved_model: ResolvedModel | None = None
+    packages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +158,7 @@ class PiProvider:
         package_paths, external_skills, _ = self._resource_snapshot()
         command = [
             self.executable,
-            *self._package_arguments(package_paths),
+            *self._package_arguments(profile, package_paths),
             "--mode",
             "rpc",
             "--approve",
@@ -202,7 +203,7 @@ class PiProvider:
         package_paths, external_skills, resource_revisions = self._resource_snapshot()
         command = [
             self.executable,
-            *self._package_arguments(package_paths),
+            *self._package_arguments(profile, package_paths),
             "--mode",
             "json",
             "--print",
@@ -265,7 +266,11 @@ class PiProvider:
             events=event_tuple,
             exit_code=process.returncode or 0,
             used_skills=_used_skills(instruction, event_tuple),
-            resource_revisions=resource_revisions,
+            resource_revisions={
+                name: revision
+                for name, revision in resource_revisions.items()
+                if name in profile.packages or name in profile.skills
+            },
         )
 
     async def stop(self, session_id: str) -> None:
@@ -307,19 +312,32 @@ class PiProvider:
             path = Path(skill)
             bundled = self.skill_root / skill
             resolved = (external_skills or {}).get(skill)
+            if skill in self.managed_skills and resolved is None:
+                raise ProviderError(f"managed Pi skill is unavailable: {skill}")
             if resolved is None:
                 resolved = bundled if not path.is_absolute() and bundled.exists() else path
             arguments.extend(("--skill", str(resolved)))
         return arguments
 
-    def _package_arguments(self, paths: tuple[Path, ...]) -> list[str]:
-        return [argument for path in paths for argument in ("-e", str(path))]
+    def _package_arguments(
+        self, profile: AgentProfile, paths: dict[str, Path]
+    ) -> list[str]:
+        missing = sorted(set(profile.packages) - paths.keys())
+        if missing:
+            raise ProviderError(
+                f"managed Pi package is unavailable: {', '.join(missing)}"
+            )
+        return [
+            argument
+            for name in profile.packages
+            for argument in ("-e", str(paths[name]))
+        ]
 
     def _resource_snapshot(
         self,
-    ) -> tuple[tuple[Path, ...], dict[str, Path], dict[str, str]]:
+    ) -> tuple[dict[str, Path], dict[str, Path], dict[str, str]]:
         if self.resource_manifest is None or self.resource_root is None:
-            return (), {}, {}
+            return {}, {}, {}
         try:
             value = json.loads(self.resource_manifest.read_text())
         except (OSError, json.JSONDecodeError) as error:
@@ -340,9 +358,9 @@ class PiProvider:
         missing = [name for name, path in checkouts.items() if not path.is_dir()]
         if missing:
             raise ProviderError(f"managed Pi resource checkout is missing: {', '.join(missing)}")
-        packages = tuple(
-            checkouts[name] for name in self.managed_packages if name in checkouts
-        )
+        packages = {
+            name: checkouts[name] for name in self.managed_packages if name in checkouts
+        }
         skills = {
             name: checkouts[name] / relative_path
             for name, relative_path in self.managed_skills.items()

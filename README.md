@@ -75,10 +75,13 @@ re-encrypting the stored credentials. Pi receives only the selected model in an
 isolated snapshot below `CARLO_ARTIFACT_ROOT/pi-runtime/<session-id>`; the API
 key exists only in the child process environment. Personal
 `~/.pi/agent/models.json` and `settings.json` do not affect managed sessions.
-CARLO also keeps Superpowers and Anthropic's `frontend-design` repository below
-`CARLO_ARTIFACT_ROOT/pi-resources`, updates them weekly under the same exclusive
-Pi maintenance lock, and sends one concise Telegram result. Each Task records
-the exact resource commits loaded by its Pi session.
+CARLO also keeps Superpowers, Ponytail, and Anthropic's `frontend-design`
+repository below `CARLO_ARTIFACT_ROOT/pi-resources`, updates them weekly under
+the same exclusive Pi maintenance lock, and sends one concise Telegram result.
+Under **Coding agents → Default resources**, global packages and skills are
+loaded by every profile and cannot be excluded locally; each profile may add
+more managed resources. Each Task records the exact resource commits loaded by
+its Pi session.
 
 Use separate terminals:
 

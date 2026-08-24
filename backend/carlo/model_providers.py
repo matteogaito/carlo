@@ -25,6 +25,8 @@ from .models import (
 )
 
 MODEL_CATALOG_LIMIT = 8 * 1024 * 1024
+MANAGED_PROFILE_PACKAGES = ("superpowers", "ponytail")
+DEFAULT_PROFILE_PACKAGES = MANAGED_PROFILE_PACKAGES
 MANAGED_PROFILE_SKILLS = ("frontend-design",)
 REQUIRED_PROFILE_SKILLS: dict[str, tuple[str, ...]] = {
     "brief": ("carlo-planning",),
@@ -39,6 +41,10 @@ def available_profile_skills() -> set[str]:
         for path in (Path(__file__).resolve().parents[2] / "skills").glob("*/SKILL.md")
     }
     return bundled | set(MANAGED_PROFILE_SKILLS)
+
+
+def available_profile_packages() -> set[str]:
+    return set(MANAGED_PROFILE_PACKAGES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,10 +106,25 @@ async def resolve_agent_profile(
     from .provider import AgentProfile, ResolvedModel
 
     tools = tuple(record.permissions.get("tools") or default_tools)
+    runtime = await session.get(PiRuntimeSettings, 1)
+    packages = tuple(
+        dict.fromkeys(
+            (
+                *(runtime.default_packages if runtime else DEFAULT_PROFILE_PACKAGES),
+                *record.default_packages,
+            )
+        )
+    )
+    unknown_packages = sorted(set(packages) - available_profile_packages())
+    if unknown_packages:
+        raise ModelProviderError(
+            f"agent profile has unknown packages: {', '.join(unknown_packages)}"
+        )
     skills = tuple(
         dict.fromkeys(
             (
                 *REQUIRED_PROFILE_SKILLS.get(record.name, ()),
+                *(runtime.default_skills if runtime else ()),
                 *record.default_skills,
                 *extra_skills,
             )
@@ -132,7 +153,6 @@ async def resolve_agent_profile(
     max_tokens = model.effective_max_tokens
     if context_window is None or max_tokens is None:
         raise ModelProviderError("selected model has no verified context limits")
-    runtime = await session.get(PiRuntimeSettings, 1)
     reserve_percent = runtime.reserve_percent if runtime else 10
     keep_recent_percent = runtime.keep_recent_percent if runtime else 20
     compaction = calculate_compaction(
@@ -142,12 +162,12 @@ async def resolve_agent_profile(
     compatibility = dict(provider.compatibility)
     api = str(compatibility.pop("api", "openai-completions"))
     return AgentProfile(
-        record.name,
-        None,
-        record.effort,
-        tools,
-        skills,
-        ResolvedModel(
+        name=record.name,
+        model=None,
+        effort=record.effort,
+        tools=tools,
+        skills=skills,
+        resolved_model=ResolvedModel(
             model_provider_id=provider.id,
             available_model_id=model.id,
             provider_slug=provider.slug,
@@ -165,6 +185,7 @@ async def resolve_agent_profile(
             reserve_tokens=compaction.reserve_tokens,
             keep_recent_tokens=compaction.keep_recent_tokens,
         ),
+        packages=packages,
     )
 
 

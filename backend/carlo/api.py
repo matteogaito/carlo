@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from fastapi import (
@@ -34,9 +34,9 @@ from .actions import ActionConfigError, load_catalog, preflight
 from .config import Settings
 from .model_providers import (
     CredentialCipher,
-    MANAGED_PROFILE_SKILLS,
     ModelProviderError,
     REQUIRED_PROFILE_SKILLS,
+    available_profile_packages,
     available_profile_skills,
     calculate_compaction,
     model_runtime_evidence,
@@ -126,6 +126,7 @@ class ProfileUpdate(BaseModel):
     effort: str | None = None
     permissions: dict[str, Any] | None = None
     default_skills: list[str] | None = None
+    default_packages: list[str] | None = None
     context_policy: dict[str, Any] | None = None
     active: bool | None = None
     available_model_id: int | None = None
@@ -180,6 +181,8 @@ class PiRuntimeSettingsUpdate(BaseModel):
     compaction_enabled: bool | None = None
     reserve_percent: int | None = Field(default=None, ge=1, le=90)
     keep_recent_percent: int | None = Field(default=None, ge=1, le=90)
+    default_packages: list[str] | None = None
+    default_skills: list[str] | None = None
 
 
 class TaskModelUpdate(BaseModel):
@@ -280,6 +283,7 @@ def create_app(
     provider: CodingAgentProvider,
     settings: Settings | None = None,
     ssh_transport: SshTransport | None = None,
+    resource_bootstrap: Callable[[], Awaitable[None]] | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     credential_cipher = (
@@ -294,6 +298,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if resource_bootstrap is not None:
+            await resource_bootstrap()
         await recover_interrupted_reworks(session_factory)
         if telegram_enabled(settings.telegram_bot_token, settings.telegram_chat_id):
             await TelegramNotifier(
@@ -743,7 +749,15 @@ def create_app(
 
     @api.get("/settings/skills")
     async def list_skills() -> list[dict[str, Any]]:
-        return _skill_catalog()
+        return _skill_catalog(_pi_resource_revisions(settings))
+
+    @api.get("/settings/packages")
+    async def list_packages() -> list[dict[str, Any]]:
+        revisions = _pi_resource_revisions(settings)
+        return [
+            {"name": name, "revision": revisions.get(name)}
+            for name in sorted(available_profile_packages())
+        ]
 
     @api.patch("/agent-profiles/{name}")
     async def update_agent_profile(
@@ -763,6 +777,17 @@ def create_app(
         )
         if selected_model_id is not None:
             await _selectable_model(session, selected_model_id)
+        if "default_packages" in payload.model_fields_set:
+            if payload.default_packages is None:
+                raise HTTPException(422, "default_packages cannot be null")
+            unknown_packages = sorted(
+                set(payload.default_packages) - available_profile_packages()
+            )
+            if unknown_packages:
+                raise HTTPException(
+                    422, f"unknown packages: {', '.join(unknown_packages)}"
+                )
+            payload.default_packages = list(dict.fromkeys(payload.default_packages))
         if "default_skills" in payload.model_fields_set and payload.default_skills is None:
             raise HTTPException(422, "default_skills cannot be null")
         if payload.default_skills is not None:
@@ -981,6 +1006,19 @@ def create_app(
         session: AsyncSession = Depends(get_session),
     ) -> dict[str, Any]:
         pi_settings = await _pi_settings(session)
+        for field, available in (
+            ("default_packages", available_profile_packages()),
+            ("default_skills", available_profile_skills()),
+        ):
+            if field not in payload.model_fields_set:
+                continue
+            value = getattr(payload, field)
+            if value is None:
+                raise HTTPException(422, f"{field} cannot be null")
+            unknown = sorted(set(value) - available)
+            if unknown:
+                raise HTTPException(422, f"unknown {field}: {', '.join(unknown)}")
+            setattr(payload, field, list(dict.fromkeys(value)))
         for field in payload.model_fields_set:
             setattr(pi_settings, field, getattr(payload, field))
         models = (
@@ -1667,6 +1705,7 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
             else {},
             default_skills=list(REQUIRED_PROFILE_SKILLS.get(name, ()))
             + (["frontend-design"] if name == "plan" else []),
+            default_packages=[],
         )
         session.add(profile)
         await session.flush()
@@ -1806,6 +1845,7 @@ def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
         "effort": profile.effort,
         "permissions": profile.permissions,
         "default_skills": profile.default_skills,
+        "default_packages": profile.default_packages,
         "required_skills": list(REQUIRED_PROFILE_SKILLS.get(profile.name, ())),
         "context_policy": profile.context_policy,
         "active": profile.active,
@@ -1813,7 +1853,8 @@ def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
     }
 
 
-def _skill_catalog() -> list[dict[str, Any]]:
+def _skill_catalog(revisions: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    revisions = revisions or {}
     bundled = {
         path.parent.name
         for path in (Path(__file__).resolve().parents[2] / "skills").glob("*/SKILL.md")
@@ -1822,6 +1863,7 @@ def _skill_catalog() -> list[dict[str, Any]]:
         {
             "name": name,
             "source": "carlo" if name in bundled else "managed",
+            "revision": revisions.get(name),
             "required_profiles": sorted(
                 profile
                 for profile, required in REQUIRED_PROFILE_SKILLS.items()
@@ -1871,6 +1913,25 @@ def _pi_settings_view(settings: PiRuntimeSettings) -> dict[str, Any]:
         "compaction_enabled": settings.compaction_enabled,
         "reserve_percent": settings.reserve_percent,
         "keep_recent_percent": settings.keep_recent_percent,
+        "default_packages": settings.default_packages,
+        "default_skills": settings.default_skills,
+    }
+
+
+def _pi_resource_revisions(settings: Settings) -> dict[str, str]:
+    manifest = Path(settings.artifact_root) / "pi-resources" / "revisions.json"
+    try:
+        value = json.loads(manifest.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        name: revision
+        for name, revision in value.items()
+        if isinstance(name, str)
+        and isinstance(revision, str)
+        and re.fullmatch(r"[0-9a-f]{40}", revision)
     }
 
 

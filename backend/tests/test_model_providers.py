@@ -334,8 +334,17 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
             default_skills=["carlo-ui-design"],
         )
         plan_profile = models.AgentProfile(
-            name="plan", provider="pi", default_skills=["carlo-ui-design"]
+            name="plan",
+            provider="pi",
+            default_packages=["ponytail"],
+            default_skills=["carlo-ui-design"],
         )
+        runtime = await session.get(models.PiRuntimeSettings, 1)
+        if runtime is None:
+            runtime = models.PiRuntimeSettings(id=1)
+            session.add(runtime)
+        runtime.default_packages = ["superpowers", "ponytail"]
+        runtime.default_skills = ["frontend-design"]
         session.add_all([provider, default, override, profile, plan_profile])
         await session.flush()
         profile.available_model_id = default.id
@@ -354,7 +363,12 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
         assert task_resolved.resolved_model.external_id == "qwen-large"
         assert task_resolved.resolved_model.keep_recent_tokens == 26_214
         assert task_resolved.tools == ("read", "edit")
-        assert plan_resolved.skills == ("carlo-planning", "carlo-ui-design")
+        assert plan_resolved.skills == (
+            "carlo-planning",
+            "frontend-design",
+            "carlo-ui-design",
+        )
+        assert plan_resolved.packages == ("superpowers", "ponytail")
 
 
 @pytest.mark.asyncio

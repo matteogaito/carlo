@@ -93,10 +93,11 @@ const api: Api = {
   refreshModelProvider: async () => undefined,
   listModels: async () => [],
   updateModel: async () => { throw new Error('unused') },
-  getPiSettings: async () => ({ compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20 }),
-  updatePiSettings: async () => ({ compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20 }),
+  getPiSettings: async () => ({ compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20, default_packages: ['superpowers', 'ponytail'], default_skills: [] }),
+  updatePiSettings: async () => ({ compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20, default_packages: ['superpowers', 'ponytail'], default_skills: [] }),
   listAgentProfiles: async () => [],
   listSkills: async () => [],
+  listPackages: async () => [],
   updateAgentProfile: async () => { throw new Error('unused') },
   setTaskModel: async () => { throw new Error('unused') },
   events: () => () => undefined,
@@ -503,25 +504,36 @@ describe('CARLO board', () => {
     }
     const profile: AgentProfileSettings = {
       name: 'plan', provider: 'pi', effort: null,
-      permissions: {}, default_skills: ['carlo-planning'], required_skills: ['carlo-planning'], context_policy: {}, active: true,
+      permissions: {}, default_packages: ['ponytail'], default_skills: ['carlo-planning'], required_skills: ['carlo-planning'], context_policy: {}, active: true,
       available_model_id: null,
     }
     const refreshModelProvider = vi.fn(async () => undefined)
     const updateModelProvider = vi.fn(async () => provider)
     const updateAgentProfile = vi.fn(async () => profile)
+    let piSettings = { compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20, default_packages: ['superpowers', 'ponytail'], default_skills: [] }
+    const updatePiSettings = vi.fn(async (input) => {
+      piSettings = { ...piSettings, ...input }
+      return piSettings
+    })
     render(<App api={{
       ...api,
+      getPiSettings: async () => piSettings,
       listModelProviders: async () => [provider],
       listModels: async () => [model],
       listAgentProfiles: async () => [profile],
+      listPackages: async () => [
+        { name: 'superpowers', revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+        { name: 'ponytail', revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
+      ],
       listSkills: async () => [
-        { name: 'carlo-planning', source: 'carlo', required_profiles: ['brief', 'plan'] },
-        { name: 'carlo-ui-design', source: 'carlo', required_profiles: [] },
-        { name: 'frontend-design', source: 'managed', required_profiles: [] },
+        { name: 'carlo-planning', source: 'carlo', revision: null, required_profiles: ['brief', 'plan'] },
+        { name: 'carlo-ui-design', source: 'carlo', revision: null, required_profiles: [] },
+        { name: 'frontend-design', source: 'managed', revision: 'cccccccccccccccccccccccccccccccccccccccc', required_profiles: [] },
       ],
       refreshModelProvider,
       updateModelProvider,
       updateAgentProfile,
+      updatePiSettings,
     }} />)
 
     await userEvent.click(await screen.findByRole('button', { name: 'Settings' }))
@@ -533,23 +545,39 @@ describe('CARLO board', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Refresh Local OMLX' }))
     expect(refreshModelProvider).toHaveBeenCalledWith(1)
     await userEvent.click(screen.getByRole('button', { name: 'Coding agents' }))
+    expect(screen.getByRole('heading', { name: 'Default resources' })).toBeTruthy()
+    const defaultSuperpowers = screen.getByRole('checkbox', { name: 'Default superpowers' }) as HTMLInputElement
+    const defaultPonytail = screen.getByRole('checkbox', { name: 'Default ponytail' }) as HTMLInputElement
+    expect(defaultSuperpowers.checked).toBe(true)
+    expect(defaultPonytail.checked).toBe(true)
+    expect(screen.getAllByText('bbbbbbb').length).toBeGreaterThan(0)
+    await userEvent.click(defaultPonytail)
+    await userEvent.click(screen.getByRole('button', { name: 'Save default resources' }))
+    expect(updatePiSettings).toHaveBeenCalledWith({
+      default_packages: ['superpowers'],
+      default_skills: [],
+    })
     expect(screen.queryByText(/Legacy Pi/i)).toBeNull()
     expect(screen.getByRole('option', { name: 'Not configured — choose a managed model' })).toBeTruthy()
     expect(screen.getByRole('option', { name: 'omlx — Qwen3.8-27B' })).toBeTruthy()
     await userEvent.selectOptions(screen.getByLabelText('Model for plan'), '2')
-    const coreSkill = screen.getByRole('checkbox', { name: /carlo-planning/i }) as HTMLInputElement
+    const coreSkill = screen.getByRole('checkbox', { name: 'plan skill carlo-planning' }) as HTMLInputElement
     expect(coreSkill.checked).toBe(true)
     expect(coreSkill.disabled).toBe(true)
-    await userEvent.click(screen.getByRole('checkbox', { name: /carlo-ui-design/i }))
+    const inheritedPonytail = screen.getByRole('checkbox', { name: 'plan package ponytail' }) as HTMLInputElement
+    expect(inheritedPonytail.checked).toBe(true)
+    expect(inheritedPonytail.disabled).toBe(false)
+    await userEvent.click(screen.getByRole('checkbox', { name: 'plan skill carlo-ui-design' }))
     await userEvent.click(screen.getByRole('button', { name: 'Save plan' }))
     expect(updateAgentProfile).toHaveBeenCalledWith('plan', {
       available_model_id: 2,
+      default_packages: ['ponytail'],
       default_skills: ['carlo-planning', 'carlo-ui-design'],
     })
-    expect((await screen.findByRole('status')).textContent).toBe('Saved ✓')
+    expect((await screen.findByRole('status', { name: 'plan saved' })).textContent).toBe('Saved ✓')
     updateAgentProfile.mockRejectedValueOnce(new Error('save failed'))
     await userEvent.click(screen.getByRole('button', { name: 'Save plan' }))
-    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'plan saved' })).toBeNull())
   })
 
   it('sets a concrete model override before task execution', async () => {
