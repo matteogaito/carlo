@@ -243,7 +243,6 @@ export interface ModelProvider {
   refresh_interval_minutes: number
   last_refresh_status: string
   last_refresh_error: string | null
-  default_model_id: number | null
   active: boolean
 }
 
@@ -274,13 +273,11 @@ export interface PiSettings {
 export interface AgentProfileSettings {
   name: string
   provider: string
-  model: string | null
   effort: string | null
   permissions: Record<string, unknown>
   default_skills: string[]
   context_policy: Record<string, unknown>
   active: boolean
-  model_provider_id: number | null
   available_model_id: number | null
 }
 

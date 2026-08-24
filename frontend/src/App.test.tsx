@@ -481,7 +481,7 @@ describe('CARLO board', () => {
       base_url: 'http://127.0.0.1:11435/v1', credential_configured: true,
       credential_hint: '…ocal', compatibility: {}, refresh_interval_minutes: 15,
       last_refresh_status: 'SUCCESS', last_refresh_error: null,
-      default_model_id: null, active: true,
+      active: true,
     }
     const model: AvailableModel = {
       id: 2, model_provider_id: 1, model_provider_name: 'Local OMLX',
@@ -492,15 +492,12 @@ describe('CARLO board', () => {
       reserve_tokens: 16384, keep_recent_tokens: 13107, selectable: true,
     }
     const profile: AgentProfileSettings = {
-      name: 'implementation', provider: 'pi', model: null, effort: null,
+      name: 'implementation', provider: 'pi', effort: null,
       permissions: {}, default_skills: [], context_policy: {}, active: true,
-      model_provider_id: 1, available_model_id: null,
+      available_model_id: null,
     }
     const refreshModelProvider = vi.fn(async () => undefined)
-    const updateModelProvider = vi.fn(async () => {
-      provider.default_model_id = 2
-      return provider
-    })
+    const updateModelProvider = vi.fn(async () => provider)
     const updateAgentProfile = vi.fn(async () => profile)
     render(<App api={{
       ...api,
@@ -517,18 +514,16 @@ describe('CARLO board', () => {
     expect(screen.getAllByText('Qwen3.8-27B').length).toBeGreaterThan(0)
     expect(screen.getByText('16,384 reserved')).toBeTruthy()
     expect(screen.queryByLabelText('Default model')).toBeNull()
-    await userEvent.click(screen.getByRole('button', { name: 'Use Qwen3.8-27B as default' }))
-    expect(updateModelProvider).toHaveBeenCalledWith(1, { default_model_id: 2 })
-    expect(await screen.findByText('Default')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /as default/i })).toBeNull()
     await userEvent.click(screen.getByRole('button', { name: 'Refresh Local OMLX' }))
     expect(refreshModelProvider).toHaveBeenCalledWith(1)
     await userEvent.click(screen.getByRole('button', { name: 'Coding agents' }))
     expect(screen.queryByText(/Legacy Pi/i)).toBeNull()
     expect(screen.getByRole('option', { name: 'Not configured — choose a managed model' })).toBeTruthy()
-    await userEvent.selectOptions(screen.getByLabelText('Model for implementation'), 'model:2')
+    expect(screen.getByRole('option', { name: 'omlx — Qwen3.8-27B' })).toBeTruthy()
+    await userEvent.selectOptions(screen.getByLabelText('Model for implementation'), '2')
     await userEvent.click(screen.getByRole('button', { name: 'Save implementation' }))
     expect(updateAgentProfile).toHaveBeenCalledWith('implementation', {
-      model_provider_id: null,
       available_model_id: 2,
     })
   })

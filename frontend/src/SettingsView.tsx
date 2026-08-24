@@ -74,7 +74,7 @@ export function SettingsView({ api, event, setError }: {
               <dl><dt>Endpoint</dt><dd>{provider.base_url}</dd><dt>Credential</dt><dd>{provider.credential_hint || 'Not required'}</dd><dt>Catalog</dt><dd>{catalog.length} models · {provider.last_refresh_status}</dd></dl>
               {provider.last_refresh_error && <p className="provider-error">{provider.last_refresh_error}</p>}
               <div className="model-ledger">
-                {catalog.map((model) => <ModelRow key={model.id} model={model} isDefault={provider.default_model_id === model.id} api={api} action={action} setDefault={() => action(() => api.updateModelProvider(provider.id, { default_model_id: model.id }))} />)}
+                {catalog.map((model) => <ModelRow key={model.id} model={model} api={api} action={action} />)}
                 {!catalog.length && <p>No models loaded. Refresh this provider.</p>}
               </div>
               <footer>
@@ -96,15 +96,13 @@ export function SettingsView({ api, event, setError }: {
   </main>
 }
 
-function ModelRow({ model, isDefault, api, action, setDefault }: {
+function ModelRow({ model, api, action }: {
   model: AvailableModel
-  isDefault: boolean
   api: Api
   action: (operation: () => Promise<unknown>) => Promise<void>
-  setDefault: () => Promise<void>
 }) {
   return <details className="model-row">
-    <summary><span><b>{model.display_name || model.external_id}</b><small>{model.external_id}</small></span><span className="model-row-state"><em className={model.selectable ? 'available' : ''}>{model.status}</em>{isDefault ? <strong>Default</strong> : model.selectable && <button type="button" aria-label={`Use ${model.display_name || model.external_id} as default`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void setDefault() }}>Use as default</button>}</span></summary>
+    <summary><span><b>{model.display_name || model.external_id}</b><small>{model.external_id}</small></span><span className="model-row-state"><em className={model.selectable ? 'available' : ''}>{model.status}</em></span></summary>
     <div>
       <p>{formatTokens(model.effective_context_window)} context · {formatTokens(model.effective_max_tokens)} output</p>
       {model.reserve_tokens != null && <p><b>{model.reserve_tokens.toLocaleString()} reserved</b> · {model.keep_recent_tokens?.toLocaleString()} recent</p>}
@@ -155,20 +153,23 @@ function AgentProfiles({ profiles, providers, models, save }: {
     <header><div><span>PI PROFILES</span><h2>Coding agents</h2></div></header>
     <p>Each new session receives an isolated snapshot of the selected model and proportional context policy.</p>
     <div className="profile-list">{profiles.map((profile) => {
-      const initial = profile.available_model_id ? `model:${profile.available_model_id}` : profile.model_provider_id ? `provider:${profile.model_provider_id}` : ''
+      const initial = profile.available_model_id ? String(profile.available_model_id) : ''
       return <form key={profile.name} onSubmit={(event) => {
         event.preventDefault()
         const selection = String(new FormData(event.currentTarget).get('model'))
         void save(profile.name, {
-          model_provider_id: selection.startsWith('provider:') ? Number(selection.slice(9)) : null,
-          available_model_id: selection.startsWith('model:') ? Number(selection.slice(6)) : null,
+          available_model_id: Number(selection),
         })
       }}>
         <div><span>{profile.provider}</span><h3>{profile.name}</h3><small>{profile.default_skills.join(' · ') || 'No default skills'}</small></div>
         <label>Model for {profile.name}<select name="model" defaultValue={initial} required>
           <option value="">Not configured — choose a managed model</option>
-          {providers.filter((provider) => provider.active).map((provider) => <option value={`provider:${provider.id}`} key={`provider:${provider.id}`}>{provider.name} · default</option>)}
-          {models.filter((model) => model.selectable).map((model) => <option value={`model:${model.id}`} key={`model:${model.id}`}>{model.model_provider_name} · {model.display_name || model.external_id}</option>)}
+          {providers.filter((provider) => provider.active).map((provider) => {
+            const available = models.filter((model) => model.model_provider_id === provider.id && model.selectable)
+            return available.length ? <optgroup label={provider.name} key={provider.id}>
+              {available.map((model) => <option value={model.id} key={model.id}>{provider.slug} — {model.external_id}</option>)}
+            </optgroup> : null
+          })}
         </select></label>
         <button type="submit">Save {profile.name}</button>
       </form>
