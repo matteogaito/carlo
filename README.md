@@ -65,6 +65,9 @@ and refresh its catalog. Under **Coding agents**, assign one concrete
 `provider — model` pair to `plan`, `implementation`, `discovery`, and the other
 profiles. There is no provider default; profiles without a concrete model
 remain unconfigured.
+Catalog models remain selectable when an OpenAI-compatible endpoint omits token
+metadata: CARLO falls back to a 65,536-token context and 16,384-token output.
+Per-model overrides are optional.
 
 CARLO encrypts provider keys in PostgreSQL using
 `CARLO_CREDENTIAL_ENCRYPTION_KEY`. Never rotate that key without first

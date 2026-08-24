@@ -1850,7 +1850,17 @@ async def _selectable_model(
         or model.effective_max_tokens is None
     ):
         raise HTTPException(409, "model is not selectable")
-    _validate_model_limits(model)
+    try:
+        _validate_model_limits(model)
+        settings = await _pi_settings(session)
+        calculate_compaction(
+            model.effective_context_window,
+            model.effective_max_tokens,
+            settings.reserve_percent,
+            settings.keep_recent_percent,
+        )
+    except (HTTPException, ModelProviderError) as error:
+        raise HTTPException(409, "model is not selectable") from error
     return model
 
 
@@ -1861,16 +1871,15 @@ def _available_model_view(
 ) -> dict[str, Any]:
     context_window = model.effective_context_window
     max_tokens = model.effective_max_tokens
-    compaction = (
-        calculate_compaction(
+    try:
+        compaction = calculate_compaction(
             context_window,
             max_tokens,
             settings.reserve_percent,
             settings.keep_recent_percent,
         )
-        if context_window is not None and max_tokens is not None
-        else None
-    )
+    except ModelProviderError:
+        compaction = None
     return {
         "id": model.id,
         "model_provider_id": model.model_provider_id,
@@ -1888,9 +1897,7 @@ def _available_model_view(
         "keep_recent_tokens": compaction.keep_recent_tokens if compaction else None,
         "input_modalities": model.input_modalities,
         "reasoning": model.reasoning,
-        "selectable": model.status == "AVAILABLE"
-        and context_window is not None
-        and max_tokens is not None,
+        "selectable": model.status == "AVAILABLE" and compaction is not None,
         "last_seen_at": model.last_seen_at.isoformat(),
     }
 

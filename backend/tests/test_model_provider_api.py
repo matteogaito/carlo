@@ -182,6 +182,123 @@ async def test_model_and_pi_settings_api_exposes_effective_context_preview(
 
 
 @pytest.mark.asyncio
+async def test_available_model_without_reported_limits_uses_safe_defaults(
+    settings_app,
+) -> None:
+    app, factory, _ = settings_app
+    async with factory() as session:
+        provider = ModelProvider(
+            name="Compatible",
+            slug="compatible",
+            kind="openai-compatible",
+            base_url="http://compatible.test/v1",
+        )
+        model = AvailableModel(
+            model_provider=provider,
+            external_id="unknown-limits",
+            status="AVAILABLE",
+        )
+        profile = AgentProfile(name="brief", provider="pi")
+        session.add_all([provider, model, profile])
+        await session.commit()
+        model_id = model.id
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        listed = await client.get("/api/settings/models")
+        selected = await client.patch(
+            "/api/agent-profiles/brief",
+            json={"available_model_id": model_id},
+        )
+
+    entry = next(item for item in listed.json() if item["id"] == model_id)
+    assert entry["effective_context_window"] == 65_536
+    assert entry["effective_max_tokens"] == 16_384
+    assert entry["selectable"] is True
+    assert selected.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_invalid_reported_limits_do_not_break_the_model_catalog(
+    settings_app,
+) -> None:
+    app, factory, _ = settings_app
+    async with factory() as session:
+        provider = ModelProvider(
+            name="Broken metadata",
+            slug="broken-metadata",
+            kind="openai-compatible",
+            base_url="http://broken.test/v1",
+        )
+        session.add(
+            AvailableModel(
+                model_provider=provider,
+                external_id="one-token-context",
+                status="AVAILABLE",
+                discovered_context_window=1,
+            )
+        )
+        await session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        response = await client.get("/api/settings/models")
+
+    assert response.status_code == 200
+    assert response.json()[0]["selectable"] is False
+
+
+@pytest.mark.asyncio
+async def test_compaction_incompatible_model_cannot_be_selected(
+    settings_app,
+) -> None:
+    app, factory, _ = settings_app
+    async with factory() as session:
+        provider = ModelProvider(
+            name="Tight context",
+            slug="tight-context",
+            kind="openai-compatible",
+            base_url="http://tight.test/v1",
+        )
+        model = AvailableModel(
+            model_provider=provider,
+            external_id="tight-model",
+            status="AVAILABLE",
+            discovered_context_window=100,
+            discovered_max_tokens=90,
+        )
+        session.add_all([provider, model, AgentProfile(name="brief", provider="pi")])
+        await session.commit()
+        model_id = model.id
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        response = await client.patch(
+            "/api/agent-profiles/brief",
+            headers={"Origin": "http://test"},
+            json={"available_model_id": model_id},
+        )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_provider_update_retains_or_replaces_secret(
     settings_app,
 ) -> None:

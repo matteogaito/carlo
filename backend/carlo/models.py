@@ -22,6 +22,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .domain import TaskStage, TaskStatus
 
+DEFAULT_MODEL_CONTEXT_WINDOW = 65_536
+DEFAULT_MODEL_MAX_TOKENS = 16_384
+
 
 class Base(DeclarativeBase):
     pass
@@ -275,12 +278,22 @@ class AvailableModel(TimestampMixin, Base):
     )
 
     @property
-    def effective_context_window(self) -> int | None:
-        return self.context_window_override or self.discovered_context_window
+    def effective_context_window(self) -> int:
+        known_context = self.context_window_override or self.discovered_context_window
+        if known_context:
+            return known_context
+        known_output = self.max_tokens_override or self.discovered_max_tokens
+        return max(
+            DEFAULT_MODEL_CONTEXT_WINDOW,
+            (known_output or DEFAULT_MODEL_MAX_TOKENS) * 4,
+        )
 
     @property
-    def effective_max_tokens(self) -> int | None:
-        return self.max_tokens_override or self.discovered_max_tokens
+    def effective_max_tokens(self) -> int:
+        return self.max_tokens_override or self.discovered_max_tokens or min(
+            DEFAULT_MODEL_MAX_TOKENS,
+            max(1, self.effective_context_window // 4),
+        )
 
 
 class PiRuntimeSettings(TimestampMixin, Base):

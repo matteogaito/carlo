@@ -47,6 +47,24 @@ def test_model_provider_records_keep_discovered_and_overridden_limits() -> None:
     assert provider.models == [model]
 
 
+def test_missing_output_limit_is_capped_to_the_discovered_context() -> None:
+    model = models.AvailableModel(
+        external_id="small-model",
+        discovered_context_window=8_192,
+    )
+
+    assert model.effective_max_tokens == 2_048
+
+
+def test_missing_context_limit_expands_for_the_discovered_output() -> None:
+    model = models.AvailableModel(
+        external_id="large-output-model",
+        discovered_max_tokens=32_768,
+    )
+
+    assert model.effective_context_window == 131_072
+
+
 def test_openai_catalog_parser_reads_all_models_and_common_context_fields() -> None:
     module = importlib.import_module("carlo.model_providers")
     assert hasattr(module, "parse_openai_models"), "catalog discovery is missing"
