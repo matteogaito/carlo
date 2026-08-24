@@ -227,13 +227,6 @@ class ModelProvider(TimestampMixin, Base):
     )
     last_refresh_status: Mapped[str] = mapped_column(String(20), default="NEVER")
     last_refresh_error: Mapped[str | None] = mapped_column(Text)
-    default_model_id: Mapped[int | None] = mapped_column(
-        ForeignKey(
-            "available_models.id",
-            name="fk_model_providers_default_model_id",
-            use_alter=True,
-        )
-    )
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     models: Mapped[list["AvailableModel"]] = relationship(
@@ -241,9 +234,6 @@ class ModelProvider(TimestampMixin, Base):
         foreign_keys="AvailableModel.model_provider_id",
         cascade="all, delete-orphan",
         passive_deletes=True,
-    )
-    default_model: Mapped["AvailableModel | None"] = relationship(
-        foreign_keys=[default_model_id], post_update=True
     )
 
 
@@ -315,25 +305,15 @@ class PiRuntimeSettings(TimestampMixin, Base):
 
 class AgentProfile(TimestampMixin, Base):
     __tablename__ = "agent_profiles"
-    __table_args__ = (
-        CheckConstraint(
-            "NOT (model_provider_id IS NOT NULL AND available_model_id IS NOT NULL)",
-            name="ck_agent_profiles_one_model_selection",
-        ),
-    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(String(40), unique=True)
     provider: Mapped[str] = mapped_column(String(40), default="pi")
-    model: Mapped[str | None] = mapped_column(String(160))
     effort: Mapped[str | None] = mapped_column(String(20))
     permissions: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     default_skills: Mapped[list[str]] = mapped_column(JSONB, default=list)
     context_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    model_provider_id: Mapped[int | None] = mapped_column(
-        ForeignKey("model_providers.id", ondelete="RESTRICT")
-    )
     available_model_id: Mapped[int | None] = mapped_column(
         ForeignKey("available_models.id", ondelete="RESTRICT")
     )

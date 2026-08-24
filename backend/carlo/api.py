@@ -118,13 +118,11 @@ class Approval(BaseModel):
 
 class ProfileUpdate(BaseModel):
     provider: str | None = None
-    model: str | None = None
     effort: str | None = None
     permissions: dict[str, Any] | None = None
     default_skills: list[str] | None = None
     context_policy: dict[str, Any] | None = None
     active: bool | None = None
-    model_provider_id: int | None = None
     available_model_id: int | None = None
 
 
@@ -155,7 +153,6 @@ class ModelProviderUpdate(BaseModel):
     api_key: str | None = Field(default=None, min_length=1, max_length=16_384)
     compatibility: dict[str, Any] | None = None
     refresh_interval_minutes: int | None = Field(default=None, ge=1, le=1440)
-    default_model_id: int | None = None
     active: bool | None = None
 
     @field_validator("base_url")
@@ -750,42 +747,15 @@ def create_app(
         )
         if profile is None:
             raise HTTPException(404, "agent profile not found")
-        selected_provider_id = (
-            payload.model_provider_id
-            if "model_provider_id" in payload.model_fields_set
-            else profile.model_provider_id
-        )
         selected_model_id = (
             payload.available_model_id
             if "available_model_id" in payload.model_fields_set
             else profile.available_model_id
         )
-        if (
-            "model_provider_id" in payload.model_fields_set
-            and payload.model_provider_id is not None
-        ):
-            selected_model_id = None
-        if (
-            "available_model_id" in payload.model_fields_set
-            and payload.available_model_id is not None
-        ):
-            selected_provider_id = None
-        if selected_provider_id is not None and selected_model_id is not None:
-            raise HTTPException(422, "choose a model provider default or a concrete model")
-        if selected_provider_id is not None:
-            provider_record = await session.get(ModelProvider, selected_provider_id)
-            if provider_record is None or not provider_record.active:
-                raise HTTPException(409, "model provider is unavailable")
         if selected_model_id is not None:
             await _selectable_model(session, selected_model_id)
         for field in payload.model_fields_set:
             setattr(profile, field, getattr(payload, field))
-        if "model_provider_id" in payload.model_fields_set and payload.model_provider_id is not None:
-            profile.available_model_id = None
-            profile.model = None
-        if "available_model_id" in payload.model_fields_set and payload.available_model_id is not None:
-            profile.model_provider_id = None
-            profile.model = None
         session.add(
             Event(type="agent_profile.updated", payload={"name": name, "fields": sorted(payload.model_fields_set)})
         )
@@ -847,20 +817,6 @@ def create_app(
         provider = await session.get(ModelProvider, provider_id)
         if provider is None:
             raise HTTPException(404, "model provider not found")
-        if "default_model_id" in payload.model_fields_set:
-            if payload.default_model_id is None:
-                provider.default_model_id = None
-            else:
-                model = await session.get(AvailableModel, payload.default_model_id)
-                if model is None or model.model_provider_id != provider_id:
-                    raise HTTPException(422, "default model must belong to this provider")
-                if (
-                    model.status != "AVAILABLE"
-                    or model.effective_context_window is None
-                    or model.effective_max_tokens is None
-                ):
-                    raise HTTPException(409, "default model is not selectable")
-                provider.default_model_id = model.id
         if "api_key" in payload.model_fields_set:
             if payload.api_key is None:
                 raise HTTPException(422, "api_key cannot be null")
@@ -870,7 +826,7 @@ def create_app(
             provider.credential_ciphertext = encrypted.ciphertext
             provider.credential_nonce = encrypted.nonce
             provider.credential_hint = f"…{payload.api_key[-4:]}"
-        for field in payload.model_fields_set - {"api_key", "default_model_id"}:
+        for field in payload.model_fields_set - {"api_key"}:
             setattr(provider, field, getattr(payload, field))
         try:
             await session.flush()
@@ -902,7 +858,6 @@ def create_app(
             "provider_id": result.provider_id,
             "seen": result.seen,
             "unavailable": result.unavailable,
-            "default_model_id": result.default_model_id,
         }
 
     @api.delete(
@@ -924,8 +879,7 @@ def create_app(
                 AgentProfileRecord.available_model_id == AvailableModel.id,
             )
             .where(
-                (AgentProfileRecord.model_provider_id == provider_id)
-                | (AvailableModel.model_provider_id == provider_id)
+                AvailableModel.model_provider_id == provider_id
             )
         )
         task_reference = await session.scalar(
@@ -936,8 +890,6 @@ def create_app(
         )
         if profile_reference or task_reference:
             raise HTTPException(409, "model provider is still referenced")
-        provider.default_model_id = None
-        await session.flush()
         await session.delete(provider)
         session.add(
             Event(
@@ -1412,14 +1364,14 @@ def create_app(
             )
         ) or 1
         metadata = output.metadata.model_dump()
+        runtime_evidence = model_runtime_evidence(provider_profile)
         metadata["planner_profile"] = {
             "name": profile.name,
             "provider": profile.provider,
-            "model": provider_profile.model,
+            "model": runtime_evidence["model"] if runtime_evidence else None,
             "effort": provider_profile.effort,
             "tools": list(provider_profile.tools),
         }
-        runtime_evidence = model_runtime_evidence(provider_profile)
         if runtime_evidence:
             metadata["model_runtime"] = runtime_evidence
         plan = PlanRevision(
@@ -1678,8 +1630,8 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
         profile = AgentProfileRecord(
             name=name,
             provider=source.provider if source else "pi",
-            model=source.model if source else None,
             effort=source.effort if source else None,
+            available_model_id=source.available_model_id if source else None,
             permissions={"tools": ["read", "bash", "grep", "find", "ls", "discovery_state"]}
             if name == "discovery"
             else {},
@@ -1820,13 +1772,11 @@ def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
     return {
         "name": profile.name,
         "provider": profile.provider,
-        "model": profile.model,
         "effort": profile.effort,
         "permissions": profile.permissions,
         "default_skills": profile.default_skills,
         "context_policy": profile.context_policy,
         "active": profile.active,
-        "model_provider_id": profile.model_provider_id,
         "available_model_id": profile.available_model_id,
     }
 
@@ -1850,7 +1800,6 @@ def _model_provider_view(provider: ModelProvider) -> dict[str, Any]:
         else None,
         "last_refresh_status": provider.last_refresh_status,
         "last_refresh_error": provider.last_refresh_error,
-        "default_model_id": provider.default_model_id,
         "active": provider.active,
         "created_at": provider.created_at.isoformat(),
         "updated_at": provider.updated_at.isoformat(),

@@ -193,12 +193,11 @@ async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path
         )
         session.add_all([provider, first, second, profile, discovery])
         await session.flush()
-        provider.default_model_id = first.id
-        profile.model_provider_id = provider.id
+        profile.available_model_id = first.id
         discovery.profile_id = profile.id
         session.add(DiscoveryTurn(discovery=discovery, input_message=message))
         await session.commit()
-        discovery_id, provider_id, second_id = discovery.id, provider.id, second.id
+        discovery_id, profile_id, second_id = discovery.id, profile.id, second.id
 
     first_process = Provider()
     runtime = DiscoveryRuntime(
@@ -207,9 +206,9 @@ async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path
     await runtime.run_next()
     await runtime.close()
     async with factory() as session:
-        provider = await session.get(ModelProvider, provider_id)
+        profile = await session.get(AgentProfile, profile_id)
         discovery = await session.get(Discovery, discovery_id)
-        provider.default_model_id = second_id
+        profile.available_model_id = second_id
         sequence = max(message.sequence for message in discovery.messages) + 1
         message = DiscoveryMessage(
             discovery=discovery,

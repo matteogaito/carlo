@@ -52,7 +52,6 @@ class ModelRefreshResult:
     provider_id: int
     seen: int
     unavailable: int
-    default_model_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,24 +87,14 @@ async def resolve_agent_profile(
     tools = tuple(record.permissions.get("tools") or default_tools)
     skills = tuple(dict.fromkeys((*record.default_skills, *extra_skills)))
     model_id = task_model_id or record.available_model_id
+    if model_id is None:
+        raise ModelProviderError("agent profile has no managed model")
     provider: ModelProvider | None = None
     model: AvailableModel | None = None
-    if model_id is not None:
-        model = await session.get(AvailableModel, model_id)
-        if model is None:
-            raise ModelProviderError("selected model was not found")
-        provider = await session.get(ModelProvider, model.model_provider_id)
-    elif record.model_provider_id is not None:
-        provider = await session.get(ModelProvider, record.model_provider_id)
-        if provider is None:
-            raise ModelProviderError("selected model provider was not found")
-        if provider.default_model_id is None:
-            raise ModelProviderError("model provider has no default model")
-        model = await session.get(AvailableModel, provider.default_model_id)
-    else:
-        return AgentProfile(
-            record.name, record.model, record.effort, tools, skills
-        )
+    model = await session.get(AvailableModel, model_id)
+    if model is None:
+        raise ModelProviderError("selected model was not found")
+    provider = await session.get(ModelProvider, model.model_provider_id)
 
     if provider is None or model is None:
         raise ModelProviderError("selected model configuration is incomplete")
@@ -321,11 +310,6 @@ async def refresh_model_provider(
                 model.status = "UNAVAILABLE"
                 unavailable += 1
         await session.flush()
-        available = [existing[item.external_id] for item in discovered]
-        if len(available) == 1:
-            provider.default_model_id = available[0].id
-        elif provider.default_model_id not in {model.id for model in available}:
-            provider.default_model_id = None
         provider.last_refresh_success_at = now
         provider.last_refresh_status = "SUCCESS"
         provider.last_refresh_error = None
@@ -351,9 +335,7 @@ async def refresh_model_provider(
             )
         )
         await session.commit()
-        return ModelRefreshResult(
-            provider_id, len(discovered), unavailable, provider.default_model_id
-        )
+        return ModelRefreshResult(provider_id, len(discovered), unavailable)
 
 
 async def refresh_due_model_providers(

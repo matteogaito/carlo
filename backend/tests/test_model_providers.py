@@ -97,7 +97,7 @@ async def model_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 @pytest.mark.asyncio
-async def test_refresh_retains_missing_models_and_updates_single_default(
+async def test_refresh_retains_missing_models_without_selecting_one(
     model_factory,
 ) -> None:
     module = importlib.import_module("carlo.model_providers")
@@ -143,7 +143,6 @@ async def test_refresh_retains_missing_models_and_updates_single_default(
             ("old", "UNAVAILABLE"),
         ]
         assert provider is not None
-        assert provider.default_model_id == catalog[0].id
         assert provider.last_refresh_status == "SUCCESS"
         changes = (
             await session.scalars(
@@ -280,7 +279,7 @@ async def test_refresh_records_wrong_encryption_key_without_losing_catalog(
 
 
 @pytest.mark.asyncio
-async def test_agent_profile_resolution_uses_defaults_and_task_override(
+async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
     model_factory,
 ) -> None:
     module = importlib.import_module("carlo.model_providers")
@@ -313,14 +312,12 @@ async def test_agent_profile_resolution_uses_defaults_and_task_override(
         profile = models.AgentProfile(
             name="implementation-resolver",
             provider="pi",
-            model_provider_id=None,
             permissions={"tools": ["read", "edit"]},
             default_skills=["testing"],
         )
         session.add_all([provider, default, override, profile])
         await session.flush()
-        provider.default_model_id = default.id
-        profile.model_provider_id = provider.id
+        profile.available_model_id = default.id
         await session.flush()
 
         resolved = await module.resolve_agent_profile(session, profile, cipher)
@@ -337,15 +334,13 @@ async def test_agent_profile_resolution_uses_defaults_and_task_override(
 
 
 @pytest.mark.asyncio
-async def test_agent_profile_resolution_keeps_legacy_and_rejects_bad_catalog(
+async def test_agent_profile_resolution_rejects_unconfigured_and_bad_catalog(
     model_factory,
 ) -> None:
     module = importlib.import_module("carlo.model_providers")
     cipher = module.CredentialCipher(b"x" * 32)
     async with model_factory() as session:
-        legacy = models.AgentProfile(
-            name="legacy-resolver", provider="pi", model="openai/gpt-5.6-sol"
-        )
+        unconfigured = models.AgentProfile(name="unconfigured-resolver", provider="pi")
         provider = models.ModelProvider(
             name="Broken",
             slug="broken",
@@ -361,13 +356,12 @@ async def test_agent_profile_resolution_keeps_legacy_and_rejects_bad_catalog(
         broken = models.AgentProfile(
             name="broken-resolver", provider="pi", available_model_id=None
         )
-        session.add_all([legacy, provider, model, broken])
+        session.add_all([unconfigured, provider, model, broken])
         await session.flush()
         broken.available_model_id = model.id
         await session.flush()
 
-        legacy_result = await module.resolve_agent_profile(session, legacy, cipher)
-        assert legacy_result.model == "openai/gpt-5.6-sol"
-        assert legacy_result.resolved_model is None
+        with pytest.raises(module.ModelProviderError, match="no managed model"):
+            await module.resolve_agent_profile(session, unconfigured, cipher)
         with pytest.raises(module.ModelProviderError, match="inactive"):
             await module.resolve_agent_profile(session, broken, cipher)

@@ -182,7 +182,7 @@ async def test_model_and_pi_settings_api_exposes_effective_context_preview(
 
 
 @pytest.mark.asyncio
-async def test_provider_update_retains_or_replaces_secret_and_sets_own_default(
+async def test_provider_update_retains_or_replaces_secret(
     settings_app,
 ) -> None:
     app, factory, key = settings_app
@@ -219,10 +219,10 @@ async def test_provider_update_retains_or_replaces_secret_and_sets_own_default(
         client.headers["Origin"] = "http://test"
         retained = await client.patch(
             f"/api/settings/model-providers/{provider_id}",
-            json={"name": "Renamed", "default_model_id": model_id},
+            json={"name": "Renamed"},
         )
         assert retained.status_code == 200
-        assert retained.json()["default_model_id"] == model_id
+        assert "default_model_id" not in retained.json()
         rejected = await client.patch(
             f"/api/settings/model-providers/{provider_id}",
             json={"api_key": None},
@@ -245,7 +245,7 @@ async def test_provider_update_retains_or_replaces_secret_and_sets_own_default(
 
 
 @pytest.mark.asyncio
-async def test_profiles_use_provider_default_and_tasks_pin_concrete_model(
+async def test_profiles_and_tasks_pin_concrete_models(
     settings_app,
 ) -> None:
     app, factory, _ = settings_app
@@ -274,9 +274,8 @@ async def test_profiles_use_provider_default_and_tasks_pin_concrete_model(
         )
         session.add_all([provider, model, profile, task])
         await session.flush()
-        provider.default_model_id = model.id
         await session.commit()
-        provider_id, model_id = provider.id, model.id
+        model_id = model.id
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
@@ -288,11 +287,11 @@ async def test_profiles_use_provider_default_and_tasks_pin_concrete_model(
         client.headers["Origin"] = "http://test"
         profile_response = await client.patch(
             "/api/agent-profiles/implementation",
-            json={"model_provider_id": provider_id},
+            json={"available_model_id": model_id},
         )
         assert profile_response.status_code == 200
-        assert profile_response.json()["model_provider_id"] == provider_id
-        assert profile_response.json()["available_model_id"] is None
+        assert "model_provider_id" not in profile_response.json()
+        assert profile_response.json()["available_model_id"] == model_id
 
         task_response = await client.patch(
             "/api/tasks/MOD-1/model",
@@ -328,7 +327,7 @@ async def test_model_provider_refresh_action_is_explicit_and_auditable(
         called.append(selected_provider_id)
         from carlo.model_providers import ModelRefreshResult
 
-        return ModelRefreshResult(selected_provider_id, 2, 1, None)
+        return ModelRefreshResult(selected_provider_id, 2, 1)
 
     monkeypatch.setattr("carlo.api.refresh_model_provider", refresh, raising=False)
     async with AsyncClient(
@@ -348,7 +347,6 @@ async def test_model_provider_refresh_action_is_explicit_and_auditable(
         "provider_id": provider_id,
         "seen": 2,
         "unavailable": 1,
-        "default_model_id": None,
     }
     assert called == [provider_id]
 
@@ -369,12 +367,17 @@ async def test_model_provider_delete_refuses_profile_references(settings_app) ->
             kind="openai-compatible",
             base_url="http://used.test/v1",
         )
-        profile = AgentProfile(
-            name="implementation", provider="pi", model_provider_id=None
+        model = AvailableModel(
+            model_provider=used,
+            external_id="used-model",
+            status="AVAILABLE",
+            discovered_context_window=65_536,
+            discovered_max_tokens=16_384,
         )
-        session.add_all([free, used, profile])
+        profile = AgentProfile(name="implementation", provider="pi")
+        session.add_all([free, used, model, profile])
         await session.flush()
-        profile.model_provider_id = used.id
+        profile.available_model_id = model.id
         await session.commit()
         free_id, used_id = free.id, used.id
 
