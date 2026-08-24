@@ -19,12 +19,33 @@ AgentEventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedModel:
+    model_provider_id: int
+    available_model_id: int
+    provider_slug: str
+    base_url: str
+    api: str
+    external_id: str
+    display_name: str
+    api_key: str
+    compatibility: dict[str, Any]
+    input_modalities: tuple[str, ...]
+    reasoning: bool
+    context_window: int
+    max_tokens: int
+    compaction_enabled: bool
+    reserve_tokens: int
+    keep_recent_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class AgentProfile:
     name: str
     model: str | None
     effort: str | None
     tools: tuple[str, ...]
     skills: tuple[str, ...]
+    resolved_model: ResolvedModel | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,11 +117,16 @@ class CodingAgentProvider(Protocol):
 
 class PiProvider:
     def __init__(
-        self, executable: str, session_dir: Path, skill_root: Path | None = None
+        self,
+        executable: str,
+        session_dir: Path,
+        skill_root: Path | None = None,
+        runtime_builder: Any | None = None,
     ) -> None:
         self.executable = executable
         self.session_dir = session_dir
         self.skill_root = skill_root or Path(__file__).resolve().parents[2] / "skills"
+        self.runtime_builder = runtime_builder
         self.lock_path = self.session_dir.parent / "pi-runtime.lock"
         self._processes: dict[str, asyncio.subprocess.Process] = {}
 
@@ -116,6 +142,7 @@ class PiProvider:
         if self.status(session_id) == "running":
             raise ProviderError(f"session is already running: {session_id}")
         self.session_dir.mkdir(parents=True, exist_ok=True)
+        model, runtime_environment = self._runtime(profile, session_id)
         command = [
             self.executable,
             "--mode",
@@ -125,7 +152,7 @@ class PiProvider:
             session_id,
             "--session-dir",
             str(self.session_dir),
-            *self._profile_arguments(profile),
+            *self._profile_arguments(profile, model),
         ]
         for extension in extensions:
             command.extend(("--extension", str(extension)))
@@ -136,7 +163,11 @@ class PiProvider:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, **(environment or {})},
+                env={
+                    **os.environ,
+                    **(environment or {}),
+                    **runtime_environment,
+                },
             )
         self._processes[session_id] = process
         return PiRpcSession(
@@ -154,6 +185,7 @@ class PiProvider:
         on_event: AgentEventHandler | None = None,
     ) -> AgentResult:
         self.session_dir.mkdir(parents=True, exist_ok=True)
+        model, runtime_environment = self._runtime(profile, session_id)
         command = [
             self.executable,
             "--mode",
@@ -165,7 +197,7 @@ class PiProvider:
             "--session-dir",
             str(self.session_dir),
         ]
-        command.extend(self._profile_arguments(profile))
+        command.extend(self._profile_arguments(profile, model))
         command.append(instruction)
 
         async with pi_process_lock(self.lock_path, exclusive=False):
@@ -175,6 +207,7 @@ class PiProvider:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=PI_JSON_EVENT_LIMIT,
+                env={**os.environ, **runtime_environment},
             )
             self._processes[session_id] = process
             stderr_task = asyncio.create_task(process.stderr.read())
@@ -229,10 +262,24 @@ class PiProvider:
         process = self._processes.get(session_id)
         return "running" if process and process.returncode is None else "idle"
 
-    def _profile_arguments(self, profile: AgentProfile) -> list[str]:
+    def _runtime(
+        self, profile: AgentProfile, session_id: str
+    ) -> tuple[str | None, dict[str, str]]:
+        if not profile.resolved_model or not self.runtime_builder:
+            return profile.model, {}
+        snapshot = self.runtime_builder.materialize(session_id, profile.resolved_model)
+        return snapshot.model_pattern, {
+            **snapshot.environment,
+            "PI_CODING_AGENT_DIR": str(snapshot.agent_dir),
+        }
+
+    def _profile_arguments(
+        self, profile: AgentProfile, model: str | None = None
+    ) -> list[str]:
         arguments: list[str] = []
-        if profile.model:
-            arguments.extend(("--model", profile.model))
+        selected_model = model if model is not None else profile.model
+        if selected_model:
+            arguments.extend(("--model", selected_model))
         if profile.effort:
             arguments.extend(("--thinking", profile.effort))
         if profile.tools:

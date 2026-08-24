@@ -35,6 +35,8 @@ for line in sys.stdin:
                 "contextUsage": {"percent": 12.5},
                 "argv": sys.argv[1:],
                 "discoveryCommands": os.getenv("CARLO_DISCOVERY_COMMANDS"),
+                "agentDir": os.getenv("PI_CODING_AGENT_DIR"),
+                "hasModelKey": bool(os.getenv("CARLO_PI_MODEL_API_KEY")),
             },
         })
     elif kind == "get_entries":

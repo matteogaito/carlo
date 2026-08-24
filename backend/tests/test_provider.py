@@ -4,7 +4,29 @@ from typing import Any
 
 import pytest
 
-from carlo.provider import AgentProfile, PiProvider, ProviderError
+from carlo.pi_runtime import PiRuntimeSnapshotBuilder
+from carlo.provider import AgentProfile, PiProvider, ProviderError, ResolvedModel
+
+
+def _resolved_model() -> ResolvedModel:
+    return ResolvedModel(
+        model_provider_id=1,
+        available_model_id=2,
+        provider_slug="omlx",
+        base_url="http://127.0.0.1:11435/v1",
+        api="openai-completions",
+        external_id="qwen",
+        display_name="Qwen",
+        api_key="secret-local-key",
+        compatibility={},
+        input_modalities=("text",),
+        reasoning=True,
+        context_window=65_536,
+        max_tokens=16_384,
+        compaction_enabled=True,
+        reserve_tokens=16_384,
+        keep_recent_tokens=13_107,
+    )
 
 
 @pytest.mark.asyncio
@@ -195,3 +217,44 @@ async def test_pi_provider_streams_a_persisted_rpc_conversation(tmp_path: Path) 
     await session.abort()
     await session.close()
     assert provider.status("discovery-42") == "idle"
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_uses_managed_model_snapshot_for_all_sessions(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "print(json.dumps({'type': 'final', 'output': 'done', "
+        "'argv': sys.argv[1:], 'agentDir': os.getenv('PI_CODING_AGENT_DIR'), "
+        "'hasKey': bool(os.getenv('CARLO_PI_MODEL_API_KEY'))}))\n"
+    )
+    executable.chmod(0o755)
+    runtime_root = tmp_path / "runtime"
+    provider = PiProvider(
+        str(executable),
+        tmp_path / "sessions",
+        runtime_builder=PiRuntimeSnapshotBuilder(runtime_root),
+    )
+    profile = AgentProfile("implementation", "legacy/model", None, (), (), _resolved_model())
+
+    result = await provider.run(profile, "Implement", str(tmp_path), "CAR-9-implementation")
+    final = result.events[-1]
+    assert final["hasKey"] is True
+    assert final["agentDir"] == str(runtime_root / "CAR-9-implementation")
+    assert final["argv"][final["argv"].index("--model") + 1] == "omlx/qwen"
+    assert "secret-local-key" not in json.dumps(final["argv"])
+
+    rpc_executable = Path(__file__).parent / "fixtures" / "fake_pi_rpc.py"
+    rpc_executable.chmod(0o755)
+    provider.executable = str(rpc_executable)
+    session = await provider.open_conversation(
+        profile, str(tmp_path), "discovery-99"
+    )
+    state = await session.get_state()
+    assert state.raw["hasModelKey"] is True
+    assert state.raw["agentDir"] == str(runtime_root / "discovery-99")
+    assert state.raw["argv"][state.raw["argv"].index("--model") + 1] == "omlx/qwen"
+    await session.close()
