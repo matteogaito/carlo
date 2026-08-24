@@ -250,3 +250,97 @@ async def test_refresh_records_wrong_encryption_key_without_losing_catalog(
         assert [(item.external_id, item.status) for item in catalog] == [
             ("existing", "AVAILABLE")
         ]
+
+
+@pytest.mark.asyncio
+async def test_agent_profile_resolution_uses_defaults_and_task_override(
+    model_factory,
+) -> None:
+    module = importlib.import_module("carlo.model_providers")
+    cipher = module.CredentialCipher(b"x" * 32)
+    encrypted = cipher.encrypt("runtime-secret")
+    async with model_factory() as session:
+        provider = models.ModelProvider(
+            name="Local",
+            slug="omlx",
+            kind="openai-compatible",
+            base_url="http://local.test/v1",
+            credential_ciphertext=encrypted.ciphertext,
+            credential_nonce=encrypted.nonce,
+            compatibility={"supportsDeveloperRole": False},
+        )
+        default = models.AvailableModel(
+            model_provider=provider,
+            external_id="qwen",
+            status="AVAILABLE",
+            discovered_context_window=65_536,
+            discovered_max_tokens=16_384,
+        )
+        override = models.AvailableModel(
+            model_provider=provider,
+            external_id="qwen-large",
+            status="AVAILABLE",
+            discovered_context_window=131_072,
+            discovered_max_tokens=32_768,
+        )
+        profile = models.AgentProfile(
+            name="implementation-resolver",
+            provider="pi",
+            model_provider_id=None,
+            permissions={"tools": ["read", "edit"]},
+            default_skills=["testing"],
+        )
+        session.add_all([provider, default, override, profile])
+        await session.flush()
+        provider.default_model_id = default.id
+        profile.model_provider_id = provider.id
+        await session.flush()
+
+        resolved = await module.resolve_agent_profile(session, profile, cipher)
+        task_resolved = await module.resolve_agent_profile(
+            session, profile, cipher, task_model_id=override.id
+        )
+
+        assert resolved.resolved_model.external_id == "qwen"
+        assert resolved.resolved_model.api_key == "runtime-secret"
+        assert resolved.resolved_model.reserve_tokens == 16_384
+        assert task_resolved.resolved_model.external_id == "qwen-large"
+        assert task_resolved.resolved_model.keep_recent_tokens == 26_214
+        assert task_resolved.tools == ("read", "edit")
+
+
+@pytest.mark.asyncio
+async def test_agent_profile_resolution_keeps_legacy_and_rejects_bad_catalog(
+    model_factory,
+) -> None:
+    module = importlib.import_module("carlo.model_providers")
+    cipher = module.CredentialCipher(b"x" * 32)
+    async with model_factory() as session:
+        legacy = models.AgentProfile(
+            name="legacy-resolver", provider="pi", model="openai/gpt-5.6-sol"
+        )
+        provider = models.ModelProvider(
+            name="Broken",
+            slug="broken",
+            kind="openai-compatible",
+            base_url="http://broken.test/v1",
+            active=False,
+        )
+        model = models.AvailableModel(
+            model_provider=provider,
+            external_id="missing-limits",
+            status="UNAVAILABLE",
+        )
+        broken = models.AgentProfile(
+            name="broken-resolver", provider="pi", available_model_id=None
+        )
+        session.add_all([legacy, provider, model, broken])
+        await session.flush()
+        broken.available_model_id = model.id
+        await session.flush()
+
+        legacy_result = await module.resolve_agent_profile(session, legacy, cipher)
+        assert legacy_result.model == "openai/gpt-5.6-sol"
+        assert legacy_result.resolved_model is None
+        with pytest.raises(module.ModelProviderError, match="inactive"):
+            await module.resolve_agent_profile(session, broken, cipher)

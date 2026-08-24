@@ -11,6 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .models import AgentProfile as ProfileRecord
 from .models import Discovery, DiscoveryMessage, DiscoveryTurn, Event
+from .model_providers import (
+    CredentialCipher,
+    model_runtime_evidence,
+    resolve_agent_profile,
+)
 from .provider import AgentProfile, CodingAgentProvider, ConversationEvent, ConversationSession
 
 
@@ -29,11 +34,13 @@ class DiscoveryRuntime:
         provider: CodingAgentProvider,
         guard_extension: Path,
         max_sessions_per_project: int = 3,
+        credential_cipher: CredentialCipher | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.provider = provider
         self.guard_extension = guard_extension
         self.max_sessions_per_project = max_sessions_per_project
+        self.credential_cipher = credential_cipher
         self._sessions: dict[int, _LiveSession] = {}
         self._active: set[int] = set()
         self._claim_lock = asyncio.Lock()
@@ -99,13 +106,44 @@ class DiscoveryRuntime:
             project = discovery.project
             message = turn.input_message.content
             memory = _memory_markdown(discovery)
-            provider_profile = AgentProfile(
-                name="discovery",
-                model=profile.model if profile else None,
-                effort=profile.effort if profile else None,
-                tools=tuple((profile.permissions.get("tools") if profile else None) or ["read", "bash", "grep", "find", "ls", "discovery_state"]),
-                skills=tuple((profile.default_skills if profile else None) or ["carlo-discovery"]),
+            pinned_model_id = discovery.state.get("model_runtime", {}).get(
+                "available_model_id"
             )
+            try:
+                provider_profile = (
+                    await resolve_agent_profile(
+                        session,
+                        profile,
+                        self.credential_cipher,
+                        task_model_id=pinned_model_id,
+                        default_tools=(
+                            "read",
+                            "bash",
+                            "grep",
+                            "find",
+                            "ls",
+                            "discovery_state",
+                        ),
+                    )
+                    if profile
+                    else AgentProfile(
+                        "discovery",
+                        None,
+                        None,
+                        ("read", "bash", "grep", "find", "ls", "discovery_state"),
+                        ("carlo-discovery",),
+                    )
+                )
+            except Exception as error:
+                await self._fail(turn_id, discovery_id, str(error))
+                return
+            runtime_evidence = model_runtime_evidence(provider_profile)
+            if runtime_evidence and not pinned_model_id:
+                discovery.state = {
+                    **discovery.state,
+                    "model_runtime": runtime_evidence,
+                }
+                await session.commit()
         live = await self._acquire(
             discovery_id,
             project.id,
@@ -219,7 +257,10 @@ class DiscoveryRuntime:
                 sequence += 1
             session.add(DiscoveryMessage(discovery=discovery, sequence=sequence, role="assistant", content=content or "No response was produced."))
             if state is not None:
-                discovery.state = _normalized_state(state)
+                normalized = _normalized_state(state)
+                if "model_runtime" in discovery.state:
+                    normalized["model_runtime"] = discovery.state["model_runtime"]
+                discovery.state = normalized
             discovery.session_path = session_path
             discovery.last_active_at = datetime.now(UTC)
             turn.status = "COMPLETED"

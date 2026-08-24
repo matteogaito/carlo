@@ -15,7 +15,13 @@ from cryptography.exceptions import InvalidTag
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .models import AvailableModel, Event, ModelProvider
+from .models import (
+    AgentProfile as AgentProfileRecord,
+    AvailableModel,
+    Event,
+    ModelProvider,
+    PiRuntimeSettings,
+)
 
 MODEL_CATALOG_LIMIT = 8 * 1024 * 1024
 
@@ -66,6 +72,114 @@ def calculate_compaction(
     if reserve >= context_window or keep_recent >= context_window - reserve:
         raise ModelProviderError("compaction policy does not fit the model context")
     return CompactionTokens(reserve, keep_recent)
+
+
+async def resolve_agent_profile(
+    session: AsyncSession,
+    record: AgentProfileRecord,
+    cipher: "CredentialCipher | None",
+    *,
+    task_model_id: int | None = None,
+    extra_skills: tuple[str, ...] = (),
+    default_tools: tuple[str, ...] = ("read", "grep", "find", "ls"),
+) -> Any:
+    from .provider import AgentProfile, ResolvedModel
+
+    tools = tuple(record.permissions.get("tools") or default_tools)
+    skills = tuple(dict.fromkeys((*record.default_skills, *extra_skills)))
+    model_id = task_model_id or record.available_model_id
+    provider: ModelProvider | None = None
+    model: AvailableModel | None = None
+    if model_id is not None:
+        model = await session.get(AvailableModel, model_id)
+        if model is None:
+            raise ModelProviderError("selected model was not found")
+        provider = await session.get(ModelProvider, model.model_provider_id)
+    elif record.model_provider_id is not None:
+        provider = await session.get(ModelProvider, record.model_provider_id)
+        if provider is None:
+            raise ModelProviderError("selected model provider was not found")
+        if provider.default_model_id is None:
+            raise ModelProviderError("model provider has no default model")
+        model = await session.get(AvailableModel, provider.default_model_id)
+    else:
+        return AgentProfile(
+            record.name, record.model, record.effort, tools, skills
+        )
+
+    if provider is None or model is None:
+        raise ModelProviderError("selected model configuration is incomplete")
+    if not provider.active:
+        raise ModelProviderError("selected model provider is inactive")
+    if model.status != "AVAILABLE":
+        raise ModelProviderError("selected model is unavailable")
+    context_window = model.effective_context_window
+    max_tokens = model.effective_max_tokens
+    if context_window is None or max_tokens is None:
+        raise ModelProviderError("selected model has no verified context limits")
+    runtime = await session.get(PiRuntimeSettings, 1)
+    reserve_percent = runtime.reserve_percent if runtime else 10
+    keep_recent_percent = runtime.keep_recent_percent if runtime else 20
+    compaction = calculate_compaction(
+        context_window, max_tokens, reserve_percent, keep_recent_percent
+    )
+    if (
+        cipher is None
+        or provider.credential_ciphertext is None
+        or provider.credential_nonce is None
+    ):
+        raise ModelProviderError("selected model provider credential is not configured")
+    try:
+        api_key = cipher.decrypt(
+            provider.credential_ciphertext, provider.credential_nonce
+        )
+    except (InvalidTag, UnicodeDecodeError) as error:
+        raise ModelProviderError(
+            "selected model provider credential could not be decrypted"
+        ) from error
+    compatibility = dict(provider.compatibility)
+    api = str(compatibility.pop("api", "openai-completions"))
+    return AgentProfile(
+        record.name,
+        None,
+        record.effort,
+        tools,
+        skills,
+        ResolvedModel(
+            model_provider_id=provider.id,
+            available_model_id=model.id,
+            provider_slug=provider.slug,
+            base_url=provider.base_url,
+            api=api,
+            external_id=model.external_id,
+            display_name=model.display_name or model.external_id,
+            api_key=api_key,
+            compatibility=compatibility,
+            input_modalities=tuple(model.input_modalities or ["text"]),
+            reasoning=model.reasoning,
+            context_window=context_window,
+            max_tokens=max_tokens,
+            compaction_enabled=runtime.compaction_enabled if runtime else True,
+            reserve_tokens=compaction.reserve_tokens,
+            keep_recent_tokens=compaction.keep_recent_tokens,
+        ),
+    )
+
+
+def model_runtime_evidence(profile: Any) -> dict[str, Any] | None:
+    model = profile.resolved_model
+    if model is None:
+        return None
+    return {
+        "model_provider_id": model.model_provider_id,
+        "available_model_id": model.available_model_id,
+        "model_provider": model.provider_slug,
+        "model": model.external_id,
+        "context_window": model.context_window,
+        "max_tokens": model.max_tokens,
+        "reserve_tokens": model.reserve_tokens,
+        "keep_recent_tokens": model.keep_recent_tokens,
+    }
 
 
 class CredentialCipher:

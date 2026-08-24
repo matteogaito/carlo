@@ -36,7 +36,9 @@ from .model_providers import (
     CredentialCipher,
     ModelProviderError,
     calculate_compaction,
+    model_runtime_evidence,
     refresh_model_provider,
+    resolve_agent_profile,
 )
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
 from .models import AgentProfile as AgentProfileRecord
@@ -1337,7 +1339,15 @@ def create_app(
         task: Task, session: AsyncSession, instruction: str
     ) -> dict[str, Any]:
         profile = await _profile(session, "plan")
-        provider_profile = _provider_profile(profile)
+        try:
+            provider_profile = await resolve_agent_profile(
+                session,
+                profile,
+                credential_cipher,
+                task_model_id=task.available_model_id,
+            )
+        except ModelProviderError as error:
+            raise HTTPException(409, str(error)) from error
         if "carlo-planning" in provider_profile.skills:
             instruction = f"/skill:carlo-planning {instruction}"
         session_id = task.planning_session_id or f"{task.id}-plan"
@@ -1409,6 +1419,9 @@ def create_app(
             "effort": provider_profile.effort,
             "tools": list(provider_profile.tools),
         }
+        runtime_evidence = model_runtime_evidence(provider_profile)
+        if runtime_evidence:
+            metadata["model_runtime"] = runtime_evidence
         plan = PlanRevision(
             task=task,
             revision=revision,
@@ -1675,17 +1688,6 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
         session.add(profile)
         await session.flush()
     return profile
-
-
-def _provider_profile(record: AgentProfileRecord) -> AgentProfile:
-    tools = record.permissions.get("tools") or ["read", "grep", "find", "ls"]
-    return AgentProfile(
-        name=record.name,
-        model=record.model,
-        effort=record.effort,
-        tools=tuple(tools),
-        skills=tuple(record.default_skills),
-    )
 
 
 def _planning_instruction(task: Task, *, fresh_rework: bool = False) -> str:

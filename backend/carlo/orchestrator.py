@@ -30,6 +30,11 @@ from .models import (
     Task,
     ValidationRun,
 )
+from .model_providers import (
+    CredentialCipher,
+    model_runtime_evidence,
+    resolve_agent_profile,
+)
 from .provider import AgentProfile, AgentResult, CodingAgentProvider
 
 IMPLEMENTATION_LOCK = 1_128_352_847
@@ -189,15 +194,30 @@ class ImplementationPipeline:
         worktree_root: Path,
         artifact_root: Path,
         max_attempts: int = 20,
+        credential_cipher: CredentialCipher | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.provider = provider
         self.worktree_root = worktree_root
         self.artifact_root = artifact_root
         self.max_attempts = max_attempts
+        self.credential_cipher = credential_cipher
 
     async def run(self, task_id: str) -> str:
         task, plan, implementation, escalation = await self._context(task_id)
+        implementation_profile = await self._resolve_profile(
+            implementation.id,
+            task.available_model_id,
+            tuple(
+                skill
+                for skill in plan.metadata_json.get("skills", [])
+                if isinstance(skill, str)
+            ),
+        )
+        escalation_profile = await self._resolve_profile(escalation.id)
+        await self._record_model_runtime(
+            task_id, model_runtime_evidence(implementation_profile)
+        )
         workspace = GitWorkspace(
             Path(task.project.repository_path),
             self.worktree_root,
@@ -269,14 +289,7 @@ class ImplementationPipeline:
                 task_id, implementation.id, number, instruction
             )
             result = await self.provider.run(
-                _agent_profile(
-                    implementation,
-                    tuple(
-                        skill
-                        for skill in plan.metadata_json.get("skills", [])
-                        if isinstance(skill, str)
-                    ),
-                ),
+                implementation_profile,
                 instruction,
                 str(worktree.path),
                 f"{task_id}-implementation-{number}",
@@ -314,7 +327,13 @@ class ImplementationPipeline:
             stalled = detect_stall(history)
             if stalled:
                 strategy = await self._escalate(
-                    task, plan, escalation, worktree, stalled.reason, history, batch
+                    task,
+                    plan,
+                    escalation_profile,
+                    worktree,
+                    stalled.reason,
+                    history,
+                    batch,
                 )
             await self._set_stage(task_id, TaskStage.IMPLEMENTING)
         return "failed"
@@ -345,6 +364,36 @@ class ImplementationPipeline:
             if plan is None or set(profiles) != {"implementation", "escalation"}:
                 raise RuntimeError("plan or agent profiles are missing")
             return task, plan, profiles["implementation"], profiles["escalation"]
+
+    async def _resolve_profile(
+        self,
+        profile_id: int,
+        task_model_id: int | None = None,
+        extra_skills: tuple[str, ...] = (),
+    ) -> AgentProfile:
+        async with self.session_factory() as session:
+            record = await session.get(AgentProfileRecord, profile_id)
+            if record is None:
+                raise RuntimeError("agent profile is missing")
+            return await resolve_agent_profile(
+                session,
+                record,
+                self.credential_cipher,
+                task_model_id=task_model_id,
+                extra_skills=extra_skills,
+                default_tools=("read", "bash", "edit", "write", "grep", "find", "ls"),
+            )
+
+    async def _record_model_runtime(
+        self, task_id: str, evidence: dict[str, Any] | None
+    ) -> None:
+        if evidence is None:
+            return
+        async with self.session_factory() as session:
+            session.add(
+                Event(task_id=task_id, type="model.runtime_selected", payload=evidence)
+            )
+            await session.commit()
 
     async def _next_attempt_number(self, task_id: str) -> int:
         async with self.session_factory() as session:
@@ -597,7 +646,7 @@ class ImplementationPipeline:
         self,
         task: Task,
         plan: PlanRevision,
-        profile: AgentProfileRecord,
+        profile: AgentProfile,
         worktree: Worktree,
         reason: str,
         history: list[AttemptSignal],
@@ -623,7 +672,7 @@ class ImplementationPipeline:
             + json.dumps(evidence)
         )
         result = await self.provider.run(
-            _agent_profile(profile),
+            profile,
             instruction,
             str(worktree.path),
             f"{task.id}-escalation-{escalation_id}",
@@ -656,20 +705,6 @@ class ImplementationPipeline:
             f"Current strategy: {strategy}\n"
             "Work only inside this worktree. Run no undeclared deployment commands."
         )
-
-
-def _agent_profile(
-    record: AgentProfileRecord, extra_skills: tuple[str, ...] = ()
-) -> AgentProfile:
-    tools = record.permissions.get("tools") or ["read", "bash", "edit", "write", "grep", "find", "ls"]
-    skills = tuple(dict.fromkeys((*record.default_skills, *extra_skills)))
-    return AgentProfile(
-        record.name,
-        record.model,
-        record.effort,
-        tuple(tools),
-        skills,
-    )
 
 
 def _failure_count(output: str) -> int:

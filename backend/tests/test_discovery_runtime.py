@@ -7,7 +7,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.discovery_runtime import DiscoveryRuntime
-from carlo.models import Base, Discovery, DiscoveryMessage, DiscoveryTurn, Event, Project
+from carlo.model_providers import CredentialCipher
+from carlo.models import (
+    AgentProfile,
+    AvailableModel,
+    Base,
+    Discovery,
+    DiscoveryMessage,
+    DiscoveryTurn,
+    Event,
+    ModelProvider,
+    Project,
+)
 from carlo.provider import ConversationEvent, ConversationState
 
 
@@ -36,8 +47,13 @@ class Session:
 
 
 class Provider:
-    def __init__(self): self.session = Session()
-    async def open_conversation(self, *args, **kwargs): return self.session
+    def __init__(self):
+        self.session = Session()
+        self.profiles = []
+
+    async def open_conversation(self, profile, *args, **kwargs):
+        self.profiles.append(profile)
+        return self.session
 
 
 class CancellingSession(Session):
@@ -124,4 +140,93 @@ async def test_discovery_stop_cannot_be_overwritten_by_late_agent_output(tmp_pat
         assert [message.role for message in discovery.messages] == ["user"]
         assert rpc.aborted is True
     await runtime.close()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    key = f"M{uuid4().hex[:6].upper()}"
+    cipher = CredentialCipher(b"m" * 32)
+    encrypted = cipher.encrypt("secret")
+    async with factory() as session:
+        provider = ModelProvider(
+            name=key,
+            slug=key.lower(),
+            kind="openai-compatible",
+            base_url="http://model.test/v1",
+            credential_ciphertext=encrypted.ciphertext,
+            credential_nonce=encrypted.nonce,
+        )
+        first = AvailableModel(
+            model_provider=provider,
+            external_id="first",
+            status="AVAILABLE",
+            discovered_context_window=65_536,
+            discovered_max_tokens=16_384,
+        )
+        second = AvailableModel(
+            model_provider=provider,
+            external_id="second",
+            status="AVAILABLE",
+            discovered_context_window=65_536,
+            discovered_max_tokens=16_384,
+        )
+        profile = AgentProfile(name=f"discovery-{key}", provider="pi")
+        project = Project(name=key, key=key, repository_path=str(tmp_path))
+        discovery = Discovery(
+            project=project,
+            profile_id=None,
+            title="Imports",
+            provider_session_id=f"discovery-{key}",
+            state={},
+            memory_path=str(tmp_path / "MEMORY.md"),
+        )
+        message = DiscoveryMessage(
+            discovery=discovery,
+            sequence=1,
+            role="user",
+            content="Investigate imports",
+        )
+        session.add_all([provider, first, second, profile, discovery])
+        await session.flush()
+        provider.default_model_id = first.id
+        profile.model_provider_id = provider.id
+        discovery.profile_id = profile.id
+        session.add(DiscoveryTurn(discovery=discovery, input_message=message))
+        await session.commit()
+        discovery_id, provider_id, second_id = discovery.id, provider.id, second.id
+
+    first_process = Provider()
+    runtime = DiscoveryRuntime(
+        factory, first_process, Path("/guard.mjs"), credential_cipher=cipher
+    )
+    await runtime.run_next()
+    await runtime.close()
+    async with factory() as session:
+        provider = await session.get(ModelProvider, provider_id)
+        discovery = await session.get(Discovery, discovery_id)
+        provider.default_model_id = second_id
+        sequence = max(message.sequence for message in discovery.messages) + 1
+        message = DiscoveryMessage(
+            discovery=discovery,
+            sequence=sequence,
+            role="user",
+            content="Investigate imports",
+        )
+        session.add(DiscoveryTurn(discovery=discovery, input_message=message))
+        await session.commit()
+
+    second_process = Provider()
+    restarted = DiscoveryRuntime(
+        factory, second_process, Path("/guard.mjs"), credential_cipher=cipher
+    )
+    await restarted.run_next()
+
+    assert first_process.profiles[0].resolved_model.external_id == "first"
+    assert second_process.profiles[0].resolved_model.external_id == "first"
+    await restarted.close()
     await engine.dispose()

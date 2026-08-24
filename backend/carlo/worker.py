@@ -9,6 +9,7 @@ from .db import make_engine, make_session_factory
 from .discovery_runtime import DiscoveryRuntime
 from .maintenance import maintenance_loop, record_startup
 from .model_providers import CredentialCipher
+from .pi_runtime import PiRuntimeSnapshotBuilder
 from .orchestrator import ImplementationPipeline, Orchestrator
 from .provider import PiProvider
 from .ssh import SshTransport
@@ -28,8 +29,20 @@ async def run() -> None:
     settings = Settings.from_env()
     engine = make_engine(settings)
     factory = make_session_factory(engine)
+    cipher = (
+        CredentialCipher.from_base64(settings.credential_encryption_key)
+        if settings.credential_encryption_key
+        and "CHANGE_ME" not in settings.credential_encryption_key
+        else None
+    )
+    runtime_builder = PiRuntimeSnapshotBuilder(
+        Path(settings.artifact_root) / "pi-runtime"
+    )
+    runtime_builder.cleanup_temporary_files()
     provider = PiProvider(
-        settings.pi_executable, Path(settings.artifact_root) / "pi-sessions"
+        settings.pi_executable,
+        Path(settings.artifact_root) / "pi-sessions",
+        runtime_builder=runtime_builder,
     )
     pipeline = ImplementationPipeline(
         factory,
@@ -37,6 +50,7 @@ async def run() -> None:
         Path(settings.worktree_root),
         Path(settings.artifact_root),
         settings.max_attempts,
+        cipher,
     )
     orchestrator = Orchestrator(engine, factory, pipeline.run)
     action_executor = ActionExecutor(
@@ -55,6 +69,7 @@ async def run() -> None:
         factory,
         provider,
         Path(__file__).resolve().parents[2] / "extensions" / "carlo-discovery-guard.mjs",
+        credential_cipher=cipher,
     )
     await discovery_runtime.recover()
     discovery_task = asyncio.create_task(_discovery_loop(discovery_runtime))
@@ -92,10 +107,7 @@ async def run() -> None:
             settings.npm_executable,
             settings.pi_executable,
             Path(settings.artifact_root) / "pi-runtime.lock",
-            CredentialCipher.from_base64(settings.credential_encryption_key)
-            if settings.credential_encryption_key
-            and "CHANGE_ME" not in settings.credential_encryption_key
-            else None,
+            cipher,
         )
     )
     try:
