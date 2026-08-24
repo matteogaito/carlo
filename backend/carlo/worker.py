@@ -8,6 +8,7 @@ from .config import Settings
 from .db import make_engine, make_session_factory
 from .discovery_runtime import DiscoveryRuntime
 from .maintenance import maintenance_loop, record_startup
+from .model_providers import CredentialCipher
 from .orchestrator import ImplementationPipeline, Orchestrator
 from .provider import PiProvider
 from .ssh import SshTransport
@@ -91,6 +92,10 @@ async def run() -> None:
             settings.npm_executable,
             settings.pi_executable,
             Path(settings.artifact_root) / "pi-runtime.lock",
+            CredentialCipher.from_base64(settings.credential_encryption_key)
+            if settings.credential_encryption_key
+            and "CHANGE_ME" not in settings.credential_encryption_key
+            else None,
         )
     )
     try:

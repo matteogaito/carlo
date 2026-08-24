@@ -11,6 +11,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .models import Event
+from .model_providers import (
+    CredentialCipher,
+    DiscoveredModel,
+    fetch_openai_models,
+    refresh_due_model_providers,
+)
 
 logger = logging.getLogger("carlo.maintenance")
 UPDATE_INTERVAL = timedelta(days=7)
@@ -121,13 +127,45 @@ async def maintenance_loop(
     npm_executable: str,
     pi_executable: str,
     lock_path: Path,
+    credential_cipher: CredentialCipher | None = None,
 ) -> None:
     while True:
+        await run_maintenance_cycle(
+            factory,
+            npm_executable,
+            pi_executable,
+            lock_path,
+            credential_cipher,
+        )
+        await asyncio.sleep(60)
+
+
+async def run_maintenance_cycle(
+    factory: async_sessionmaker[AsyncSession],
+    npm_executable: str,
+    pi_executable: str,
+    lock_path: Path,
+    credential_cipher: CredentialCipher | None,
+    *,
+    now: datetime | None = None,
+    model_fetcher=fetch_openai_models,
+) -> None:
+    if credential_cipher is not None:
         try:
-            await update_pi_if_due(factory, npm_executable, pi_executable, lock_path)
+            await refresh_due_model_providers(
+                factory,
+                credential_cipher,
+                now=now,
+                fetcher=model_fetcher,
+            )
         except Exception:
-            logger.exception("weekly Pi update cycle failed")
-        await asyncio.sleep(3600)
+            logger.exception("model provider refresh cycle failed")
+    try:
+        await update_pi_if_due(
+            factory, npm_executable, pi_executable, lock_path, now=now
+        )
+    except Exception:
+        logger.exception("weekly Pi update cycle failed")
 
 
 async def _update_due(

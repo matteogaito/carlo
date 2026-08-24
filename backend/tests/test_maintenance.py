@@ -8,7 +8,8 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.maintenance import pi_process_lock, record_startup, update_pi_if_due
-from carlo.models import Base, Event
+from carlo.model_providers import CredentialCipher
+from carlo.models import Base, Event, ModelProvider
 
 
 @pytest.fixture
@@ -21,6 +22,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
                 "user_sessions, project_memberships, users, events, validation_runs, "
                 "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+                ", available_models, model_providers "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -155,3 +157,54 @@ async def test_unstartable_npm_is_persisted_as_failed_update(factory, tmp_path: 
     assert event.type == "pi.update_failed"
     assert event.payload["exit_code"] is None
     assert "missing-npm" in event.payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_cycle_refreshes_due_model_providers(
+    factory, tmp_path: Path
+) -> None:
+    from carlo import maintenance
+
+    assert hasattr(maintenance, "run_maintenance_cycle"), (
+        "model refresh is not connected to maintenance"
+    )
+    cipher = CredentialCipher(b"x" * 32)
+    encrypted = cipher.encrypt("local-key")
+    async with factory() as session:
+        session.add(
+            ModelProvider(
+                name="Local",
+                slug="local",
+                kind="openai-compatible",
+                base_url="http://local.test/v1",
+                credential_ciphertext=encrypted.ciphertext,
+                credential_nonce=encrypted.nonce,
+            )
+        )
+        await session.commit()
+
+    async def fetcher(_provider, api_key):
+        assert api_key == "local-key"
+        from carlo.model_providers import parse_openai_models
+
+        return parse_openai_models({"data": [{"id": "qwen", "max_model_len": 65536}]})
+
+    pi = executable(tmp_path / "pi", 'echo "0.81.0"\n')
+    npm = executable(tmp_path / "npm", "exit 0\n")
+    await maintenance.run_maintenance_cycle(
+        factory,
+        str(npm),
+        str(pi),
+        tmp_path / "pi.lock",
+        cipher,
+        now=datetime(2026, 8, 24, 12, tzinfo=UTC),
+        model_fetcher=fetcher,
+    )
+
+    async with factory() as session:
+        event_types = list(await session.scalars(select(Event.type).order_by(Event.sequence)))
+    assert event_types == [
+        "model_provider.availability_changed",
+        "model_provider.refresh_completed",
+        "pi.update_completed",
+    ]
