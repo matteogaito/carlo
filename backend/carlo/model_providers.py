@@ -49,6 +49,25 @@ class ModelRefreshResult:
     default_model_id: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class CompactionTokens:
+    reserve_tokens: int
+    keep_recent_tokens: int
+
+
+def calculate_compaction(
+    context_window: int,
+    max_tokens: int,
+    reserve_percent: int,
+    keep_recent_percent: int,
+) -> CompactionTokens:
+    reserve = max(max_tokens, int(context_window * reserve_percent / 100))
+    keep_recent = int(context_window * keep_recent_percent / 100)
+    if reserve >= context_window or keep_recent >= context_window - reserve:
+        raise ModelProviderError("compaction policy does not fit the model context")
+    return CompactionTokens(reserve, keep_recent)
+
+
 class CredentialCipher:
     def __init__(self, key: bytes) -> None:
         if len(key) != 32:

@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import (
     APIRouter,
@@ -31,12 +32,19 @@ from starlette.staticfiles import StaticFiles
 from .auth import InvalidCredentials, LoginThrottled, login, resolve_session, revoke_session
 from .actions import ActionConfigError, load_catalog, preflight
 from .config import Settings
+from .model_providers import (
+    CredentialCipher,
+    ModelProviderError,
+    calculate_compaction,
+    refresh_model_provider,
+)
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
 from .models import AgentProfile as AgentProfileRecord
 from .maintenance import record_startup
 from .models import (
     ActionRun,
     ActionStep,
+    AvailableModel,
     Attempt,
     Escalation,
     Discovery,
@@ -45,6 +53,8 @@ from .models import (
     Event,
     PlanRevision,
     Project,
+    ModelProvider,
+    PiRuntimeSettings,
     Runner,
     Task,
     User,
@@ -112,6 +122,64 @@ class ProfileUpdate(BaseModel):
     default_skills: list[str] | None = None
     context_policy: dict[str, Any] | None = None
     active: bool | None = None
+    model_provider_id: int | None = None
+    available_model_id: int | None = None
+
+
+class ModelProviderCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str = Field(pattern=r"^[a-z][a-z0-9-]{0,79}$")
+    kind: str = Field(default="openai-compatible", pattern=r"^openai-compatible$")
+    base_url: str = Field(min_length=1, max_length=2048)
+    api_key: str = Field(min_length=1, max_length=16_384)
+    compatibility: dict[str, Any] = Field(default_factory=dict)
+    refresh_interval_minutes: int = Field(default=15, ge=1, le=1440)
+
+    @field_validator("base_url")
+    @classmethod
+    def http_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("base_url must be an absolute HTTP(S) URL")
+        return value.rstrip("/")
+
+
+class ModelProviderUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    slug: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9-]{0,79}$"
+    )
+    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    api_key: str | None = Field(default=None, min_length=1, max_length=16_384)
+    compatibility: dict[str, Any] | None = None
+    refresh_interval_minutes: int | None = Field(default=None, ge=1, le=1440)
+    default_model_id: int | None = None
+    active: bool | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def optional_http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("base_url must be an absolute HTTP(S) URL")
+        return value.rstrip("/")
+
+
+class AvailableModelUpdate(BaseModel):
+    context_window_override: int | None = Field(default=None, ge=1)
+    max_tokens_override: int | None = Field(default=None, ge=1)
+
+
+class PiRuntimeSettingsUpdate(BaseModel):
+    compaction_enabled: bool | None = None
+    reserve_percent: int | None = Field(default=None, ge=1, le=90)
+    keep_recent_percent: int | None = Field(default=None, ge=1, le=90)
+
+
+class TaskModelUpdate(BaseModel):
+    available_model_id: int | None = None
 
 
 class PlanMetadata(BaseModel):
@@ -210,6 +278,12 @@ def create_app(
     ssh_transport: SshTransport | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    credential_cipher = (
+        CredentialCipher.from_base64(settings.credential_encryption_key)
+        if settings.credential_encryption_key
+        and "CHANGE_ME" not in settings.credential_encryption_key
+        else None
+    )
     ssh_transport = ssh_transport or SshTransport(
         Path(settings.ssh_known_hosts), connect_timeout=settings.ssh_connect_timeout
     )
@@ -674,13 +748,289 @@ def create_app(
         )
         if profile is None:
             raise HTTPException(404, "agent profile not found")
+        selected_provider_id = (
+            payload.model_provider_id
+            if "model_provider_id" in payload.model_fields_set
+            else profile.model_provider_id
+        )
+        selected_model_id = (
+            payload.available_model_id
+            if "available_model_id" in payload.model_fields_set
+            else profile.available_model_id
+        )
+        if (
+            "model_provider_id" in payload.model_fields_set
+            and payload.model_provider_id is not None
+        ):
+            selected_model_id = None
+        if (
+            "available_model_id" in payload.model_fields_set
+            and payload.available_model_id is not None
+        ):
+            selected_provider_id = None
+        if selected_provider_id is not None and selected_model_id is not None:
+            raise HTTPException(422, "choose a model provider default or a concrete model")
+        if selected_provider_id is not None:
+            provider_record = await session.get(ModelProvider, selected_provider_id)
+            if provider_record is None or not provider_record.active:
+                raise HTTPException(409, "model provider is unavailable")
+        if selected_model_id is not None:
+            await _selectable_model(session, selected_model_id)
         for field in payload.model_fields_set:
             setattr(profile, field, getattr(payload, field))
+        if "model_provider_id" in payload.model_fields_set and payload.model_provider_id is not None:
+            profile.available_model_id = None
+            profile.model = None
+        if "available_model_id" in payload.model_fields_set and payload.available_model_id is not None:
+            profile.model_provider_id = None
+            profile.model = None
         session.add(
             Event(type="agent_profile.updated", payload={"name": name, "fields": sorted(payload.model_fields_set)})
         )
         await session.commit()
         return _profile_view(profile)
+
+    @api.get("/settings/model-providers")
+    async def list_model_providers(
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        providers = (
+            await session.scalars(select(ModelProvider).order_by(ModelProvider.name))
+        ).all()
+        return [_model_provider_view(provider) for provider in providers]
+
+    @api.post("/settings/model-providers", status_code=status.HTTP_201_CREATED)
+    async def create_model_provider(
+        payload: ModelProviderCreate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        if credential_cipher is None:
+            raise HTTPException(503, "credential encryption is not configured")
+        encrypted = credential_cipher.encrypt(payload.api_key)
+        provider = ModelProvider(
+            name=payload.name,
+            slug=payload.slug,
+            kind=payload.kind,
+            base_url=payload.base_url,
+            credential_ciphertext=encrypted.ciphertext,
+            credential_nonce=encrypted.nonce,
+            credential_hint=f"…{payload.api_key[-4:]}",
+            compatibility=payload.compatibility,
+            refresh_interval_minutes=payload.refresh_interval_minutes,
+        )
+        session.add(provider)
+        try:
+            await session.flush()
+        except IntegrityError as error:
+            await session.rollback()
+            raise HTTPException(409, "model provider slug already exists") from error
+        session.add(
+            Event(
+                type="model_provider.created",
+                payload={"model_provider_id": provider.id, "slug": provider.slug},
+            )
+        )
+        await session.commit()
+        await session.refresh(provider)
+        return _model_provider_view(provider)
+
+    @api.patch("/settings/model-providers/{provider_id}")
+    async def update_model_provider(
+        provider_id: int,
+        payload: ModelProviderUpdate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        provider = await session.get(ModelProvider, provider_id)
+        if provider is None:
+            raise HTTPException(404, "model provider not found")
+        if "default_model_id" in payload.model_fields_set:
+            if payload.default_model_id is None:
+                provider.default_model_id = None
+            else:
+                model = await session.get(AvailableModel, payload.default_model_id)
+                if model is None or model.model_provider_id != provider_id:
+                    raise HTTPException(422, "default model must belong to this provider")
+                if (
+                    model.status != "AVAILABLE"
+                    or model.effective_context_window is None
+                    or model.effective_max_tokens is None
+                ):
+                    raise HTTPException(409, "default model is not selectable")
+                provider.default_model_id = model.id
+        if "api_key" in payload.model_fields_set:
+            if payload.api_key is None:
+                raise HTTPException(422, "api_key cannot be null")
+            if credential_cipher is None:
+                raise HTTPException(503, "credential encryption is not configured")
+            encrypted = credential_cipher.encrypt(payload.api_key)
+            provider.credential_ciphertext = encrypted.ciphertext
+            provider.credential_nonce = encrypted.nonce
+            provider.credential_hint = f"…{payload.api_key[-4:]}"
+        for field in payload.model_fields_set - {"api_key", "default_model_id"}:
+            setattr(provider, field, getattr(payload, field))
+        try:
+            await session.flush()
+        except IntegrityError as error:
+            await session.rollback()
+            raise HTTPException(409, "model provider slug already exists") from error
+        session.add(
+            Event(
+                type="model_provider.updated",
+                payload={
+                    "model_provider_id": provider_id,
+                    "fields": sorted(payload.model_fields_set),
+                },
+            )
+        )
+        await session.commit()
+        await session.refresh(provider)
+        return _model_provider_view(provider)
+
+    @api.post("/settings/model-providers/{provider_id}/refresh")
+    async def refresh_model_provider_now(provider_id: int) -> dict[str, Any]:
+        if credential_cipher is None:
+            raise HTTPException(503, "credential encryption is not configured")
+        try:
+            result = await refresh_model_provider(
+                session_factory, credential_cipher, provider_id
+            )
+        except ModelProviderError as error:
+            raise HTTPException(502, str(error)) from error
+        return {
+            "provider_id": result.provider_id,
+            "seen": result.seen,
+            "unavailable": result.unavailable,
+            "default_model_id": result.default_model_id,
+        }
+
+    @api.delete(
+        "/settings/model-providers/{provider_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    async def delete_model_provider(
+        provider_id: int,
+        session: AsyncSession = Depends(get_session),
+    ) -> Response:
+        provider = await session.get(ModelProvider, provider_id)
+        if provider is None:
+            raise HTTPException(404, "model provider not found")
+        profile_reference = await session.scalar(
+            select(func.count())
+            .select_from(AgentProfileRecord)
+            .outerjoin(
+                AvailableModel,
+                AgentProfileRecord.available_model_id == AvailableModel.id,
+            )
+            .where(
+                (AgentProfileRecord.model_provider_id == provider_id)
+                | (AvailableModel.model_provider_id == provider_id)
+            )
+        )
+        task_reference = await session.scalar(
+            select(func.count())
+            .select_from(Task)
+            .join(AvailableModel, Task.available_model_id == AvailableModel.id)
+            .where(AvailableModel.model_provider_id == provider_id)
+        )
+        if profile_reference or task_reference:
+            raise HTTPException(409, "model provider is still referenced")
+        provider.default_model_id = None
+        await session.flush()
+        await session.delete(provider)
+        session.add(
+            Event(
+                type="model_provider.deleted",
+                payload={"model_provider_id": provider_id, "slug": provider.slug},
+            )
+        )
+        await session.commit()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @api.get("/settings/models")
+    async def list_available_models(
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        pi_settings = await _pi_settings(session)
+        catalog = (
+            await session.scalars(
+                select(AvailableModel).order_by(
+                    AvailableModel.model_provider_id, AvailableModel.external_id
+                )
+            )
+        ).all()
+        providers = {
+            provider.id: provider
+            for provider in (await session.scalars(select(ModelProvider))).all()
+        }
+        return [
+            _available_model_view(model, providers[model.model_provider_id], pi_settings)
+            for model in catalog
+        ]
+
+    @api.patch("/settings/models/{model_id}")
+    async def update_available_model(
+        model_id: int,
+        payload: AvailableModelUpdate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        model = await session.get(AvailableModel, model_id)
+        if model is None:
+            raise HTTPException(404, "model not found")
+        for field in payload.model_fields_set:
+            setattr(model, field, getattr(payload, field))
+        _validate_model_limits(model)
+        session.add(
+            Event(
+                type="model.updated",
+                payload={"model_id": model.id, "fields": sorted(payload.model_fields_set)},
+            )
+        )
+        await session.commit()
+        provider = await session.get(ModelProvider, model.model_provider_id)
+        return _available_model_view(model, provider, await _pi_settings(session))
+
+    @api.get("/settings/pi")
+    async def get_pi_runtime_settings(
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        return _pi_settings_view(await _pi_settings(session))
+
+    @api.patch("/settings/pi")
+    async def update_pi_runtime_settings(
+        payload: PiRuntimeSettingsUpdate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        pi_settings = await _pi_settings(session)
+        for field in payload.model_fields_set:
+            setattr(pi_settings, field, getattr(payload, field))
+        models = (
+            await session.scalars(
+                select(AvailableModel).where(AvailableModel.status == "AVAILABLE")
+            )
+        ).all()
+        try:
+            for model in models:
+                if (
+                    model.effective_context_window is not None
+                    and model.effective_max_tokens is not None
+                ):
+                    calculate_compaction(
+                        model.effective_context_window,
+                        model.effective_max_tokens,
+                        pi_settings.reserve_percent,
+                        pi_settings.keep_recent_percent,
+                    )
+        except ModelProviderError as error:
+            await session.rollback()
+            raise HTTPException(422, str(error)) from error
+        session.add(
+            Event(
+                type="pi_settings.updated",
+                payload={"fields": sorted(payload.model_fields_set)},
+            )
+        )
+        await session.commit()
+        return _pi_settings_view(pi_settings)
 
     @api.post("/tasks", status_code=status.HTTP_201_CREATED)
     async def create_task(
@@ -697,6 +1047,29 @@ def create_app(
             )
         except TaskCreationError as error:
             raise HTTPException(error.status_code, error.detail) from error
+        return await _task_view(session, task)
+
+    @api.patch("/tasks/{task_id}/model")
+    async def update_task_model(
+        task_id: str,
+        payload: TaskModelUpdate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        task = await _task_or_404(session, task_id)
+        if task.status in {TaskStatus.IN_PROGRESS, TaskStatus.TEST, TaskStatus.DONE}:
+            raise HTTPException(409, "model cannot change after execution starts")
+        if payload.available_model_id is not None:
+            await _selectable_model(session, payload.available_model_id)
+        task.available_model_id = payload.available_model_id
+        task.version += 1
+        session.add(
+            Event(
+                task=task,
+                type="task.model_updated",
+                payload={"available_model_id": payload.available_model_id},
+            )
+        )
+        await session.commit()
         return await _task_view(session, task)
 
     @api.post("/discoveries", status_code=status.HTTP_201_CREATED)
@@ -1451,6 +1824,115 @@ def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
         "default_skills": profile.default_skills,
         "context_policy": profile.context_policy,
         "active": profile.active,
+        "model_provider_id": profile.model_provider_id,
+        "available_model_id": profile.available_model_id,
+    }
+
+
+def _model_provider_view(provider: ModelProvider) -> dict[str, Any]:
+    return {
+        "id": provider.id,
+        "name": provider.name,
+        "slug": provider.slug,
+        "kind": provider.kind,
+        "base_url": provider.base_url,
+        "credential_configured": provider.credential_ciphertext is not None,
+        "credential_hint": provider.credential_hint,
+        "compatibility": provider.compatibility,
+        "refresh_interval_minutes": provider.refresh_interval_minutes,
+        "last_refresh_attempt_at": provider.last_refresh_attempt_at.isoformat()
+        if provider.last_refresh_attempt_at
+        else None,
+        "last_refresh_success_at": provider.last_refresh_success_at.isoformat()
+        if provider.last_refresh_success_at
+        else None,
+        "last_refresh_status": provider.last_refresh_status,
+        "last_refresh_error": provider.last_refresh_error,
+        "default_model_id": provider.default_model_id,
+        "active": provider.active,
+        "created_at": provider.created_at.isoformat(),
+        "updated_at": provider.updated_at.isoformat(),
+    }
+
+
+async def _pi_settings(session: AsyncSession) -> PiRuntimeSettings:
+    settings = await session.get(PiRuntimeSettings, 1)
+    if settings is None:
+        settings = PiRuntimeSettings(id=1)
+        session.add(settings)
+        await session.flush()
+    return settings
+
+
+def _pi_settings_view(settings: PiRuntimeSettings) -> dict[str, Any]:
+    return {
+        "compaction_enabled": settings.compaction_enabled,
+        "reserve_percent": settings.reserve_percent,
+        "keep_recent_percent": settings.keep_recent_percent,
+    }
+
+
+def _validate_model_limits(model: AvailableModel) -> None:
+    context_window = model.effective_context_window
+    max_tokens = model.effective_max_tokens
+    if context_window is not None and max_tokens is not None and max_tokens >= context_window:
+        raise HTTPException(422, "max tokens must be smaller than context window")
+
+
+async def _selectable_model(
+    session: AsyncSession, model_id: int
+) -> AvailableModel:
+    model = await session.get(AvailableModel, model_id)
+    if model is None:
+        raise HTTPException(404, "model not found")
+    if (
+        model.status != "AVAILABLE"
+        or model.effective_context_window is None
+        or model.effective_max_tokens is None
+    ):
+        raise HTTPException(409, "model is not selectable")
+    _validate_model_limits(model)
+    return model
+
+
+def _available_model_view(
+    model: AvailableModel,
+    provider: ModelProvider | None,
+    settings: PiRuntimeSettings,
+) -> dict[str, Any]:
+    context_window = model.effective_context_window
+    max_tokens = model.effective_max_tokens
+    compaction = (
+        calculate_compaction(
+            context_window,
+            max_tokens,
+            settings.reserve_percent,
+            settings.keep_recent_percent,
+        )
+        if context_window is not None and max_tokens is not None
+        else None
+    )
+    return {
+        "id": model.id,
+        "model_provider_id": model.model_provider_id,
+        "model_provider_name": provider.name if provider else None,
+        "external_id": model.external_id,
+        "display_name": model.display_name,
+        "status": model.status,
+        "discovered_context_window": model.discovered_context_window,
+        "discovered_max_tokens": model.discovered_max_tokens,
+        "context_window_override": model.context_window_override,
+        "max_tokens_override": model.max_tokens_override,
+        "effective_context_window": context_window,
+        "effective_max_tokens": max_tokens,
+        "reserve_tokens": compaction.reserve_tokens if compaction else None,
+        "keep_recent_tokens": compaction.keep_recent_tokens if compaction else None,
+        "input_modalities": model.input_modalities,
+        "reasoning": model.reasoning,
+        "selectable": model.status == "AVAILABLE"
+        and context_window is not None
+        and max_tokens is not None,
+        "last_seen_at": model.last_seen_at.isoformat(),
     }
 
 
@@ -1481,6 +1963,7 @@ async def _task_view(
         "branch_name": task.branch_name,
         "worktree_path": task.worktree_path,
         "checkpoint_sha": task.checkpoint_sha,
+        "available_model_id": task.available_model_id,
         "planning_question": task.planning_question,
         "used_skills": [],
         "plan": None
