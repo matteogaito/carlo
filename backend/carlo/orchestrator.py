@@ -574,6 +574,7 @@ class ImplementationPipeline:
                         "session_id": result.session_id,
                         "event_count": len(result.events),
                         "skills": list(result.used_skills),
+                        "revisions": result.resource_revisions,
                     },
                 )
             )

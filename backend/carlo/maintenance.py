@@ -1,7 +1,13 @@
 import asyncio
+import json
 import logging
+import os
 import socket
+import re
+import shutil
+import tempfile
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import AsyncIterator
@@ -21,6 +27,32 @@ from .model_providers import (
 logger = logging.getLogger("carlo.maintenance")
 UPDATE_INTERVAL = timedelta(days=7)
 FAILURE_RETRY_INTERVAL = timedelta(hours=1)
+RESOURCE_NAME = re.compile(r"[a-z0-9-]{1,80}\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedPiResource:
+    name: str
+    repository: str
+    required_paths: tuple[str, ...]
+
+
+MANAGED_PI_RESOURCES = (
+    ManagedPiResource(
+        "superpowers",
+        "https://github.com/obra/superpowers.git",
+        (
+            "package.json",
+            ".pi/extensions/superpowers.ts",
+            "skills/using-superpowers/SKILL.md",
+        ),
+    ),
+    ManagedPiResource(
+        "frontend-design",
+        "https://github.com/anthropics/skills.git",
+        ("skills/frontend-design/SKILL.md",),
+    ),
+)
 
 
 @asynccontextmanager
@@ -122,12 +154,61 @@ async def update_pi_if_due(
         return True
 
 
+async def update_pi_resources_if_due(
+    factory: async_sessionmaker[AsyncSession],
+    git_executable: str,
+    root: Path,
+    lock_path: Path,
+    *,
+    now: datetime | None = None,
+    resources: tuple[ManagedPiResource, ...] = MANAGED_PI_RESOURCES,
+) -> bool:
+    now = now or datetime.now(UTC)
+    if not await _resource_update_due(factory, now):
+        return False
+    async with pi_process_lock(lock_path):
+        if not await _resource_update_due(factory, now):
+            return False
+        try:
+            revisions = {
+                resource.name: await _update_resource(
+                    git_executable, root, resource
+                )
+                for resource in resources
+            }
+            temporary = root / f".revisions-{os.getpid()}.json"
+            temporary.write_text(json.dumps(revisions, indent=2) + "\n")
+            os.replace(temporary, root / "revisions.json")
+            event = Event(
+                type="pi.resources_updated",
+                payload={
+                    "resources": revisions,
+                    "summary": ", ".join(
+                        f"{name}@{revision[:7]}"
+                        for name, revision in revisions.items()
+                    ),
+                },
+                created_at=now,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            event = Event(
+                type="pi.resources_update_failed",
+                payload={"error": str(error)[-500:]},
+                created_at=now,
+            )
+        async with factory() as session:
+            session.add(event)
+            await session.commit()
+        return True
+
+
 async def maintenance_loop(
     factory: async_sessionmaker[AsyncSession],
     npm_executable: str,
     pi_executable: str,
     lock_path: Path,
     credential_cipher: CredentialCipher | None = None,
+    resource_root: Path | None = None,
 ) -> None:
     while True:
         await run_maintenance_cycle(
@@ -136,6 +217,7 @@ async def maintenance_loop(
             pi_executable,
             lock_path,
             credential_cipher,
+            resource_root=resource_root,
         )
         await asyncio.sleep(60)
 
@@ -147,6 +229,7 @@ async def run_maintenance_cycle(
     lock_path: Path,
     credential_cipher: CredentialCipher | None,
     *,
+    resource_root: Path | None = None,
     now: datetime | None = None,
     model_fetcher=fetch_openai_models,
 ) -> None:
@@ -165,6 +248,13 @@ async def run_maintenance_cycle(
         )
     except Exception:
         logger.exception("weekly Pi update cycle failed")
+    if resource_root is not None:
+        try:
+            await update_pi_resources_if_due(
+                factory, "git", resource_root, lock_path, now=now
+            )
+        except Exception:
+            logger.exception("weekly Pi resource update cycle failed")
 
 
 async def _update_due(
@@ -180,6 +270,82 @@ async def _update_due(
     if last_success is not None and now - last_success < UPDATE_INTERVAL:
         return False
     return last_failure is None or now - last_failure >= FAILURE_RETRY_INTERVAL
+
+
+async def _resource_update_due(
+    factory: async_sessionmaker[AsyncSession], now: datetime
+) -> bool:
+    async with factory() as session:
+        last_success = await session.scalar(
+            select(func.max(Event.created_at)).where(
+                Event.type == "pi.resources_updated"
+            )
+        )
+        last_failure = await session.scalar(
+            select(func.max(Event.created_at)).where(
+                Event.type == "pi.resources_update_failed"
+            )
+        )
+    if last_success is not None and now - last_success < UPDATE_INTERVAL:
+        return False
+    return last_failure is None or now - last_failure >= FAILURE_RETRY_INTERVAL
+
+
+async def _update_resource(
+    git_executable: str, root: Path, resource: ManagedPiResource
+) -> str:
+    if not RESOURCE_NAME.fullmatch(resource.name):
+        raise ValueError("invalid managed Pi resource name")
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".resource-", dir=root))
+    checkout = temporary / resource.name
+    try:
+        await _git(
+            git_executable,
+            "clone",
+            "--depth",
+            "1",
+            resource.repository,
+            str(checkout),
+        )
+        await _verify_resource(git_executable, checkout, resource.required_paths)
+        revision = await _git(git_executable, "rev-parse", "HEAD", cwd=checkout)
+        target = root / "checkouts" / resource.name / revision
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink():
+            raise ValueError("managed Pi resource checkout must not be a symlink")
+        if not target.exists():
+            checkout.replace(target)
+        await _verify_resource(git_executable, target, resource.required_paths)
+        return revision
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+async def _verify_resource(
+    git_executable: str, checkout: Path, required_paths: tuple[str, ...]
+) -> None:
+    for required_path in required_paths:
+        if not (checkout / required_path).is_file():
+            raise RuntimeError(f"managed Pi resource is missing {required_path}")
+    await _git(git_executable, "rev-parse", "HEAD", cwd=checkout)
+
+
+async def _git(
+    executable: str, *arguments: str, cwd: Path | None = None
+) -> str:
+    process = await asyncio.create_subprocess_exec(
+        executable,
+        *arguments,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode:
+        message = (stderr or stdout).decode(errors="replace").strip()[-500:]
+        raise RuntimeError(message or f"git exited with {process.returncode}")
+    return stdout.decode(errors="replace").strip()
 
 
 async def _version(executable: str) -> str:

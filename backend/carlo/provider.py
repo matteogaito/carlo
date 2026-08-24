@@ -1,14 +1,16 @@
 import asyncio
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from .maintenance import pi_process_lock
 
 PI_JSON_EVENT_LIMIT = 4 * 1024 * 1024
+GIT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
 class ProviderError(RuntimeError):
@@ -55,6 +57,7 @@ class AgentResult:
     events: tuple[dict[str, Any], ...]
     exit_code: int
     used_skills: tuple[str, ...] = ()
+    resource_revisions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,11 +125,19 @@ class PiProvider:
         session_dir: Path,
         skill_root: Path | None = None,
         runtime_builder: Any | None = None,
+        resource_root: Path | None = None,
+        managed_packages: tuple[str, ...] = (),
+        managed_skills: dict[str, str] | None = None,
+        resource_manifest: Path | None = None,
     ) -> None:
         self.executable = executable
         self.session_dir = session_dir
         self.skill_root = skill_root or Path(__file__).resolve().parents[2] / "skills"
         self.runtime_builder = runtime_builder
+        self.resource_root = resource_root
+        self.managed_packages = managed_packages
+        self.managed_skills = managed_skills or {}
+        self.resource_manifest = resource_manifest
         self.lock_path = self.session_dir.parent / "pi-runtime.lock"
         self._processes: dict[str, asyncio.subprocess.Process] = {}
 
@@ -143,8 +154,10 @@ class PiProvider:
             raise ProviderError(f"session is already running: {session_id}")
         self.session_dir.mkdir(parents=True, exist_ok=True)
         model, runtime_environment = self._runtime(profile, session_id)
+        package_paths, external_skills, _ = self._resource_snapshot()
         command = [
             self.executable,
+            *self._package_arguments(package_paths),
             "--mode",
             "rpc",
             "--approve",
@@ -152,7 +165,7 @@ class PiProvider:
             session_id,
             "--session-dir",
             str(self.session_dir),
-            *self._profile_arguments(profile, model),
+            *self._profile_arguments(profile, model, external_skills),
         ]
         for extension in extensions:
             command.extend(("--extension", str(extension)))
@@ -186,8 +199,10 @@ class PiProvider:
     ) -> AgentResult:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         model, runtime_environment = self._runtime(profile, session_id)
+        package_paths, external_skills, resource_revisions = self._resource_snapshot()
         command = [
             self.executable,
+            *self._package_arguments(package_paths),
             "--mode",
             "json",
             "--print",
@@ -197,7 +212,7 @@ class PiProvider:
             "--session-dir",
             str(self.session_dir),
         ]
-        command.extend(self._profile_arguments(profile, model))
+        command.extend(self._profile_arguments(profile, model, external_skills))
         command.append(instruction)
 
         async with pi_process_lock(self.lock_path, exclusive=False):
@@ -250,6 +265,7 @@ class PiProvider:
             events=event_tuple,
             exit_code=process.returncode or 0,
             used_skills=_used_skills(instruction, event_tuple),
+            resource_revisions=resource_revisions,
         )
 
     async def stop(self, session_id: str) -> None:
@@ -274,7 +290,10 @@ class PiProvider:
         }
 
     def _profile_arguments(
-        self, profile: AgentProfile, model: str | None = None
+        self,
+        profile: AgentProfile,
+        model: str | None = None,
+        external_skills: dict[str, Path] | None = None,
     ) -> list[str]:
         arguments: list[str] = []
         selected_model = model if model is not None else profile.model
@@ -287,9 +306,49 @@ class PiProvider:
         for skill in profile.skills:
             path = Path(skill)
             bundled = self.skill_root / skill
-            resolved = bundled if not path.is_absolute() and bundled.exists() else path
+            resolved = (external_skills or {}).get(skill)
+            if resolved is None:
+                resolved = bundled if not path.is_absolute() and bundled.exists() else path
             arguments.extend(("--skill", str(resolved)))
         return arguments
+
+    def _package_arguments(self, paths: tuple[Path, ...]) -> list[str]:
+        return [argument for path in paths for argument in ("-e", str(path))]
+
+    def _resource_snapshot(
+        self,
+    ) -> tuple[tuple[Path, ...], dict[str, Path], dict[str, str]]:
+        if self.resource_manifest is None or self.resource_root is None:
+            return (), {}, {}
+        try:
+            value = json.loads(self.resource_manifest.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            if self.managed_packages or self.managed_skills:
+                raise ProviderError("managed Pi resource manifest is unavailable") from error
+            return (), {}, {}
+        revisions = {
+            name: revision
+            for name, revision in value.items()
+            if isinstance(name, str)
+            and isinstance(revision, str)
+            and GIT_REVISION.fullmatch(revision)
+        } if isinstance(value, dict) else {}
+        checkouts = {
+            name: self.resource_root / "checkouts" / name / revision
+            for name, revision in revisions.items()
+        }
+        missing = [name for name, path in checkouts.items() if not path.is_dir()]
+        if missing:
+            raise ProviderError(f"managed Pi resource checkout is missing: {', '.join(missing)}")
+        packages = tuple(
+            checkouts[name] for name in self.managed_packages if name in checkouts
+        )
+        skills = {
+            name: checkouts[name] / relative_path
+            for name, relative_path in self.managed_skills.items()
+            if name in checkouts
+        }
+        return packages, skills, revisions
 
 
 def _used_skills(

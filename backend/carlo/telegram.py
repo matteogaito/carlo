@@ -33,6 +33,8 @@ LABELS = {
     "worker.started": "CARLO worker started",
     "pi.update_completed": "Pi weekly update completed",
     "pi.update_failed": "Pi weekly update failed",
+    "pi.resources_updated": "Pi skills updated",
+    "pi.resources_update_failed": "Pi skills update failed",
 }
 NOTIFY_EVENTS = frozenset(LABELS)
 DETAIL_FIELDS = {
@@ -47,12 +49,16 @@ DETAIL_FIELDS = {
     "worker.started": ("hostname", "pi_version"),
     "pi.update_completed": ("version", "previous_version"),
     "pi.update_failed": ("error", "exit_code"),
+    "pi.resources_updated": ("summary",),
+    "pi.resources_update_failed": ("error",),
 }
 ALWAYS_NOTIFY_EVENTS = {
     "system.started",
     "worker.started",
     "pi.update_completed",
     "pi.update_failed",
+    "pi.resources_updated",
+    "pi.resources_update_failed",
 }
 BLOCKING_EVENTS = {
     "planning.failed",

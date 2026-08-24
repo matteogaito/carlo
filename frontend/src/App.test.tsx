@@ -192,6 +192,10 @@ describe('CARLO board', () => {
         created_at: new Date().toISOString(),
       }],
       used_skills: ['carlo-planning', 'frontend-design', 'testing'],
+      skill_revisions: {
+        superpowers: ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+        'frontend-design': ['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
+      },
     }
     render(<App api={{ ...api, listTasks: async () => [planned], getTask: async () => planned }} />)
 
@@ -202,6 +206,9 @@ describe('CARLO board', () => {
     expect(screen.getByText('carlo-planning')).toBeTruthy()
     expect(screen.getByText('Skills used')).toBeTruthy()
     expect(screen.getByText('frontend-design')).toBeTruthy()
+    expect(screen.getByText('@bbbbbbb')).toBeTruthy()
+    expect(screen.getByText('superpowers')).toBeTruthy()
+    expect(screen.getByText('@aaaaaaa')).toBeTruthy()
     expect(screen.getByText('testing')).toBeTruthy()
     expect(screen.queryByText('python-backend')).toBeNull()
     expect(screen.queryByText('never-used')).toBeNull()
@@ -463,6 +470,8 @@ describe('CARLO board', () => {
       events: (onEvent) => { receive = onEvent; return () => undefined },
     }} />)
     await screen.findByRole('heading', { name: 'Not Ready' })
+    await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(listTasks).toHaveBeenCalledTimes(1))
     listProjects.mockClear()
     listTasks.mockClear()
 

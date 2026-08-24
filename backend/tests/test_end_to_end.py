@@ -10,10 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from carlo.admin import bootstrap_admin
 from carlo.api import create_app
 from carlo.config import Settings
-from carlo.models import AgentProfile as AgentProfileRecord
 from carlo.models import Base
 from carlo.orchestrator import ImplementationPipeline, Orchestrator
 from carlo.provider import AgentProfile, AgentResult
+from tests.fakes import add_managed_profiles
 
 
 @pytest.mark.asyncio
@@ -46,9 +46,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
         )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
-        session.add_all(
-            [AgentProfileRecord(name=name, provider="pi") for name in ("plan", "implementation", "escalation")]
-        )
+        await add_managed_profiles(session, "plan", "implementation", "escalation")
         await session.commit()
     await bootstrap_admin(factory, "admin", "admin-password")
 

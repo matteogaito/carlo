@@ -415,6 +415,8 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
     .filter((event) => event.type.startsWith('planning.'))
     .slice(0, 8)
     .reverse()
+  const resourceOnly = Object.keys(task.skill_revisions || {})
+    .filter((name) => !(task.used_skills || []).includes(name))
   return (
     <aside className="task-detail" aria-label={`${task.id} details`} style={{ width }}>
       <div
@@ -483,7 +485,8 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
         <section><h3>Plan</h3>{task.plan ? <TaskMarkdown>{task.plan.plan_markdown}</TaskMarkdown> : <p>No Plan yet.</p>}</section>
       </>}
       <div className="skill-ledger">
-        <SkillChips label="Skills used" skills={task.used_skills || []} empty="None recorded" />
+        <SkillChips label="Skills used" skills={task.used_skills || []} empty="None recorded" revisions={task.skill_revisions} />
+        {!!resourceOnly.length && <SkillChips label="Managed Pi resources" skills={resourceOnly} empty="" revisions={task.skill_revisions} />}
       </div>
       {!structuredPlan && !!phases.length && <section><h3>Implementation phases</h3><ol className="implementation-phases">
         {phases.map((phase, index) => <li key={`${index}-${phase}`}><span>{index + 1}</span><p>{phase}</p></li>)}
@@ -586,8 +589,8 @@ function StructuredPlan({ plan }: { plan: Plan }) {
   </>
 }
 
-function SkillChips({ label, skills, empty }: { label: string; skills: string[]; empty: string }) {
-  return <div><b>{label}</b><span>{skills.length ? skills.map((skill) => <code key={skill}>{skill}</code>) : <i>{empty}</i>}</span></div>
+function SkillChips({ label, skills, empty, revisions }: { label: string; skills: string[]; empty: string; revisions?: Record<string, string[]> }) {
+  return <div><b>{label}</b><span>{skills.length ? skills.map((skill) => <code key={skill}>{skill}{revisions?.[skill]?.map((revision) => <small key={revision}>@{revision.slice(0, 7)}</small>)}</code>) : <i>{empty}</i>}</span></div>
 }
 
 function clampDetailWidth(width: number): number {

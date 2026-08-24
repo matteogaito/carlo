@@ -27,6 +27,7 @@ from carlo.models import (
 from carlo.orchestrator import ImplementationPipeline, Orchestrator, major_deviation
 from carlo.provider import AgentProfile, AgentResult
 from carlo.git import GitWorkspace
+from tests.fakes import add_managed_profiles
 
 
 def test_fewer_failures_is_progress() -> None:
@@ -137,8 +138,9 @@ async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -
         )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
-        implementation = AgentProfileRecord(name="implementation", provider="pi")
-        escalation = AgentProfileRecord(name="escalation", provider="pi")
+        profiles = await add_managed_profiles(session, "implementation", "escalation")
+        implementation = profiles["implementation"]
+        escalation = profiles["escalation"]
         project = Project(
             name="CARLO",
             key="CAR",
@@ -249,8 +251,9 @@ async def test_stall_escalates_then_local_validation_completes(
         "assert Path('feature.txt').read_text() == 'ok'\""
     )
     async with factory() as session:
-        implementation = AgentProfileRecord(name="implementation", provider="pi")
-        escalation = AgentProfileRecord(name="escalation", provider="pi")
+        profiles = await add_managed_profiles(session, "implementation", "escalation")
+        implementation = profiles["implementation"]
+        escalation = profiles["escalation"]
         project = Project(
             name="CARLO",
             key="CAR",
@@ -386,8 +389,9 @@ async def test_recovery_resumes_validation_without_rerunning_provider(
         "assert Path('feature.txt').read_text() == 'ok'\""
     )
     async with factory() as session:
-        implementation = AgentProfileRecord(name="implementation", provider="pi")
-        escalation = AgentProfileRecord(name="escalation", provider="pi")
+        profiles = await add_managed_profiles(session, "implementation", "escalation")
+        implementation = profiles["implementation"]
+        escalation = profiles["escalation"]
         project = Project(
             name="CARLO", key="CAR", repository_path=str(repository), integration_branch="carlo-Dev"
         )

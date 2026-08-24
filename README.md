@@ -61,9 +61,10 @@ The databases already exist on the original development host. `carlov3_test` is
 destructive test-only storage; never point `CARLO_DATABASE_URL` at production.
 
 After login, open **Settings → Models**, add each OpenAI-compatible endpoint,
-refresh its catalog, and choose a default. Under **Coding agents**, assign a
-provider default or concrete model to `plan`, `implementation`, `discovery`,
-and the other profiles. Profiles without a managed model remain unconfigured.
+and refresh its catalog. Under **Coding agents**, assign one concrete
+`provider — model` pair to `plan`, `implementation`, `discovery`, and the other
+profiles. There is no provider default; profiles without a concrete model
+remain unconfigured.
 
 CARLO encrypts provider keys in PostgreSQL using
 `CARLO_CREDENTIAL_ENCRYPTION_KEY`. Never rotate that key without first
@@ -71,6 +72,10 @@ re-encrypting the stored credentials. Pi receives only the selected model in an
 isolated snapshot below `CARLO_ARTIFACT_ROOT/pi-runtime/<session-id>`; the API
 key exists only in the child process environment. Personal
 `~/.pi/agent/models.json` and `settings.json` do not affect managed sessions.
+CARLO also keeps Superpowers and Anthropic's `frontend-design` repository below
+`CARLO_ARTIFACT_ROOT/pi-resources`, updates them weekly under the same exclusive
+Pi maintenance lock, and sends one concise Telegram result. Each Task records
+the exact resource commits loaded by its Pi session.
 
 Use separate terminals:
 

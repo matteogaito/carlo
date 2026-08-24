@@ -15,7 +15,7 @@ from carlo.models import AgentProfile as AgentProfileRecord
 from carlo.domain import TaskStage, TaskStatus
 from carlo.models import Base, Event, PlanRevision, Project, Task, ValidationRun
 from carlo.provider import AgentProfile, AgentResult
-from tests.fakes import FakeProvider
+from tests.fakes import FakeProvider, add_managed_profiles
 
 
 def planning_output(plan: str = "# Plan\nRun the existing tests.") -> str:
@@ -102,19 +102,17 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         {"type": "message_update", "delta": '"brief_markdown"'},
     )
     provider.used_skills = ("carlo-planning",)
+    provider.resource_revisions = {
+        "superpowers": "a" * 40,
+        "frontend-design": "b" * 40,
+    }
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
     async with factory() as session:
-        session.add(
-            AgentProfileRecord(
-                name="plan",
-                provider="pi",
-                model="openai/gpt-5.6-sol",
-                effort="high",
-                permissions={"tools": ["read", "grep", "find", "ls", "bash"]},
-                default_skills=["carlo-planning", "python-backend"],
-            )
-        )
+        profile = (await add_managed_profiles(session, "plan"))["plan"]
+        profile.effort = "high"
+        profile.permissions = {"tools": ["read", "grep", "find", "ls", "bash"]}
+        profile.default_skills = ["carlo-planning", "python-backend"]
         await session.commit()
     app = create_app(factory, provider, Settings(app_origin="http://test"))
 
@@ -156,10 +154,14 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         assert planned["plan"]["metadata"]["title"] == "Add authenticated login"
         assert planned["plan"]["metadata"]["implementation_tasks"][0]["title"] == "Add the login endpoint"
         assert planned["used_skills"] == ["carlo-planning"]
+        assert planned["skill_revisions"] == {
+            name: [revision]
+            for name, revision in provider.resource_revisions.items()
+        }
         assert planned["plan"]["metadata"]["planner_profile"] == {
             "name": "plan",
             "provider": "pi",
-            "model": "openai/gpt-5.6-sol",
+            "model": "test-model",
             "effort": "high",
             "tools": ["read", "grep", "find", "ls", "bash"],
         }
@@ -199,10 +201,10 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         assert any(profile["name"] == "plan" for profile in profiles)
         updated = await client.patch(
             "/api/agent-profiles/plan",
-            json={"model": "openai/gpt-5", "effort": "high"},
+            json={"effort": "high"},
         )
         assert updated.status_code == 200
-        assert updated.json()["model"] == "openai/gpt-5"
+        assert "model" not in updated.json()
 
     assert provider.calls[0][0].name == "plan"
     assert provider.calls[0][0].skills == ("carlo-planning", "python-backend")
@@ -236,6 +238,9 @@ async def test_failed_task_rework_replans_original_goal_and_preserves_history(
     provider = FakeProvider(planning_output("# Plan\nFresh implementation."))
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
+    async with factory() as session:
+        await add_managed_profiles(session, "plan")
+        await session.commit()
     app = create_app(factory, provider, Settings(app_origin="http://test"))
 
     async with AsyncClient(
@@ -348,6 +353,7 @@ async def test_failed_rework_planning_returns_task_to_retryable_failed_state(
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
     async with factory() as session:
+        await add_managed_profiles(session, "plan")
         project = Project(
             name="CARLO", key="CAR", repository_path=str(repository)
         )
@@ -466,7 +472,7 @@ async def test_planning_runs_concurrently_without_the_implementation_lock(
         )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
-        session.add(AgentProfileRecord(name="plan", provider="pi"))
+        await add_managed_profiles(session, "plan")
         await session.commit()
     await bootstrap_admin(factory, "admin", "admin-password")
 

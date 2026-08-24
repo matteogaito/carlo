@@ -68,10 +68,13 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 async def add_event(
-    factory: async_sessionmaker[AsyncSession], event_type: str, task_id: str | None = None
+    factory: async_sessionmaker[AsyncSession],
+    event_type: str,
+    task_id: str | None = None,
+    payload: dict | None = None,
 ) -> Event:
     async with factory() as session:
-        event = Event(type=event_type, task_id=task_id, payload={"revision": 2})
+        event = Event(type=event_type, task_id=task_id, payload=payload or {"revision": 2})
         session.add(event)
         await session.commit()
         await session.refresh(event)
@@ -287,14 +290,22 @@ async def test_explicit_system_notifications_ignore_blocking_filter(factory) -> 
     await add_event(factory, "system.started")
     await add_event(factory, "worker.started")
     await add_event(factory, "pi.update_completed")
+    await add_event(
+        factory,
+        "pi.resources_updated",
+        payload={"summary": "superpowers@abc1234, frontend-design@def5678"},
+    )
 
     assert await notifier.deliver_next() is True
     assert await notifier.deliver_next() is True
     assert await notifier.deliver_next() is True
-    assert len(transport.messages) == 3
+    assert await notifier.deliver_next() is True
+    assert len(transport.messages) == 4
     assert "CARLO started" in transport.messages[0][2]
     assert "CARLO worker started" in transport.messages[1][2]
     assert "Pi weekly update completed" in transport.messages[2][2]
+    assert "Pi skills updated" in transport.messages[3][2]
+    assert "superpowers@abc1234" in transport.messages[3][2]
 
 
 @pytest.mark.asyncio

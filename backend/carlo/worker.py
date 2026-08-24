@@ -7,7 +7,11 @@ from .action_runner import ActionExecutor, ActionOrchestrator
 from .config import Settings
 from .db import make_engine, make_session_factory
 from .discovery_runtime import DiscoveryRuntime
-from .maintenance import maintenance_loop, record_startup
+from .maintenance import (
+    maintenance_loop,
+    record_startup,
+    update_pi_resources_if_due,
+)
 from .model_providers import CredentialCipher
 from .pi_runtime import PiRuntimeSnapshotBuilder
 from .orchestrator import ImplementationPipeline, Orchestrator
@@ -39,10 +43,15 @@ async def run() -> None:
         Path(settings.artifact_root) / "pi-runtime"
     )
     runtime_builder.cleanup_temporary_files()
+    resource_root = Path(settings.artifact_root) / "pi-resources"
     provider = PiProvider(
         settings.pi_executable,
         Path(settings.artifact_root) / "pi-sessions",
         runtime_builder=runtime_builder,
+        resource_root=resource_root,
+        managed_packages=("superpowers",),
+        managed_skills={"frontend-design": "skills/frontend-design"},
+        resource_manifest=resource_root / "revisions.json",
     )
     pipeline = ImplementationPipeline(
         factory,
@@ -71,8 +80,6 @@ async def run() -> None:
         Path(__file__).resolve().parents[2] / "extensions" / "carlo-discovery-guard.mjs",
         credential_cipher=cipher,
     )
-    await discovery_runtime.recover()
-    discovery_task = asyncio.create_task(_discovery_loop(discovery_runtime))
     notifier_task: asyncio.Task[None] | None = None
     command_task: asyncio.Task[None] | None = None
     notifier: TelegramNotifier | None = None
@@ -101,6 +108,14 @@ async def run() -> None:
         notifier_task = asyncio.create_task(notification_loop(notifier))
     else:
         logger.info("Telegram notifications disabled: configure token and chat ID")
+    await update_pi_resources_if_due(
+        factory,
+        "git",
+        resource_root,
+        Path(settings.artifact_root) / "pi-runtime.lock",
+    )
+    await discovery_runtime.recover()
+    discovery_task = asyncio.create_task(_discovery_loop(discovery_runtime))
     maintenance_task = asyncio.create_task(
         maintenance_loop(
             factory,
@@ -108,6 +123,7 @@ async def run() -> None:
             settings.pi_executable,
             Path(settings.artifact_root) / "pi-runtime.lock",
             cipher,
+            resource_root,
         )
     )
     try:

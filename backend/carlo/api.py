@@ -1332,12 +1332,16 @@ def create_app(
             await session.commit()
             raise HTTPException(502, "planning provider failed") from error
 
-        if result.used_skills:
+        if result.used_skills or result.resource_revisions:
             session.add(
                 Event(
                     task=task,
                     type="planning.skills_used",
-                    payload={"skills": list(result.used_skills)},
+                    payload={
+                        "session_id": result.session_id,
+                        "skills": list(result.used_skills),
+                        "revisions": result.resource_revisions,
+                    },
                 )
             )
             await session.commit()
@@ -1635,7 +1639,11 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
             permissions={"tools": ["read", "bash", "grep", "find", "ls", "discovery_state"]}
             if name == "discovery"
             else {},
-            default_skills=["carlo-planning"] if name == "plan" else ["carlo-discovery"] if name == "discovery" else [],
+            default_skills=["carlo-planning", "frontend-design"]
+            if name == "plan"
+            else ["carlo-discovery"]
+            if name == "discovery"
+            else [],
         )
         session.add(profile)
         await session.flush()
@@ -1917,6 +1925,7 @@ async def _task_view(
         "available_model_id": task.available_model_id,
         "planning_question": task.planning_question,
         "used_skills": [],
+        "skill_revisions": {},
         "plan": None
         if plan is None
         else {
@@ -1940,11 +1949,20 @@ async def _task_view(
         )
     ).all()
     used_skills: list[str] = []
+    skill_revisions: dict[str, list[str]] = {}
     for event in skill_events:
         values = event.payload.get("skills")
         if isinstance(values, list):
             used_skills.extend(skill for skill in values if isinstance(skill, str))
+        revisions = event.payload.get("revisions")
+        if isinstance(revisions, dict):
+            for name, revision in revisions.items():
+                if isinstance(name, str) and isinstance(revision, str):
+                    values = skill_revisions.setdefault(name, [])
+                    if revision not in values:
+                        values.append(revision)
     view["used_skills"] = list(dict.fromkeys(used_skills))
+    view["skill_revisions"] = skill_revisions
     attempts = (
         await session.scalars(
             select(Attempt)

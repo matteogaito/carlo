@@ -7,7 +7,13 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from carlo.maintenance import pi_process_lock, record_startup, update_pi_if_due
+from carlo.maintenance import (
+    ManagedPiResource,
+    pi_process_lock,
+    record_startup,
+    update_pi_if_due,
+    update_pi_resources_if_due,
+)
 from carlo.model_providers import CredentialCipher
 from carlo.models import Base, Event, ModelProvider
 
@@ -157,6 +163,100 @@ async def test_unstartable_npm_is_persisted_as_failed_update(factory, tmp_path: 
     assert event.type == "pi.update_failed"
     assert event.payload["exit_code"] is None
     assert "missing-npm" in event.payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_weekly_pi_resources_are_cloned_versioned_and_updated_once(
+    factory, tmp_path: Path
+) -> None:
+    import subprocess
+
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=upstream, check=True, capture_output=True)
+    skill = upstream / "skills" / "frontend-design"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: frontend-design\n---\n")
+    subprocess.run(["git", "add", "."], cwd=upstream, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@local", "commit", "-m", "initial"],
+        cwd=upstream,
+        check=True,
+        capture_output=True,
+    )
+    now = datetime(2026, 8, 24, 12, tzinfo=UTC)
+    root = tmp_path / "managed"
+    resources = (
+        ManagedPiResource("frontend-design", str(upstream), ("skills/frontend-design/SKILL.md",)),
+    )
+
+    assert await update_pi_resources_if_due(
+        factory, "git", root, tmp_path / "pi.lock", now=now, resources=resources
+    ) is True
+    assert await update_pi_resources_if_due(
+        factory, "git", root, tmp_path / "pi.lock", now=now, resources=resources
+    ) is False
+    async with factory() as session:
+        event = await session.scalar(
+            select(Event).where(Event.type == "pi.resources_updated")
+        )
+    assert event is not None
+    revision = event.payload["resources"]["frontend-design"]
+    assert len(revision) == 40
+    assert (
+        root
+        / "checkouts"
+        / "frontend-design"
+        / revision
+        / "skills/frontend-design/SKILL.md"
+    ).is_file()
+
+
+@pytest.mark.asyncio
+async def test_pi_resource_failure_keeps_the_previous_manifest(
+    factory, tmp_path: Path
+) -> None:
+    import json
+    import subprocess
+
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=upstream, check=True, capture_output=True)
+    (upstream / "package.json").write_text("{}")
+    subprocess.run(["git", "add", "."], cwd=upstream, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@local", "commit", "-m", "initial"],
+        cwd=upstream,
+        check=True,
+        capture_output=True,
+    )
+    root = tmp_path / "managed"
+    root.mkdir()
+    previous = {"superpowers": "a" * 40}
+    (root / "revisions.json").write_text(json.dumps(previous))
+
+    assert await update_pi_resources_if_due(
+        factory,
+        "git",
+        root,
+        tmp_path / "pi.lock",
+        now=datetime(2026, 8, 24, 12, tzinfo=UTC),
+        resources=(
+            ManagedPiResource(
+                "superpowers",
+                str(upstream),
+                ("package.json", ".pi/extensions/superpowers.ts"),
+            ),
+        ),
+    ) is True
+    assert json.loads((root / "revisions.json").read_text()) == previous
+
+    async with factory() as session:
+        event = await session.scalar(
+            select(Event).where(Event.type == "pi.resources_update_failed")
+        )
+    assert event is not None
+    assert "superpowers.ts" in event.payload["error"]
 
 
 @pytest.mark.asyncio

@@ -75,6 +75,57 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_pi_provider_loads_managed_superpowers_and_frontend_skill(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "print(json.dumps({'type': 'final', 'output': 'done', 'argv': sys.argv[1:]}))\n"
+    )
+    executable.chmod(0o755)
+    root = tmp_path / "managed"
+    superpowers = root / "checkouts" / "superpowers" / ("a" * 40)
+    frontend = root / "checkouts" / "frontend-design" / ("b" * 40) / "skills" / "frontend-design"
+    superpowers.mkdir(parents=True)
+    frontend.mkdir(parents=True)
+    (frontend / "SKILL.md").write_text("---\nname: frontend-design\n---\n")
+    manifest = root / "revisions.json"
+    manifest.write_text(json.dumps({"superpowers": "a" * 40, "frontend-design": "b" * 40}))
+    provider = PiProvider(
+        str(executable),
+        tmp_path / "sessions",
+        resource_root=root,
+        managed_packages=("superpowers",),
+        managed_skills={"frontend-design": "skills/frontend-design"},
+        resource_manifest=manifest,
+    )
+    replacement_manifest = json.dumps({"superpowers": "c" * 40})
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(manifest)!r}).write_text({replacement_manifest!r})\n"
+        "print(json.dumps({'type': 'final', 'output': 'done', 'argv': sys.argv[1:]}))\n"
+    )
+
+    result = await provider.run(
+        AgentProfile("plan", None, None, (), ("frontend-design",)),
+        "Plan the frontend",
+        str(tmp_path),
+        "CAR-4-plan",
+    )
+
+    argv = result.events[-1]["argv"]
+    assert argv[:2] == ["-e", str(superpowers)]
+    assert ["--skill", str(frontend)] == argv[argv.index("--skill"):argv.index("--skill") + 2]
+    assert result.resource_revisions == {
+        "superpowers": "a" * 40,
+        "frontend-design": "b" * 40,
+    }
+
+
+@pytest.mark.asyncio
 async def test_pi_provider_reports_only_skills_actually_invoked_or_read(
     tmp_path: Path,
 ) -> None:

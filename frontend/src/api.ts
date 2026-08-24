@@ -68,6 +68,7 @@ export interface Task {
   planning_question: { text: string } | null
   available_model_id?: number | null
   used_skills?: string[]
+  skill_revisions?: Record<string, string[]>
   plan: Plan | null
   attempts?: {
     number: number
