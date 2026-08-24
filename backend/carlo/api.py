@@ -34,7 +34,10 @@ from .actions import ActionConfigError, load_catalog, preflight
 from .config import Settings
 from .model_providers import (
     CredentialCipher,
+    MANAGED_PROFILE_SKILLS,
     ModelProviderError,
+    REQUIRED_PROFILE_SKILLS,
+    available_profile_skills,
     calculate_compaction,
     model_runtime_evidence,
     refresh_model_provider,
@@ -65,6 +68,8 @@ from .models import (
 from .provider import AgentProfile, CodingAgentProvider, ProviderError
 from .ssh import HostScan, SshError, SshTransport, validate_runner
 from .telegram import TelegramNotifier, TelegramTransport, telegram_enabled
+
+
 from .tasks import TaskCreationError, create_task as create_task_record
 
 
@@ -736,6 +741,10 @@ def create_app(
         ).all()
         return [_profile_view(profile) for profile in profiles]
 
+    @api.get("/settings/skills")
+    async def list_skills() -> list[dict[str, Any]]:
+        return _skill_catalog()
+
     @api.patch("/agent-profiles/{name}")
     async def update_agent_profile(
         name: str,
@@ -754,8 +763,25 @@ def create_app(
         )
         if selected_model_id is not None:
             await _selectable_model(session, selected_model_id)
+        if "default_skills" in payload.model_fields_set and payload.default_skills is None:
+            raise HTTPException(422, "default_skills cannot be null")
+        if payload.default_skills is not None:
+            known = available_profile_skills()
+            unknown = sorted(set(payload.default_skills) - known)
+            if unknown:
+                raise HTTPException(422, f"unknown skills: {', '.join(unknown)}")
+            payload.default_skills = list(
+                dict.fromkeys(
+                    (*REQUIRED_PROFILE_SKILLS.get(name, ()), *payload.default_skills)
+                )
+            )
         for field in payload.model_fields_set:
             setattr(profile, field, getattr(payload, field))
+        profile.default_skills = list(
+            dict.fromkeys(
+                (*REQUIRED_PROFILE_SKILLS.get(name, ()), *profile.default_skills)
+            )
+        )
         session.add(
             Event(type="agent_profile.updated", payload={"name": name, "fields": sorted(payload.model_fields_set)})
         )
@@ -1639,11 +1665,8 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
             permissions={"tools": ["read", "bash", "grep", "find", "ls", "discovery_state"]}
             if name == "discovery"
             else {},
-            default_skills=["carlo-planning", "frontend-design"]
-            if name == "plan"
-            else ["carlo-discovery"]
-            if name == "discovery"
-            else [],
+            default_skills=list(REQUIRED_PROFILE_SKILLS.get(name, ()))
+            + (["frontend-design"] if name == "plan" else []),
         )
         session.add(profile)
         await session.flush()
@@ -1783,10 +1806,30 @@ def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
         "effort": profile.effort,
         "permissions": profile.permissions,
         "default_skills": profile.default_skills,
+        "required_skills": list(REQUIRED_PROFILE_SKILLS.get(profile.name, ())),
         "context_policy": profile.context_policy,
         "active": profile.active,
         "available_model_id": profile.available_model_id,
     }
+
+
+def _skill_catalog() -> list[dict[str, Any]]:
+    bundled = {
+        path.parent.name
+        for path in (Path(__file__).resolve().parents[2] / "skills").glob("*/SKILL.md")
+    }
+    return [
+        {
+            "name": name,
+            "source": "carlo" if name in bundled else "managed",
+            "required_profiles": sorted(
+                profile
+                for profile, required in REQUIRED_PROFILE_SKILLS.items()
+                if name in required
+            ),
+        }
+        for name in sorted(available_profile_skills())
+    ]
 
 
 def _model_provider_view(provider: ModelProvider) -> dict[str, Any]:

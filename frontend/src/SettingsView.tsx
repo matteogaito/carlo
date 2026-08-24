@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useState } from 'react'
 
 import type {
   AgentProfileSettings,
+  AgentSkill,
   Api,
   AvailableModel,
   Event,
@@ -18,18 +19,20 @@ export function SettingsView({ api, event, setError }: {
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [models, setModels] = useState<AvailableModel[]>([])
   const [profiles, setProfiles] = useState<AgentProfileSettings[]>([])
+  const [skills, setSkills] = useState<AgentSkill[]>([])
   const [pi, setPi] = useState<PiSettings | null>(null)
   const [adding, setAdding] = useState(false)
 
   const load = useCallback(async () => {
     try {
-      const [nextProviders, nextModels, nextPi, nextProfiles] = await Promise.all([
-        api.listModelProviders(), api.listModels(), api.getPiSettings(), api.listAgentProfiles(),
+      const [nextProviders, nextModels, nextPi, nextProfiles, nextSkills] = await Promise.all([
+        api.listModelProviders(), api.listModels(), api.getPiSettings(), api.listAgentProfiles(), api.listSkills(),
       ])
       setProviders(nextProviders)
       setModels(nextModels)
       setPi(nextPi)
       setProfiles(nextProfiles)
+      setSkills(nextSkills)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load Settings')
     }
@@ -48,6 +51,17 @@ export function SettingsView({ api, event, setError }: {
       await load()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Settings update failed')
+    }
+  }
+
+  async function saveProfile(name: string, input: Partial<AgentProfileSettings>) {
+    try {
+      await api.updateAgentProfile(name, input)
+      await load()
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Settings update failed')
+      return false
     }
   }
 
@@ -87,7 +101,7 @@ export function SettingsView({ api, event, setError }: {
         </div>
       </section>
       {pi && <CompactionSettings value={pi} save={(input) => action(() => api.updatePiSettings(input))} />}
-    </> : <AgentProfiles profiles={profiles} providers={providers} models={models} save={(name, input) => action(() => api.updateAgentProfile(name, input))} />}
+    </> : <AgentProfiles profiles={profiles} providers={providers} models={models} skills={skills} save={saveProfile} />}
 
     {adding && <ProviderDialog close={() => setAdding(false)} create={async (input) => {
       await action(() => api.createModelProvider(input))
@@ -143,25 +157,31 @@ function CompactionSettings({ value, save }: { value: PiSettings; save: (input: 
   </section>
 }
 
-function AgentProfiles({ profiles, providers, models, save }: {
+function AgentProfiles({ profiles, providers, models, skills, save }: {
   profiles: AgentProfileSettings[]
   providers: ModelProvider[]
   models: AvailableModel[]
-  save: (name: string, input: Partial<AgentProfileSettings>) => Promise<void>
+  skills: AgentSkill[]
+  save: (name: string, input: Partial<AgentProfileSettings>) => Promise<boolean>
 }) {
+  const [saved, setSaved] = useState<string | null>(null)
   return <section className="settings-section agent-settings">
     <header><div><span>PI PROFILES</span><h2>Coding agents</h2></div></header>
     <p>Each new session receives an isolated snapshot of the selected model and proportional context policy.</p>
     <div className="profile-list">{profiles.map((profile) => {
       const initial = profile.available_model_id ? String(profile.available_model_id) : ''
-      return <form key={profile.name} onSubmit={(event) => {
+      return <form key={profile.name} onChange={() => setSaved(null)} onSubmit={(event) => {
         event.preventDefault()
-        const selection = String(new FormData(event.currentTarget).get('model'))
+        setSaved(null)
+        const data = new FormData(event.currentTarget)
+        const selection = String(data.get('model'))
+        const selectedSkills = Array.from(new Set([...profile.required_skills, ...data.getAll('skills').map(String)]))
         void save(profile.name, {
           available_model_id: Number(selection),
-        })
+          default_skills: selectedSkills,
+        }).then((ok) => ok && setSaved(profile.name))
       }}>
-        <div><span>{profile.provider}</span><h3>{profile.name}</h3><small>{profile.default_skills.join(' · ') || 'No default skills'}</small></div>
+        <div><span>{profile.provider}</span><h3>{profile.name}</h3><small>{profile.default_skills.join(' · ') || 'No skills'}</small></div>
         <label>Model for {profile.name}<select name="model" defaultValue={initial} required>
           <option value="">Not configured — choose a managed model</option>
           {providers.filter((provider) => provider.active).map((provider) => {
@@ -171,7 +191,11 @@ function AgentProfiles({ profiles, providers, models, save }: {
             </optgroup> : null
           })}
         </select></label>
-        <button type="submit">Save {profile.name}</button>
+        <fieldset><legend>Skills for {profile.name}</legend><div className="profile-skills">{skills.map((skill) => {
+          const required = profile.required_skills.includes(skill.name)
+          return <label key={skill.name}><input name="skills" value={skill.name} type="checkbox" defaultChecked={required || profile.default_skills.includes(skill.name)} disabled={required} />{skill.name}{required && <small>core</small>}</label>
+        })}</div></fieldset>
+        <div className="profile-save"><button type="submit">Save {profile.name}</button>{saved === profile.name && <span role="status">Saved ✓</span>}</div>
       </form>
     })}</div>
   </section>

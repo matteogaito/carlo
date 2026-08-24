@@ -96,6 +96,7 @@ const api: Api = {
   getPiSettings: async () => ({ compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20 }),
   updatePiSettings: async () => ({ compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20 }),
   listAgentProfiles: async () => [],
+  listSkills: async () => [],
   updateAgentProfile: async () => { throw new Error('unused') },
   setTaskModel: async () => { throw new Error('unused') },
   events: () => () => undefined,
@@ -501,8 +502,8 @@ describe('CARLO board', () => {
       reserve_tokens: 16384, keep_recent_tokens: 13107, selectable: true,
     }
     const profile: AgentProfileSettings = {
-      name: 'implementation', provider: 'pi', effort: null,
-      permissions: {}, default_skills: [], context_policy: {}, active: true,
+      name: 'plan', provider: 'pi', effort: null,
+      permissions: {}, default_skills: ['carlo-planning'], required_skills: ['carlo-planning'], context_policy: {}, active: true,
       available_model_id: null,
     }
     const refreshModelProvider = vi.fn(async () => undefined)
@@ -513,6 +514,11 @@ describe('CARLO board', () => {
       listModelProviders: async () => [provider],
       listModels: async () => [model],
       listAgentProfiles: async () => [profile],
+      listSkills: async () => [
+        { name: 'carlo-planning', source: 'carlo', required_profiles: ['brief', 'plan'] },
+        { name: 'carlo-ui-design', source: 'carlo', required_profiles: [] },
+        { name: 'frontend-design', source: 'managed', required_profiles: [] },
+      ],
       refreshModelProvider,
       updateModelProvider,
       updateAgentProfile,
@@ -530,11 +536,20 @@ describe('CARLO board', () => {
     expect(screen.queryByText(/Legacy Pi/i)).toBeNull()
     expect(screen.getByRole('option', { name: 'Not configured — choose a managed model' })).toBeTruthy()
     expect(screen.getByRole('option', { name: 'omlx — Qwen3.8-27B' })).toBeTruthy()
-    await userEvent.selectOptions(screen.getByLabelText('Model for implementation'), '2')
-    await userEvent.click(screen.getByRole('button', { name: 'Save implementation' }))
-    expect(updateAgentProfile).toHaveBeenCalledWith('implementation', {
+    await userEvent.selectOptions(screen.getByLabelText('Model for plan'), '2')
+    const coreSkill = screen.getByRole('checkbox', { name: /carlo-planning/i }) as HTMLInputElement
+    expect(coreSkill.checked).toBe(true)
+    expect(coreSkill.disabled).toBe(true)
+    await userEvent.click(screen.getByRole('checkbox', { name: /carlo-ui-design/i }))
+    await userEvent.click(screen.getByRole('button', { name: 'Save plan' }))
+    expect(updateAgentProfile).toHaveBeenCalledWith('plan', {
       available_model_id: 2,
+      default_skills: ['carlo-planning', 'carlo-ui-design'],
     })
+    expect((await screen.findByRole('status')).textContent).toBe('Saved ✓')
+    updateAgentProfile.mockRejectedValueOnce(new Error('save failed'))
+    await userEvent.click(screen.getByRole('button', { name: 'Save plan' }))
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
   })
 
   it('sets a concrete model override before task execution', async () => {

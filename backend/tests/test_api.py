@@ -112,7 +112,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         profile = (await add_managed_profiles(session, "plan"))["plan"]
         profile.effort = "high"
         profile.permissions = {"tools": ["read", "grep", "find", "ls", "bash"]}
-        profile.default_skills = ["carlo-planning", "python-backend"]
+        profile.default_skills = ["carlo-planning", "carlo-ui-design"]
         await session.commit()
     app = create_app(factory, provider, Settings(app_origin="http://test"))
 
@@ -207,7 +207,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         assert "model" not in updated.json()
 
     assert provider.calls[0][0].name == "plan"
-    assert provider.calls[0][0].skills == ("carlo-planning", "python-backend")
+    assert provider.calls[0][0].skills == ("carlo-planning", "carlo-ui-design")
     assert provider.calls[0][1].startswith("/skill:carlo-planning ")
     assert provider.calls[0][2] == str(repository)
     await engine.dispose()

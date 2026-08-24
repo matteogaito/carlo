@@ -331,17 +331,22 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
             name="implementation-resolver",
             provider="pi",
             permissions={"tools": ["read", "edit"]},
-            default_skills=["testing"],
+            default_skills=["carlo-ui-design"],
         )
-        session.add_all([provider, default, override, profile])
+        plan_profile = models.AgentProfile(
+            name="plan", provider="pi", default_skills=["carlo-ui-design"]
+        )
+        session.add_all([provider, default, override, profile, plan_profile])
         await session.flush()
         profile.available_model_id = default.id
+        plan_profile.available_model_id = default.id
         await session.flush()
 
         resolved = await module.resolve_agent_profile(session, profile, cipher)
         task_resolved = await module.resolve_agent_profile(
             session, profile, cipher, task_model_id=override.id
         )
+        plan_resolved = await module.resolve_agent_profile(session, plan_profile, cipher)
 
         assert resolved.resolved_model.external_id == "qwen"
         assert resolved.resolved_model.api_key == "runtime-secret"
@@ -349,6 +354,7 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
         assert task_resolved.resolved_model.external_id == "qwen-large"
         assert task_resolved.resolved_model.keep_recent_tokens == 26_214
         assert task_resolved.tools == ("read", "edit")
+        assert plan_resolved.skills == ("carlo-planning", "carlo-ui-design")
 
 
 @pytest.mark.asyncio
@@ -374,12 +380,25 @@ async def test_agent_profile_resolution_rejects_unconfigured_and_bad_catalog(
         broken = models.AgentProfile(
             name="broken-resolver", provider="pi", available_model_id=None
         )
-        session.add_all([unconfigured, provider, model, broken])
+        legacy = models.AgentProfile(
+            name="legacy-resolver",
+            provider="pi",
+            available_model_id=None,
+            default_skills=["/tmp/untrusted-skill"],
+        )
+        session.add_all([unconfigured, provider, model, broken, legacy])
         await session.flush()
         broken.available_model_id = model.id
+        legacy.available_model_id = model.id
         await session.flush()
 
         with pytest.raises(module.ModelProviderError, match="no managed model"):
             await module.resolve_agent_profile(session, unconfigured, cipher)
         with pytest.raises(module.ModelProviderError, match="inactive"):
             await module.resolve_agent_profile(session, broken, cipher)
+        provider.active = True
+        model.status = "AVAILABLE"
+        model.discovered_context_window = 65_536
+        model.discovered_max_tokens = 16_384
+        with pytest.raises(module.ModelProviderError, match="unknown skills"):
+            await module.resolve_agent_profile(session, legacy, cipher)

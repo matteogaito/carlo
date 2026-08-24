@@ -277,9 +277,16 @@ export interface AgentProfileSettings {
   effort: string | null
   permissions: Record<string, unknown>
   default_skills: string[]
+  required_skills: string[]
   context_policy: Record<string, unknown>
   active: boolean
   available_model_id: number | null
+}
+
+export interface AgentSkill {
+  name: string
+  source: 'carlo' | 'managed'
+  required_profiles: string[]
 }
 
 export interface Api {
@@ -323,6 +330,7 @@ export interface Api {
   getPiSettings(): Promise<PiSettings>
   updatePiSettings(input: Partial<PiSettings>): Promise<PiSettings>
   listAgentProfiles(): Promise<AgentProfileSettings[]>
+  listSkills(): Promise<AgentSkill[]>
   updateAgentProfile(name: string, input: Partial<AgentProfileSettings>): Promise<AgentProfileSettings>
   setTaskModel(id: string, availableModelId: number | null): Promise<Task>
   events(
@@ -407,6 +415,7 @@ export const httpApi: Api = {
     method: 'PATCH', body: JSON.stringify(input),
   }),
   listAgentProfiles: () => request('/api/agent-profiles'),
+  listSkills: () => request('/api/settings/skills'),
   updateAgentProfile: (name, input) => request(`/api/agent-profiles/${encodeURIComponent(name)}`, {
     method: 'PATCH', body: JSON.stringify(input),
   }),

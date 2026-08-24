@@ -299,6 +299,50 @@ async def test_compaction_incompatible_model_cannot_be_selected(
 
 
 @pytest.mark.asyncio
+async def test_agent_profiles_select_known_skills_and_keep_core_skills(
+    settings_app,
+) -> None:
+    app, factory, _ = settings_app
+    async with factory() as session:
+        session.add(AgentProfile(name="plan", provider="pi", default_skills=[]))
+        await session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        catalog = await client.get("/api/settings/skills")
+        updated = await client.patch(
+            "/api/agent-profiles/plan",
+            json={"default_skills": ["carlo-ui-design"]},
+        )
+        unknown = await client.patch(
+            "/api/agent-profiles/plan",
+            json={"default_skills": ["not-installed"]},
+        )
+        null_skills = await client.patch(
+            "/api/agent-profiles/plan",
+            json={"default_skills": None},
+        )
+
+    skills = {item["name"]: item for item in catalog.json()}
+    assert skills["carlo-ui-design"]["source"] == "carlo"
+    assert skills["frontend-design"]["source"] == "managed"
+    assert skills["carlo-planning"]["required_profiles"] == ["brief", "plan"]
+    assert updated.status_code == 200
+    assert updated.json()["default_skills"] == [
+        "carlo-planning",
+        "carlo-ui-design",
+    ]
+    assert unknown.status_code == 422
+    assert null_skills.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_provider_update_retains_or_replaces_secret(
     settings_app,
 ) -> None:

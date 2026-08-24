@@ -275,7 +275,7 @@ async def test_stall_escalates_then_local_validation_completes(
             revision=1,
             brief_markdown="# Brief\nUse the repository.",
             plan_markdown="# Plan\nCreate feature.txt.",
-            metadata_json={"skills": ["testing"], "validation_commands": [command]},
+            metadata_json={"skills": ["carlo-ui-design"], "validation_commands": [command]},
         )
         session.add_all([implementation, escalation, project, task, plan])
         await session.commit()
@@ -311,7 +311,7 @@ async def test_stall_escalates_then_local_validation_completes(
                 "implementation complete",
                 (),
                 0,
-                ("testing",),
+                ("carlo-ui-design",),
             )
 
         async def stop(self, session_id: str) -> None:
@@ -346,10 +346,10 @@ async def test_stall_escalates_then_local_validation_completes(
             .order_by(Event.sequence.desc())
         )
         assert completed is not None
-        assert completed.payload["skills"] == ["testing"]
+        assert completed.payload["skills"] == ["carlo-ui-design"]
     assert "repeated_outcome" in provider.escalation_instruction
     assert provider.implementation_calls == 3
-    assert provider.implementation_skills == ("testing",)
+    assert provider.implementation_skills == ("carlo-ui-design",)
     await engine.dispose()
 
 

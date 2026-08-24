@@ -70,7 +70,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
                         "brief_markdown": "# Brief\nREADME.md establishes the base.",
                         "plan_markdown": "# Plan\nCreate feature.txt and validate it.",
                         "metadata": {
-                            "skills": ["testing"],
+                            "skills": ["carlo-ui-design"],
                             "validation_commands": [validation],
                             "browser_validation": False,
                             "build_required": False,

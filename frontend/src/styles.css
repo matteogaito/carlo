@@ -376,12 +376,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .compaction-card .switch { align-self: center; grid-template-columns: auto 1fr; align-items: center; }
 .compaction-card .switch input { width: 18px; height: 18px; accent-color: var(--pine); }
 .profile-list { display: grid; gap: 1px; border: 1px solid #aeb8b2; background: var(--line); }
-.profile-list form { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto; align-items: center; gap: 18px; padding: 17px 18px; background: var(--paper); }
+.profile-list form { display: grid; grid-template-columns: minmax(160px, .8fr) minmax(240px, 1.3fr) minmax(260px, 1.5fr) auto; align-items: center; gap: 18px; padding: 17px 18px; background: var(--paper); }
 .profile-list form > div span { color: var(--pine); font: 750 9px ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; }
 .profile-list h3 { margin: 2px 0; font: 750 17px "Avenir Next", ui-rounded, sans-serif; }
 .profile-list small { color: #748078; font-size: 11px; }
 .profile-list label { display: grid; gap: 5px; color: #657169; font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
 .profile-list select { width: 100%; border: 1px solid #98a39c; padding: 9px; color: var(--ink); background: white; text-transform: none; }
+.profile-list fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.profile-list legend { margin-bottom: 6px; color: #657169; font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
+.profile-skills { display: flex; flex-wrap: wrap; gap: 6px; }
+.profile-skills label { display: flex; grid: none; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid #aeb8b2; color: var(--ink); background: white; font-size: 10px; text-transform: none; cursor: pointer; }
+.profile-skills label:has(input:checked) { border-color: var(--pine); background: #edf3ef; }
+.profile-skills label:has(input:disabled) { cursor: default; }
+.profile-skills input { margin: 0; accent-color: var(--pine); }
+.profile-skills small { color: var(--pine); font: 700 8px ui-monospace, monospace; text-transform: uppercase; }
+.profile-save { display: grid; gap: 5px; justify-items: center; }
+.profile-save [role="status"] { color: var(--pine); font: 700 10px ui-monospace, monospace; }
 .provider-dialog form { display: grid; gap: 14px; padding: 20px 24px 0; }
 .provider-dialog .provider-auth { grid-template-columns: auto 1fr; align-items: center; }
 .provider-dialog .provider-auth input { width: 18px; height: 18px; accent-color: var(--pine); }

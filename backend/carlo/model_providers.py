@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+from pathlib import Path
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,20 @@ from .models import (
 )
 
 MODEL_CATALOG_LIMIT = 8 * 1024 * 1024
+MANAGED_PROFILE_SKILLS = ("frontend-design",)
+REQUIRED_PROFILE_SKILLS: dict[str, tuple[str, ...]] = {
+    "brief": ("carlo-planning",),
+    "plan": ("carlo-planning",),
+    "discovery": ("carlo-discovery",),
+}
+
+
+def available_profile_skills() -> set[str]:
+    bundled = {
+        path.parent.name
+        for path in (Path(__file__).resolve().parents[2] / "skills").glob("*/SKILL.md")
+    }
+    return bundled | set(MANAGED_PROFILE_SKILLS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +100,18 @@ async def resolve_agent_profile(
     from .provider import AgentProfile, ResolvedModel
 
     tools = tuple(record.permissions.get("tools") or default_tools)
-    skills = tuple(dict.fromkeys((*record.default_skills, *extra_skills)))
+    skills = tuple(
+        dict.fromkeys(
+            (
+                *REQUIRED_PROFILE_SKILLS.get(record.name, ()),
+                *record.default_skills,
+                *extra_skills,
+            )
+        )
+    )
+    unknown_skills = sorted(set(skills) - available_profile_skills())
+    if unknown_skills:
+        raise ModelProviderError(f"agent profile has unknown skills: {', '.join(unknown_skills)}")
     model_id = task_model_id or record.available_model_id
     if model_id is None:
         raise ModelProviderError("agent profile has no managed model")
