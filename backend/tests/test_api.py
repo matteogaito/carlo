@@ -101,6 +101,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         {"type": "message_update", "delta": "{"},
         {"type": "message_update", "delta": '"brief_markdown"'},
     )
+    provider.used_skills = ("carlo-planning",)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
     async with factory() as session:
@@ -148,18 +149,19 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
 
         plan_response = await client.post(f'/api/tasks/{task["id"]}/plan')
         assert plan_response.status_code == 200
+        assert plan_response.json()["used_skills"] == ["carlo-planning"]
         planned = (await client.get(f'/api/tasks/{task["id"]}')).json()
         assert planned["stage"] == "awaiting_approval"
         assert planned["plan"]["metadata"]["validation_commands"] == ["pytest -q"]
         assert planned["plan"]["metadata"]["title"] == "Add authenticated login"
         assert planned["plan"]["metadata"]["implementation_tasks"][0]["title"] == "Add the login endpoint"
+        assert planned["used_skills"] == ["carlo-planning"]
         assert planned["plan"]["metadata"]["planner_profile"] == {
             "name": "plan",
             "provider": "pi",
             "model": "openai/gpt-5.6-sol",
             "effort": "high",
             "tools": ["read", "grep", "find", "ls", "bash"],
-            "skills": ["carlo-planning", "python-backend"],
         }
         activity = [event for event in planned["events"] if event["type"].startswith("planning.")]
         assert sum(event["type"] == "planning.drafting" for event in activity) == 1
@@ -168,6 +170,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
             and event["payload"] == {"tool": "read", "detail": "README.md"}
             for event in activity
         )
+        assert any(event["type"] == "planning.skills_used" for event in activity)
         assert "do not persist" not in json.dumps(activity)
 
         approved = await client.post(

@@ -997,13 +997,23 @@ def create_app(
             await session.commit()
             raise HTTPException(502, "planning provider failed") from error
 
+        if result.used_skills:
+            session.add(
+                Event(
+                    task=task,
+                    type="planning.skills_used",
+                    payload={"skills": list(result.used_skills)},
+                )
+            )
+            await session.commit()
+
         question = raw.get("question") if isinstance(raw, dict) else None
         if isinstance(question, str) and question.strip():
             task.planning_question = {"text": question.strip()}
             task.version += 1
             session.add(Event(task=task, type="planning.question", payload=task.planning_question))
             await session.commit()
-            return await _task_view(session, task)
+            return await _task_view(session, task, detail=True)
         try:
             output = PlanPayload.model_validate(raw)
         except ValueError as error:
@@ -1025,7 +1035,6 @@ def create_app(
             "model": provider_profile.model,
             "effort": provider_profile.effort,
             "tools": list(provider_profile.tools),
-            "skills": list(provider_profile.skills),
         }
         plan = PlanRevision(
             task=task,
@@ -1041,7 +1050,7 @@ def create_app(
             [plan, Event(task=task, type="planning.completed", payload={"revision": revision})]
         )
         await session.commit()
-        return await _task_view(session, task)
+        return await _task_view(session, task, detail=True)
 
     @api.post("/tasks/{task_id}/plan")
     async def plan_task(
@@ -1473,6 +1482,7 @@ async def _task_view(
         "worktree_path": task.worktree_path,
         "checkpoint_sha": task.checkpoint_sha,
         "planning_question": task.planning_question,
+        "used_skills": [],
         "plan": None
         if plan is None
         else {
@@ -1485,6 +1495,22 @@ async def _task_view(
     }
     if not detail:
         return view
+    skill_events = (
+        await session.scalars(
+            select(Event)
+            .where(
+                Event.task_id == task.id,
+                Event.type.in_(("planning.skills_used", "agent.completed")),
+            )
+            .order_by(Event.sequence)
+        )
+    ).all()
+    used_skills: list[str] = []
+    for event in skill_events:
+        values = event.payload.get("skills")
+        if isinstance(values, list):
+            used_skills.extend(skill for skill in values if isinstance(skill, str))
+    view["used_skills"] = list(dict.fromkeys(used_skills))
     attempts = (
         await session.scalars(
             select(Attempt)

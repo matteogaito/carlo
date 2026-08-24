@@ -19,7 +19,7 @@ export interface PlannerProfile {
   model: string | null
   effort: string | null
   tools: string[]
-  skills: string[]
+  skills?: string[]
 }
 
 export interface Project {
@@ -66,6 +66,7 @@ export interface Task {
   worktree_path: string | null
   checkpoint_sha: string | null
   planning_question: { text: string } | null
+  used_skills?: string[]
   plan: Plan | null
   attempts?: {
     number: number

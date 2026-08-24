@@ -303,7 +303,13 @@ async def test_stall_escalates_then_local_validation_completes(
             Path(cwd, "feature.txt").write_text(
                 "broken" if self.implementation_calls < 3 else "ok"
             )
-            return AgentResult(session_id, "implementation complete", (), 0)
+            return AgentResult(
+                session_id,
+                "implementation complete",
+                (),
+                0,
+                ("testing",),
+            )
 
         async def stop(self, session_id: str) -> None:
             return None
@@ -331,6 +337,13 @@ async def test_stall_escalates_then_local_validation_completes(
         assert await session.scalar(select(func.count(ValidationRun.id))) == 3
         attempts = (await session.scalars(select(Attempt).order_by(Attempt.number))).all()
         assert all(attempt.artifact_path and Path(attempt.artifact_path).is_file() for attempt in attempts)
+        completed = await session.scalar(
+            select(Event)
+            .where(Event.type == "agent.completed")
+            .order_by(Event.sequence.desc())
+        )
+        assert completed is not None
+        assert completed.payload["skills"] == ["testing"]
     assert "repeated_outcome" in provider.escalation_instruction
     assert provider.implementation_calls == 3
     assert provider.implementation_skills == ("testing",)

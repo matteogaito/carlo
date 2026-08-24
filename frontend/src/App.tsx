@@ -460,6 +460,9 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
         <section><h3>Brief</h3>{task.plan ? <TaskMarkdown>{task.plan.brief_markdown}</TaskMarkdown> : <p>Planning has not produced a Brief yet.</p>}</section>
         <section><h3>Plan</h3>{task.plan ? <TaskMarkdown>{task.plan.plan_markdown}</TaskMarkdown> : <p>No Plan yet.</p>}</section>
       </>}
+      <div className="skill-ledger">
+        <SkillChips label="Skills used" skills={task.used_skills || []} empty="None recorded" />
+      </div>
       {!structuredPlan && !!phases.length && <section><h3>Implementation phases</h3><ol className="implementation-phases">
         {phases.map((phase, index) => <li key={`${index}-${phase}`}><span>{index + 1}</span><p>{phase}</p></li>)}
       </ol></section>}
@@ -513,7 +516,6 @@ function StructuredPlan({ plan }: { plan: Plan }) {
   const metadata = plan.metadata
   const tasks = metadata.implementation_tasks || []
   const planner = metadata.planner_profile
-  const implementationSkills = metadata.skills || []
   return <>
     <section className="plan-summary">
       <h3>Plan</h3>
@@ -530,10 +532,6 @@ function StructuredPlan({ plan }: { plan: Plan }) {
         <strong>{metadata.amendment.summary}</strong>
         <p>{metadata.amendment.reason}</p>
       </aside>}
-      <div className="skill-ledger">
-        <SkillChips label="Used to plan" skills={planner?.skills || []} empty="Not recorded" />
-        <SkillChips label="For implementation" skills={implementationSkills} empty="None selected" />
-      </div>
       {planner && <details className="planning-runtime">
         <summary>Planning runtime</summary>
         <dl>

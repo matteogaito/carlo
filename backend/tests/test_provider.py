@@ -53,6 +53,47 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_pi_provider_reports_only_skills_actually_invoked_or_read(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolCallId': 'skill-ok', "
+        "'toolName': 'read', 'args': {'path': '/pi/skills/frontend-design/SKILL.md'}}))\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolCallId': 'skill-ok', "
+        "'toolName': 'read', 'isError': False}))\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolCallId': 'skill-failed', "
+        "'toolName': 'read', 'args': {'path': '/pi/skills/database/SKILL.md'}}))\n"
+        "print(json.dumps({'type': 'tool_execution_end', 'toolCallId': 'skill-failed', "
+        "'toolName': 'read', 'isError': True}))\n"
+        "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'read', "
+        "'args': {'path': '/repo/README.md'}}))\n"
+        "print(json.dumps({'type': 'final', 'output': 'done'}))\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+
+    result = await provider.run(
+        AgentProfile("plan", None, None, (), ("carlo-planning",)),
+        "/skill:carlo-planning Plan the change",
+        str(tmp_path),
+        "CAR-2-plan",
+    )
+
+    assert result.used_skills == ("carlo-planning", "frontend-design")
+
+    malformed = await provider.run(
+        AgentProfile("plan", None, None, (), ()),
+        "/skill:   Plan the change",
+        str(tmp_path),
+        "CAR-3-plan",
+    )
+    assert malformed.used_skills == ("frontend-design",)
+
+
+@pytest.mark.asyncio
 async def test_pi_provider_accepts_json_events_larger_than_asyncio_default(
     tmp_path: Path,
 ) -> None:

@@ -164,10 +164,19 @@ describe('CARLO board', () => {
             summary: 'The public response must change',
             reason: 'The existing envelope cannot represent the required state.',
           },
-          skills: ['testing'],
+          skills: ['never-used'],
           validation_commands: ['pytest -q'],
         },
       },
+      events: [{
+        sequence: 21,
+        task_id: 'CAR-1',
+        discovery_id: null,
+        type: 'agent.completed',
+        payload: { skills: ['testing'] },
+        created_at: new Date().toISOString(),
+      }],
+      used_skills: ['carlo-planning', 'frontend-design', 'testing'],
     }
     render(<App api={{ ...api, listTasks: async () => [planned], getTask: async () => planned }} />)
 
@@ -176,8 +185,12 @@ describe('CARLO board', () => {
     expect(screen.getByText('Reuse the existing session boundary without changing public errors.')).toBeTruthy()
     expect(screen.getByText('Keep current clients compatible')).toBeTruthy()
     expect(screen.getByText('carlo-planning')).toBeTruthy()
-    expect(screen.getByText('python-backend')).toBeTruthy()
+    expect(screen.getByText('Skills used')).toBeTruthy()
+    expect(screen.getByText('frontend-design')).toBeTruthy()
     expect(screen.getByText('testing')).toBeTruthy()
+    expect(screen.queryByText('python-backend')).toBeNull()
+    expect(screen.queryByText('never-used')).toBeNull()
+    expect(screen.queryByText('For implementation')).toBeNull()
     expect(screen.getByText('Plan amendment needs approval')).toBeTruthy()
     expect(screen.getByText('The public response must change')).toBeTruthy()
     expect(screen.getByText('The existing envelope cannot represent the required state.')).toBeTruthy()

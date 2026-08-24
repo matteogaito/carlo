@@ -33,6 +33,7 @@ class AgentResult:
     output: str
     events: tuple[dict[str, Any], ...]
     exit_code: int
+    used_skills: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +216,7 @@ class PiProvider:
             output=_final_output(event_tuple),
             events=event_tuple,
             exit_code=process.returncode or 0,
+            used_skills=_used_skills(instruction, event_tuple),
         )
 
     async def stop(self, session_id: str) -> None:
@@ -241,6 +243,33 @@ class PiProvider:
             resolved = bundled if not path.is_absolute() and bundled.exists() else path
             arguments.extend(("--skill", str(resolved)))
         return arguments
+
+
+def _used_skills(
+    instruction: str, events: tuple[dict[str, Any], ...]
+) -> tuple[str, ...]:
+    skills: list[str] = []
+    skill_command = instruction[7:] if instruction.startswith("/skill:") else ""
+    if skill_command and not skill_command[0].isspace():
+        skills.append(skill_command.split(maxsplit=1)[0])
+    pending_reads: dict[str, str] = {}
+    for event in events:
+        event_type = event.get("type")
+        tool_call_id = event.get("toolCallId")
+        if event_type == "tool_execution_end" and isinstance(tool_call_id, str):
+            skill = pending_reads.pop(tool_call_id, None)
+            if skill and not event.get("isError"):
+                skills.append(skill)
+            continue
+        if event_type != "tool_execution_start" or event.get("toolName") != "read":
+            continue
+        arguments = event.get("args")
+        if not isinstance(arguments, dict) or not isinstance(tool_call_id, str):
+            continue
+        path = arguments.get("path") or arguments.get("file_path")
+        if isinstance(path, str) and Path(path).name == "SKILL.md":
+            pending_reads[tool_call_id] = Path(path).parent.name
+    return tuple(dict.fromkeys(skills))
 
 
 class PiRpcSession:
