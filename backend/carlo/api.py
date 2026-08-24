@@ -133,7 +133,7 @@ class ModelProviderCreate(BaseModel):
     slug: str = Field(pattern=r"^[a-z][a-z0-9-]{0,79}$")
     kind: str = Field(default="openai-compatible", pattern=r"^openai-compatible$")
     base_url: str = Field(min_length=1, max_length=2048)
-    api_key: str = Field(min_length=1, max_length=16_384)
+    api_key: str | None = Field(default=None, min_length=1, max_length=16_384)
     compatibility: dict[str, Any] = Field(default_factory=dict)
     refresh_interval_minutes: int = Field(default=15, ge=1, le=1440)
 
@@ -806,17 +806,19 @@ def create_app(
         payload: ModelProviderCreate,
         session: AsyncSession = Depends(get_session),
     ) -> dict[str, Any]:
-        if credential_cipher is None:
-            raise HTTPException(503, "credential encryption is not configured")
-        encrypted = credential_cipher.encrypt(payload.api_key)
+        encrypted = None
+        if payload.api_key:
+            if credential_cipher is None:
+                raise HTTPException(503, "credential encryption is not configured")
+            encrypted = credential_cipher.encrypt(payload.api_key)
         provider = ModelProvider(
             name=payload.name,
             slug=payload.slug,
             kind=payload.kind,
             base_url=payload.base_url,
-            credential_ciphertext=encrypted.ciphertext,
-            credential_nonce=encrypted.nonce,
-            credential_hint=f"…{payload.api_key[-4:]}",
+            credential_ciphertext=encrypted.ciphertext if encrypted else None,
+            credential_nonce=encrypted.nonce if encrypted else None,
+            credential_hint=f"…{payload.api_key[-4:]}" if payload.api_key else None,
             compatibility=payload.compatibility,
             refresh_interval_minutes=payload.refresh_interval_minutes,
         )
@@ -890,8 +892,6 @@ def create_app(
 
     @api.post("/settings/model-providers/{provider_id}/refresh")
     async def refresh_model_provider_now(provider_id: int) -> dict[str, Any]:
-        if credential_cipher is None:
-            raise HTTPException(503, "credential encryption is not configured")
         try:
             result = await refresh_model_provider(
                 session_factory, credential_cipher, provider_id

@@ -55,7 +55,9 @@ class PiRuntimeSnapshotBuilder:
                     model.provider_slug: {
                         "baseUrl": model.base_url,
                         "api": model.api,
-                        "apiKey": "$CARLO_PI_MODEL_API_KEY",
+                        "apiKey": "$CARLO_PI_MODEL_API_KEY"
+                        if model.api_key
+                        else "carlo-keyless",
                         "compat": model.compatibility,
                         "models": [
                             {
@@ -91,7 +93,9 @@ class PiRuntimeSnapshotBuilder:
         return PiRuntimeSnapshot(
             agent_dir=agent_dir,
             model_pattern=f"{model.provider_slug}/{model.external_id}",
-            environment={"CARLO_PI_MODEL_API_KEY": model.api_key},
+            environment={"CARLO_PI_MODEL_API_KEY": model.api_key}
+            if model.api_key
+            else {},
             manifest=manifest,
         )
 

@@ -71,7 +71,7 @@ export function SettingsView({ api, event, setError }: {
                 <div><i className={provider.last_refresh_status.toLowerCase()} /><span>{provider.slug}</span><h3>{provider.name}</h3></div>
                 <button aria-label={`Refresh ${provider.name}`} onClick={() => void action(() => api.refreshModelProvider(provider.id))}>Refresh</button>
               </header>
-              <dl><dt>Endpoint</dt><dd>{provider.base_url}</dd><dt>Credential</dt><dd>{provider.credential_hint || 'Missing'}</dd><dt>Catalog</dt><dd>{catalog.length} models · {provider.last_refresh_status}</dd></dl>
+              <dl><dt>Endpoint</dt><dd>{provider.base_url}</dd><dt>Credential</dt><dd>{provider.credential_hint || 'Not required'}</dd><dt>Catalog</dt><dd>{catalog.length} models · {provider.last_refresh_status}</dd></dl>
               {provider.last_refresh_error && <p className="provider-error">{provider.last_refresh_error}</p>}
               <label>Default model<select value={provider.default_model_id || ''} onChange={(change) => void action(() => api.updateModelProvider(provider.id, { default_model_id: Number(change.target.value) || null }))}>
                 <option value="">Choose a default</option>
@@ -180,19 +180,27 @@ function AgentProfiles({ profiles, providers, models, save }: {
 
 function ProviderDialog({ close, create }: {
   close: () => void
-  create: (input: { name: string; slug: string; base_url: string; api_key: string }) => Promise<void>
+  create: (input: { name: string; slug: string; base_url: string; api_key?: string }) => Promise<void>
 }) {
+  const [requiresKey, setRequiresKey] = useState(false)
+  const [showKey, setShowKey] = useState(false)
   return <div className="modal-backdrop"><section className="modal-panel provider-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-title">
     <header><div><span>OPENAI COMPATIBLE</span><h2 id="provider-title">Add model provider</h2></div><button className="close" onClick={close} aria-label="Close provider form">×</button></header>
     <form onSubmit={(event: FormEvent<HTMLFormElement>) => {
       event.preventDefault()
       const data = new FormData(event.currentTarget)
-      void create({ name: String(data.get('name')), slug: String(data.get('slug')), base_url: String(data.get('base_url')), api_key: String(data.get('api_key')) })
+      void create({
+        name: String(data.get('name')),
+        slug: String(data.get('slug')),
+        base_url: String(data.get('base_url')),
+        ...(requiresKey ? { api_key: String(data.get('api_key')) } : {}),
+      })
     }}>
       <label>Name<input name="name" required autoFocus placeholder="Local OMLX" /></label>
       <label>Pi provider ID<input name="slug" required pattern="[a-z][a-z0-9-]*" placeholder="omlx" /></label>
       <label>Base URL<input name="base_url" type="url" required placeholder="http://127.0.0.1:11435/v1" /></label>
-      <label>API key<input name="api_key" type="password" required autoComplete="new-password" /></label>
+      <label className="provider-auth"><input type="checkbox" checked={requiresKey} onChange={(event) => setRequiresKey(event.target.checked)} />Requires API key</label>
+      {requiresKey && <label>API key<span className="secret-field"><input name="api_key" type={showKey ? 'text' : 'password'} required autoComplete="new-password" /><button type="button" onClick={() => setShowKey((value) => !value)}>{showKey ? 'Hide' : 'Show'} API key</button></span></label>}
       <footer><button type="button" onClick={close}>Cancel</button><button className="primary" type="submit">Add provider</button></footer>
     </form>
   </section></div>

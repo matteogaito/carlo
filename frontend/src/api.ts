@@ -316,7 +316,7 @@ export interface Api {
   trustRunner(id: number, fingerprint: string): Promise<Runner>
   testRunner(id: number): Promise<Runner>
   listModelProviders(): Promise<ModelProvider[]>
-  createModelProvider(input: { name: string; slug: string; base_url: string; api_key: string }): Promise<ModelProvider>
+  createModelProvider(input: { name: string; slug: string; base_url: string; api_key?: string }): Promise<ModelProvider>
   updateModelProvider(id: number, input: Partial<ModelProvider> & { api_key?: string }): Promise<ModelProvider>
   deleteModelProvider(id: number): Promise<void>
   refreshModelProvider(id: number): Promise<void>

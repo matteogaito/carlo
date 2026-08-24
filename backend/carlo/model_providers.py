@@ -123,20 +123,7 @@ async def resolve_agent_profile(
     compaction = calculate_compaction(
         context_window, max_tokens, reserve_percent, keep_recent_percent
     )
-    if (
-        cipher is None
-        or provider.credential_ciphertext is None
-        or provider.credential_nonce is None
-    ):
-        raise ModelProviderError("selected model provider credential is not configured")
-    try:
-        api_key = cipher.decrypt(
-            provider.credential_ciphertext, provider.credential_nonce
-        )
-    except (InvalidTag, UnicodeDecodeError) as error:
-        raise ModelProviderError(
-            "selected model provider credential could not be decrypted"
-        ) from error
+    api_key = _provider_api_key(provider, cipher, selected=True)
     compatibility = dict(provider.compatibility)
     api = str(compatibility.pop("api", "openai-completions"))
     return AgentProfile(
@@ -251,7 +238,7 @@ def parse_openai_models(payload: Any) -> list[DiscoveredModel]:
 
 
 async def fetch_openai_models(
-    provider: ModelProvider, api_key: str
+    provider: ModelProvider, api_key: str | None
 ) -> list[DiscoveredModel]:
     return parse_openai_models(
         await asyncio.to_thread(_fetch_json, provider.base_url, api_key)
@@ -260,11 +247,11 @@ async def fetch_openai_models(
 
 async def refresh_model_provider(
     factory: async_sessionmaker[AsyncSession],
-    cipher: CredentialCipher,
+    cipher: CredentialCipher | None,
     provider_id: int,
     *,
     fetcher: Callable[
-        [ModelProvider, str], Awaitable[list[DiscoveredModel]]
+        [ModelProvider, str | None], Awaitable[list[DiscoveredModel]]
     ] = fetch_openai_models,
     now: datetime | None = None,
 ) -> ModelRefreshResult:
@@ -276,19 +263,12 @@ async def refresh_model_provider(
                 raise ModelProviderError("model provider not found")
             if not provider.active:
                 raise ModelProviderError("model provider is inactive")
-            if provider.credential_ciphertext is None or provider.credential_nonce is None:
-                raise ModelProviderError("model provider credential is not configured")
-            api_key = cipher.decrypt(
-                provider.credential_ciphertext, provider.credential_nonce
-            )
+            api_key = _provider_api_key(provider, cipher)
             provider.last_refresh_attempt_at = now
             await session.commit()
-    except (InvalidTag, UnicodeDecodeError) as error:
-        message = ModelProviderError(
-            "model provider credential could not be decrypted"
-        )
-        await _record_refresh_failure(factory, provider_id, now, message)
-        raise message from error
+    except ModelProviderError as error:
+        await _record_refresh_failure(factory, provider_id, now, error)
+        raise
 
     try:
         discovered = await fetcher(provider, api_key)
@@ -378,11 +358,11 @@ async def refresh_model_provider(
 
 async def refresh_due_model_providers(
     factory: async_sessionmaker[AsyncSession],
-    cipher: CredentialCipher,
+    cipher: CredentialCipher | None,
     *,
     now: datetime | None = None,
     fetcher: Callable[
-        [ModelProvider, str], Awaitable[list[DiscoveredModel]]
+        [ModelProvider, str | None], Awaitable[list[DiscoveredModel]]
     ] = fetch_openai_models,
 ) -> int:
     now = now or datetime.now(UTC)
@@ -434,12 +414,13 @@ async def _record_refresh_failure(
         await session.commit()
 
 
-def _fetch_json(base_url: str, api_key: str) -> Any:
+def _fetch_json(base_url: str, api_key: str | None) -> Any:
     url = f"{base_url.rstrip('/')}/models"
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ModelProviderError("model provider URL must be HTTP(S)")
-    request = Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    request = Request(url, headers=headers)
     try:
         with urlopen(request, timeout=15) as response:
             body = response.read(MODEL_CATALOG_LIMIT + 1)
@@ -459,3 +440,24 @@ def _first_positive_integer(value: dict[str, Any], *keys: str) -> int | None:
         if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
             return candidate
     return None
+
+
+def _provider_api_key(
+    provider: ModelProvider,
+    cipher: CredentialCipher | None,
+    *,
+    selected: bool = False,
+) -> str | None:
+    prefix = "selected model provider" if selected else "model provider"
+    ciphertext = provider.credential_ciphertext
+    nonce = provider.credential_nonce
+    if ciphertext is None and nonce is None:
+        return None
+    if ciphertext is None or nonce is None:
+        raise ModelProviderError(f"{prefix} credential configuration is incomplete")
+    if cipher is None:
+        raise ModelProviderError("credential encryption is not configured")
+    try:
+        return cipher.decrypt(ciphertext, nonce)
+    except (InvalidTag, UnicodeDecodeError) as error:
+        raise ModelProviderError(f"{prefix} credential could not be decrypted") from error

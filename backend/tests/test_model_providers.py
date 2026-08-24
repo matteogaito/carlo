@@ -160,6 +160,33 @@ async def test_refresh_retains_missing_models_and_updates_single_default(
 
 
 @pytest.mark.asyncio
+async def test_refresh_keyless_provider_does_not_require_a_cipher(model_factory) -> None:
+    module = importlib.import_module("carlo.model_providers")
+    async with model_factory() as session:
+        provider = models.ModelProvider(
+            name="Keyless Local",
+            slug="keyless",
+            kind="openai-compatible",
+            base_url="http://127.0.0.1:11435/v1",
+        )
+        session.add(provider)
+        await session.commit()
+        provider_id = provider.id
+
+    async def fetcher(_provider, api_key):
+        assert api_key is None
+        return module.parse_openai_models(
+            {"data": [{"id": "local", "max_model_len": 65_536, "max_tokens": 8_192}]}
+        )
+
+    result = await module.refresh_model_provider(
+        model_factory, None, provider_id, fetcher=fetcher
+    )
+
+    assert result.seen == 1
+
+
+@pytest.mark.asyncio
 async def test_periodic_refresh_only_runs_due_active_providers(model_factory) -> None:
     module = importlib.import_module("carlo.model_providers")
     assert hasattr(module, "refresh_due_model_providers"), (

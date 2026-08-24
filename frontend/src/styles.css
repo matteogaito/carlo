@@ -382,6 +382,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .profile-list label { display: grid; gap: 5px; color: #657169; font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
 .profile-list select { width: 100%; border: 1px solid #98a39c; padding: 9px; color: var(--ink); background: white; text-transform: none; }
 .provider-dialog form { display: grid; gap: 14px; padding: 20px 24px 0; }
+.provider-dialog .provider-auth { grid-template-columns: auto 1fr; align-items: center; }
+.provider-dialog .provider-auth input { width: 18px; height: 18px; accent-color: var(--pine); }
+.provider-dialog .secret-field { display: grid; grid-template-columns: 1fr auto; }
+.provider-dialog .secret-field button { border-left: 0; white-space: nowrap; }
 .provider-dialog form footer { display: flex; justify-content: end; gap: 8px; margin: 6px -24px 0; padding: 16px 24px 22px; border-top: 1px solid var(--line); }
 
 @keyframes slow-pulse { 50% { opacity: .48; transform: scale(.84); } }

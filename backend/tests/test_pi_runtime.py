@@ -70,3 +70,34 @@ def test_pi_runtime_cleanup_only_removes_its_temporary_files(tmp_path: Path) -> 
 
     assert not temporary.exists()
     assert (snapshot / "manifest.json").exists()
+
+
+def test_pi_runtime_uses_non_secret_placeholder_for_keyless_provider(
+    tmp_path: Path,
+) -> None:
+    runtime = importlib.import_module("carlo.pi_runtime")
+    provider = importlib.import_module("carlo.provider")
+    model = provider.ResolvedModel(
+        model_provider_id=1,
+        available_model_id=2,
+        provider_slug="omlx",
+        base_url="http://127.0.0.1:11435/v1",
+        api="openai-completions",
+        external_id="qwen",
+        display_name="Qwen",
+        api_key=None,
+        compatibility={},
+        input_modalities=("text",),
+        reasoning=True,
+        context_window=65_536,
+        max_tokens=16_384,
+        compaction_enabled=True,
+        reserve_tokens=16_384,
+        keep_recent_tokens=13_107,
+    )
+
+    snapshot = runtime.PiRuntimeSnapshotBuilder(tmp_path).materialize("keyless", model)
+
+    assert snapshot.environment == {}
+    configured = json.loads((snapshot.agent_dir / "models.json").read_text())
+    assert configured["providers"]["omlx"]["apiKey"] == "carlo-keyless"

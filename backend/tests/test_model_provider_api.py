@@ -92,6 +92,37 @@ async def test_model_provider_api_encrypts_and_never_returns_credentials(
 
 
 @pytest.mark.asyncio
+async def test_model_provider_api_accepts_keyless_local_endpoint(settings_app) -> None:
+    app, factory, _ = settings_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        response = await client.post(
+            "/api/settings/model-providers",
+            headers={"Origin": "http://test"},
+            json={
+                "name": "Keyless OMLX",
+                "slug": "keyless-omlx",
+                "base_url": "http://127.0.0.1:11435/v1",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["credential_configured"] is False
+    async with factory() as session:
+        provider = await session.scalar(
+            select(ModelProvider).where(ModelProvider.slug == "keyless-omlx")
+        )
+        assert provider is not None
+        assert provider.credential_ciphertext is None
+        assert provider.credential_nonce is None
+
+
+@pytest.mark.asyncio
 async def test_model_and_pi_settings_api_exposes_effective_context_preview(
     settings_app,
 ) -> None:

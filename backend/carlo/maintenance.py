@@ -150,16 +150,15 @@ async def run_maintenance_cycle(
     now: datetime | None = None,
     model_fetcher=fetch_openai_models,
 ) -> None:
-    if credential_cipher is not None:
-        try:
-            await refresh_due_model_providers(
-                factory,
-                credential_cipher,
-                now=now,
-                fetcher=model_fetcher,
-            )
-        except Exception:
-            logger.exception("model provider refresh cycle failed")
+    try:
+        await refresh_due_model_providers(
+            factory,
+            credential_cipher,
+            now=now,
+            fetcher=model_fetcher,
+        )
+    except Exception:
+        logger.exception("model provider refresh cycle failed")
     try:
         await update_pi_if_due(
             factory, npm_executable, pi_executable, lock_path, now=now

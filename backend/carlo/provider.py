@@ -27,7 +27,7 @@ class ResolvedModel:
     api: str
     external_id: str
     display_name: str
-    api_key: str
+    api_key: str | None
     compatibility: dict[str, Any]
     input_modalities: tuple[str, ...]
     reasoning: bool

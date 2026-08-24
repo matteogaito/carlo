@@ -546,6 +546,32 @@ describe('CARLO board', () => {
     expect(setTaskModel).toHaveBeenCalledWith('CAR-1', 7)
   })
 
+  it('only asks for a provider API key when authentication is enabled', async () => {
+    const createModelProvider = vi.fn(async () => ({
+      id: 1, name: 'Local', slug: 'local', kind: 'openai-compatible' as const,
+      base_url: 'http://127.0.0.1:11435/v1', credential_configured: false,
+      credential_hint: null, compatibility: {}, refresh_interval_minutes: 15,
+      last_refresh_status: 'NEVER', last_refresh_error: null,
+      default_model_id: null, active: true,
+    }))
+    render(<App api={{ ...api, createModelProvider }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Settings' }))
+    await userEvent.click(await screen.findByRole('button', { name: '+ Provider' }))
+    expect(screen.queryByLabelText('API key')).toBeNull()
+    await userEvent.click(screen.getByLabelText('Requires API key'))
+    expect(screen.getByLabelText('API key')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Show API key' })).toBeTruthy()
+    await userEvent.click(screen.getByLabelText('Requires API key'))
+    await userEvent.type(screen.getByLabelText('Name'), 'Local')
+    await userEvent.type(screen.getByLabelText('Pi provider ID'), 'local')
+    await userEvent.type(screen.getByLabelText('Base URL'), 'http://127.0.0.1:11435/v1')
+    await userEvent.click(screen.getByRole('button', { name: 'Add provider' }))
+    expect(createModelProvider).toHaveBeenCalledWith({
+      name: 'Local', slug: 'local', base_url: 'http://127.0.0.1:11435/v1',
+    })
+  })
+
   it('continues a persistent Discovery conversation', async () => {
     const discovery: Discovery = {
       id: 7, project_id: 1, title: 'CSV direction', status: 'OPEN',
