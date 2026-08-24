@@ -481,7 +481,7 @@ describe('CARLO board', () => {
       base_url: 'http://127.0.0.1:11435/v1', credential_configured: true,
       credential_hint: '…ocal', compatibility: {}, refresh_interval_minutes: 15,
       last_refresh_status: 'SUCCESS', last_refresh_error: null,
-      default_model_id: 2, active: true,
+      default_model_id: null, active: true,
     }
     const model: AvailableModel = {
       id: 2, model_provider_id: 1, model_provider_name: 'Local OMLX',
@@ -497,6 +497,10 @@ describe('CARLO board', () => {
       model_provider_id: 1, available_model_id: null,
     }
     const refreshModelProvider = vi.fn(async () => undefined)
+    const updateModelProvider = vi.fn(async () => {
+      provider.default_model_id = 2
+      return provider
+    })
     const updateAgentProfile = vi.fn(async () => profile)
     render(<App api={{
       ...api,
@@ -504,6 +508,7 @@ describe('CARLO board', () => {
       listModels: async () => [model],
       listAgentProfiles: async () => [profile],
       refreshModelProvider,
+      updateModelProvider,
       updateAgentProfile,
     }} />)
 
@@ -511,6 +516,10 @@ describe('CARLO board', () => {
     expect(await screen.findByRole('heading', { name: 'Model providers' })).toBeTruthy()
     expect(screen.getAllByText('Qwen3.8-27B').length).toBeGreaterThan(0)
     expect(screen.getByText('16,384 reserved')).toBeTruthy()
+    expect(screen.queryByLabelText('Default model')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Use Qwen3.8-27B as default' }))
+    expect(updateModelProvider).toHaveBeenCalledWith(1, { default_model_id: 2 })
+    expect(await screen.findByText('Default')).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: 'Refresh Local OMLX' }))
     expect(refreshModelProvider).toHaveBeenCalledWith(1)
     await userEvent.click(screen.getByRole('button', { name: 'Coding agents' }))

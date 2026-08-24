@@ -346,8 +346,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .provider-card dl { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 7px 12px; margin: 0; padding: 14px 18px; font-size: 12px; }
 .provider-card dt { color: #748078; }
 .provider-card dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
-.provider-card > label { display: grid; gap: 5px; padding: 0 18px 14px; color: #647068; font: 700 9px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
-.provider-card select { width: 100%; border: 1px solid #98a39c; padding: 8px; color: var(--ink); background: white; text-transform: none; }
 .provider-card > footer { display: flex; justify-content: end; gap: 7px; padding: 12px 18px; border-top: 1px solid var(--line); }
 .provider-error { margin: 0 18px 13px; padding: 8px 10px; color: white; background: var(--fault); font-size: 12px; }
 .model-ledger { border-top: 1px solid var(--line); }
@@ -359,6 +357,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .model-row summary small { margin-top: 3px; color: #7b867f; font: 10px ui-monospace, monospace; }
 .model-row summary em { color: #8a4b14; font: 750 9px ui-monospace, monospace; letter-spacing: .06em; }
 .model-row summary em.available { color: var(--pine); }
+.model-row summary .model-row-state { display: flex; align-items: center; gap: 10px; }
+.model-row-state strong { color: white; background: var(--pine); padding: 5px 8px; font: 750 9px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.model-row-state button { border: 1px solid var(--pine); padding: 5px 8px; color: var(--pine); background: transparent; font: 700 10px "Avenir Next", ui-rounded, sans-serif; white-space: nowrap; }
 .model-row > div { padding: 0 18px 15px; background: #f7f8f5; border-top: 1px solid var(--line); }
 .model-row p { margin: 10px 0 0; color: #657169; font-size: 12px; }
 .model-row form { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: 8px; margin-top: 12px; }

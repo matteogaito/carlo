@@ -73,12 +73,8 @@ export function SettingsView({ api, event, setError }: {
               </header>
               <dl><dt>Endpoint</dt><dd>{provider.base_url}</dd><dt>Credential</dt><dd>{provider.credential_hint || 'Not required'}</dd><dt>Catalog</dt><dd>{catalog.length} models · {provider.last_refresh_status}</dd></dl>
               {provider.last_refresh_error && <p className="provider-error">{provider.last_refresh_error}</p>}
-              <label>Default model<select value={provider.default_model_id || ''} onChange={(change) => void action(() => api.updateModelProvider(provider.id, { default_model_id: Number(change.target.value) || null }))}>
-                <option value="">Choose a default</option>
-                {catalog.filter((model) => model.selectable).map((model) => <option value={model.id} key={model.id}>{model.display_name || model.external_id}</option>)}
-              </select></label>
               <div className="model-ledger">
-                {catalog.map((model) => <ModelRow key={model.id} model={model} api={api} action={action} />)}
+                {catalog.map((model) => <ModelRow key={model.id} model={model} isDefault={provider.default_model_id === model.id} api={api} action={action} setDefault={() => action(() => api.updateModelProvider(provider.id, { default_model_id: model.id }))} />)}
                 {!catalog.length && <p>No models loaded. Refresh this provider.</p>}
               </div>
               <footer>
@@ -100,13 +96,15 @@ export function SettingsView({ api, event, setError }: {
   </main>
 }
 
-function ModelRow({ model, api, action }: {
+function ModelRow({ model, isDefault, api, action, setDefault }: {
   model: AvailableModel
+  isDefault: boolean
   api: Api
   action: (operation: () => Promise<unknown>) => Promise<void>
+  setDefault: () => Promise<void>
 }) {
   return <details className="model-row">
-    <summary><span><b>{model.display_name || model.external_id}</b><small>{model.external_id}</small></span><em className={model.selectable ? 'available' : ''}>{model.status}</em></summary>
+    <summary><span><b>{model.display_name || model.external_id}</b><small>{model.external_id}</small></span><span className="model-row-state"><em className={model.selectable ? 'available' : ''}>{model.status}</em>{isDefault ? <strong>Default</strong> : model.selectable && <button type="button" aria-label={`Use ${model.display_name || model.external_id} as default`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void setDefault() }}>Use as default</button>}</span></summary>
     <div>
       <p>{formatTokens(model.effective_context_window)} context · {formatTokens(model.effective_max_tokens)} output</p>
       {model.reserve_tokens != null && <p><b>{model.reserve_tokens.toLocaleString()} reserved</b> · {model.keep_recent_tokens?.toLocaleString()} recent</p>}
