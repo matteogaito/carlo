@@ -4,6 +4,7 @@ import Markdown from 'react-markdown'
 import {
   AuthenticationRequired,
   httpApi,
+  type AvailableModel,
   type Api,
   type Event,
   type Plan,
@@ -14,6 +15,7 @@ import {
 } from './api'
 import { ActionsView } from './ActionsView'
 import { DiscoveriesView } from './DiscoveriesView'
+import { SettingsView } from './SettingsView'
 import './styles.css'
 
 const columns: { status: TaskStatus; label: string; code: string }[] = [
@@ -39,10 +41,11 @@ export function App({ api = httpApi }: { api?: Api }) {
   const [user, setUser] = useState<User | null>()
   const [projects, setProjects] = useState<Project[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
+  const [taskModels, setTaskModels] = useState<AvailableModel[]>([])
   const [selected, setSelected] = useState<Task | null>(null)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
-  const [view, setView] = useState<'board' | 'discoveries' | 'actions'>('board')
+  const [view, setView] = useState<'board' | 'discoveries' | 'actions' | 'settings'>('board')
   const [lastEvent, setLastEvent] = useState<Event | null>(null)
   const [installUpdate, setInstallUpdate] = useState<(() => void) | null>(null)
   const [detailWidth, setDetailWidth] = useState(() => Math.round(window.innerWidth / 2))
@@ -125,6 +128,16 @@ export function App({ api = httpApi }: { api?: Api }) {
     await act(() => api.startPlanning(task.id))
   }
 
+  async function openTask(taskId: string) {
+    try {
+      const [task, models] = await Promise.all([api.getTask(taskId), api.listModels()])
+      setSelected(task)
+      setTaskModels(models.filter((model) => model.selectable))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not open task')
+    }
+  }
+
   if (user === undefined) {
     return <main className="auth-shell"><p>Starting CARLO…</p></main>
   }
@@ -164,6 +177,7 @@ export function App({ api = httpApi }: { api?: Api }) {
         <button className={view === 'board' ? 'active' : ''} onClick={() => { setView('board'); setSelected(null) }}>Board</button>
         <button className={view === 'discoveries' ? 'active' : ''} onClick={() => { setView('discoveries'); setSelected(null) }}>Discoveries</button>
         <button className={view === 'actions' ? 'active' : ''} onClick={() => { setView('actions'); setSelected(null) }}>Actions</button>
+        <button className={view === 'settings' ? 'active' : ''} onClick={() => { setView('settings'); setSelected(null) }}>Settings</button>
       </nav>
       {view === 'board' && <CreateStrip api={api} projects={projects} refresh={refresh} setError={setError} onTaskCreated={beginPlanning} />}
       {error && <div className="error-banner" role="alert">{error}</div>}
@@ -185,7 +199,7 @@ export function App({ api = httpApi }: { api?: Api }) {
                     <button
                       className={task.status === 'IN_PROGRESS' ? 'task-card running' : 'task-card'}
                       key={task.id}
-                      onClick={() => void api.getTask(task.id).then(setSelected)}
+                      onClick={() => void openTask(task.id)}
                       aria-label={`${task.id} ${task.title}`}
                     >
                       <span className="task-id">{task.id}</span>
@@ -211,11 +225,13 @@ export function App({ api = httpApi }: { api?: Api }) {
               api.approvePlan(selected.id, selected.plan!.revision, selected.version)
             )}
             answerPlanning={(answer) => void act(() => api.answerPlanning(selected.id, answer))}
+            models={taskModels}
+            setModel={(modelId) => void act(() => api.setTaskModel(selected.id, modelId))}
             width={detailWidth}
             resize={setDetailWidth}
           />
         )}
-      </main> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} /> : <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} />}
+      </main> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} /> : view === 'actions' ? <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} /> : <SettingsView api={api} event={lastEvent} setError={setError} />}
     </div>
   )
 }
@@ -375,13 +391,15 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, rework, approve, answerPlanning, width, resize }: {
+function TaskDetail({ task, close, startPlanning, rework, approve, answerPlanning, models, setModel, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
   rework: () => void
   approve: () => void
   answerPlanning: (answer: string) => void
+  models: AvailableModel[]
+  setModel: (modelId: number | null) => void
   width: number
   resize: (width: number) => void
 }) {
@@ -434,6 +452,10 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
           {task.status === 'IN_PROGRESS' && task.stage === 'blocked' && Boolean(task.plan?.metadata.amendment) && <button onClick={approve}>Approve amendment</button>}
           {task.status === 'FAILED' && <button onClick={rework}>Rework from original request</button>}
         </nav>
+        {!['IN_PROGRESS', 'TEST', 'DONE'].includes(task.status) && <label className="task-model-select">Task model<select value={task.available_model_id || ''} onChange={(event) => setModel(Number(event.target.value) || null)}>
+          <option value="">Use agent profile</option>
+          {models.map((model) => <option key={model.id} value={model.id}>{model.model_provider_name} · {model.display_name || model.external_id}</option>)}
+        </select></label>}
       </div>
       {task.stage === 'planning' && !task.planning_question && <section className="planning-live" aria-live="polite">
         <h3>Pi is planning</h3>

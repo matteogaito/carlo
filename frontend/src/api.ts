@@ -66,6 +66,7 @@ export interface Task {
   worktree_path: string | null
   checkpoint_sha: string | null
   planning_question: { text: string } | null
+  available_model_id?: number | null
   used_skills?: string[]
   plan: Plan | null
   attempts?: {
@@ -230,6 +231,59 @@ export interface Runner {
   last_checked_at?: string | null
 }
 
+export interface ModelProvider {
+  id: number
+  name: string
+  slug: string
+  kind: 'openai-compatible'
+  base_url: string
+  credential_configured: boolean
+  credential_hint: string | null
+  compatibility: Record<string, unknown>
+  refresh_interval_minutes: number
+  last_refresh_status: string
+  last_refresh_error: string | null
+  default_model_id: number | null
+  active: boolean
+}
+
+export interface AvailableModel {
+  id: number
+  model_provider_id: number
+  model_provider_name: string | null
+  external_id: string
+  display_name: string | null
+  status: 'AVAILABLE' | 'UNAVAILABLE'
+  discovered_context_window: number | null
+  discovered_max_tokens: number | null
+  context_window_override: number | null
+  max_tokens_override: number | null
+  effective_context_window: number | null
+  effective_max_tokens: number | null
+  reserve_tokens: number | null
+  keep_recent_tokens: number | null
+  selectable: boolean
+}
+
+export interface PiSettings {
+  compaction_enabled: boolean
+  reserve_percent: number
+  keep_recent_percent: number
+}
+
+export interface AgentProfileSettings {
+  name: string
+  provider: string
+  model: string | null
+  effort: string | null
+  permissions: Record<string, unknown>
+  default_skills: string[]
+  context_policy: Record<string, unknown>
+  active: boolean
+  model_provider_id: number | null
+  available_model_id: number | null
+}
+
 export interface Api {
   me(): Promise<User>
   login(username: string, password: string): Promise<User>
@@ -261,6 +315,18 @@ export interface Api {
   updateRunner(id: number, input: Partial<Runner>): Promise<Runner>
   trustRunner(id: number, fingerprint: string): Promise<Runner>
   testRunner(id: number): Promise<Runner>
+  listModelProviders(): Promise<ModelProvider[]>
+  createModelProvider(input: { name: string; slug: string; base_url: string; api_key: string }): Promise<ModelProvider>
+  updateModelProvider(id: number, input: Partial<ModelProvider> & { api_key?: string }): Promise<ModelProvider>
+  deleteModelProvider(id: number): Promise<void>
+  refreshModelProvider(id: number): Promise<void>
+  listModels(): Promise<AvailableModel[]>
+  updateModel(id: number, input: { context_window_override?: number | null; max_tokens_override?: number | null }): Promise<AvailableModel>
+  getPiSettings(): Promise<PiSettings>
+  updatePiSettings(input: Partial<PiSettings>): Promise<PiSettings>
+  listAgentProfiles(): Promise<AgentProfileSettings[]>
+  updateAgentProfile(name: string, input: Partial<AgentProfileSettings>): Promise<AgentProfileSettings>
+  setTaskModel(id: string, availableModelId: number | null): Promise<Task>
   events(
     onEvent: (event: Event) => void,
     onStatus?: (connected: boolean) => void,
@@ -325,6 +391,30 @@ export const httpApi: Api = {
     method: 'POST', body: JSON.stringify({ fingerprint }),
   }),
   testRunner: (id) => request(`/api/runners/${id}/test`, { method: 'POST' }),
+  listModelProviders: () => request('/api/settings/model-providers'),
+  createModelProvider: (input) => request('/api/settings/model-providers', {
+    method: 'POST', body: JSON.stringify(input),
+  }),
+  updateModelProvider: (id, input) => request(`/api/settings/model-providers/${id}`, {
+    method: 'PATCH', body: JSON.stringify(input),
+  }),
+  deleteModelProvider: (id) => request(`/api/settings/model-providers/${id}`, { method: 'DELETE' }),
+  refreshModelProvider: (id) => request(`/api/settings/model-providers/${id}/refresh`, { method: 'POST' }),
+  listModels: () => request('/api/settings/models'),
+  updateModel: (id, input) => request(`/api/settings/models/${id}`, {
+    method: 'PATCH', body: JSON.stringify(input),
+  }),
+  getPiSettings: () => request('/api/settings/pi'),
+  updatePiSettings: (input) => request('/api/settings/pi', {
+    method: 'PATCH', body: JSON.stringify(input),
+  }),
+  listAgentProfiles: () => request('/api/agent-profiles'),
+  updateAgentProfile: (name, input) => request(`/api/agent-profiles/${encodeURIComponent(name)}`, {
+    method: 'PATCH', body: JSON.stringify(input),
+  }),
+  setTaskModel: (id, availableModelId) => request(`/api/tasks/${id}/model`, {
+    method: 'PATCH', body: JSON.stringify({ available_model_id: availableModelId }),
+  }),
   events(onEvent, onStatus, onAuthenticationRequired) {
     let closed = false
     let socket: WebSocket | undefined

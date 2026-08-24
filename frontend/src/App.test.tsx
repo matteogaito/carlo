@@ -9,9 +9,12 @@ import {
   AuthenticationRequired,
   type ActionCatalog,
   type ActionRun,
+  type AgentProfileSettings,
+  type AvailableModel,
   type Api,
   type Discovery,
   type Project,
+  type ModelProvider,
   type Runner,
   type Task,
   type User,
@@ -83,6 +86,18 @@ const api: Api = {
   updateRunner: async () => { throw new Error('unused') },
   trustRunner: async () => { throw new Error('unused') },
   testRunner: async () => { throw new Error('unused') },
+  listModelProviders: async () => [],
+  createModelProvider: async () => { throw new Error('unused') },
+  updateModelProvider: async () => { throw new Error('unused') },
+  deleteModelProvider: async () => undefined,
+  refreshModelProvider: async () => undefined,
+  listModels: async () => [],
+  updateModel: async () => { throw new Error('unused') },
+  getPiSettings: async () => ({ compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20 }),
+  updatePiSettings: async () => ({ compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20 }),
+  listAgentProfiles: async () => [],
+  updateAgentProfile: async () => { throw new Error('unused') },
+  setTaskModel: async () => { throw new Error('unused') },
   events: () => () => undefined,
 }
 
@@ -458,6 +473,77 @@ describe('CARLO board', () => {
     await new Promise((resolve) => window.setTimeout(resolve, 200))
     expect(listProjects).not.toHaveBeenCalled()
     expect(listTasks).not.toHaveBeenCalled()
+  })
+
+  it('manages model providers, proportional Pi compaction and agent profiles', async () => {
+    const provider: ModelProvider = {
+      id: 1, name: 'Local OMLX', slug: 'omlx', kind: 'openai-compatible',
+      base_url: 'http://127.0.0.1:11435/v1', credential_configured: true,
+      credential_hint: '…ocal', compatibility: {}, refresh_interval_minutes: 15,
+      last_refresh_status: 'SUCCESS', last_refresh_error: null,
+      default_model_id: 2, active: true,
+    }
+    const model: AvailableModel = {
+      id: 2, model_provider_id: 1, model_provider_name: 'Local OMLX',
+      external_id: 'Qwen3.8-27B', display_name: 'Qwen3.8-27B', status: 'AVAILABLE',
+      discovered_context_window: 65536, discovered_max_tokens: 16384,
+      context_window_override: null, max_tokens_override: null,
+      effective_context_window: 65536, effective_max_tokens: 16384,
+      reserve_tokens: 16384, keep_recent_tokens: 13107, selectable: true,
+    }
+    const profile: AgentProfileSettings = {
+      name: 'implementation', provider: 'pi', model: null, effort: null,
+      permissions: {}, default_skills: [], context_policy: {}, active: true,
+      model_provider_id: 1, available_model_id: null,
+    }
+    const refreshModelProvider = vi.fn(async () => undefined)
+    const updateAgentProfile = vi.fn(async () => profile)
+    render(<App api={{
+      ...api,
+      listModelProviders: async () => [provider],
+      listModels: async () => [model],
+      listAgentProfiles: async () => [profile],
+      refreshModelProvider,
+      updateAgentProfile,
+    }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Settings' }))
+    expect(await screen.findByRole('heading', { name: 'Model providers' })).toBeTruthy()
+    expect(screen.getAllByText('Qwen3.8-27B').length).toBeGreaterThan(0)
+    expect(screen.getByText('16,384 reserved')).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh Local OMLX' }))
+    expect(refreshModelProvider).toHaveBeenCalledWith(1)
+    await userEvent.click(screen.getByRole('button', { name: 'Coding agents' }))
+    await userEvent.selectOptions(screen.getByLabelText('Model for implementation'), 'model:2')
+    await userEvent.click(screen.getByRole('button', { name: 'Save implementation' }))
+    expect(updateAgentProfile).toHaveBeenCalledWith('implementation', {
+      model_provider_id: null,
+      available_model_id: 2,
+    })
+  })
+
+  it('sets a concrete model override before task execution', async () => {
+    const pending = { ...task, status: 'NOT_READY' as const, stage: 'created', available_model_id: null }
+    const model: AvailableModel = {
+      id: 7, model_provider_id: 3, model_provider_name: 'OpenRouter',
+      external_id: 'openai/gpt-5.6-sol', display_name: 'GPT-5.6 Sol', status: 'AVAILABLE',
+      discovered_context_window: 262144, discovered_max_tokens: 32768,
+      context_window_override: null, max_tokens_override: null,
+      effective_context_window: 262144, effective_max_tokens: 32768,
+      reserve_tokens: 32768, keep_recent_tokens: 52428, selectable: true,
+    }
+    const setTaskModel = vi.fn(async () => ({ ...pending, available_model_id: 7 }))
+    render(<App api={{
+      ...api,
+      listTasks: async () => [pending],
+      getTask: async () => pending,
+      listModels: async () => [model],
+      setTaskModel,
+    }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    await userEvent.selectOptions(await screen.findByLabelText('Task model'), '7')
+    expect(setTaskModel).toHaveBeenCalledWith('CAR-1', 7)
   })
 
   it('continues a persistent Discovery conversation', async () => {
