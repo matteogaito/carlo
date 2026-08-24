@@ -356,6 +356,9 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
             session, profile, cipher, task_model_id=override.id
         )
         plan_resolved = await module.resolve_agent_profile(session, plan_profile, cipher)
+        historical = await module.resolve_agent_profile(
+            session, plan_profile, cipher, extra_skills=("ponytail",)
+        )
 
         assert resolved.resolved_model.external_id == "qwen"
         assert resolved.resolved_model.api_key == "runtime-secret"
@@ -369,6 +372,8 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
             "carlo-ui-design",
         )
         assert plan_resolved.packages == ("superpowers", "ponytail")
+        assert historical.packages == ("superpowers", "ponytail")
+        assert "ponytail" not in historical.skills
 
 
 @pytest.mark.asyncio

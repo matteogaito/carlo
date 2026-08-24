@@ -47,6 +47,19 @@ def available_profile_packages() -> set[str]:
     return set(MANAGED_PROFILE_PACKAGES)
 
 
+def partition_plan_resources(
+    names: tuple[str, ...],
+    package_names: set[str],
+    skill_names: set[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    packages = tuple(dict.fromkeys(name for name in names if name in package_names))
+    skills = tuple(dict.fromkeys(name for name in names if name in skill_names))
+    unknown = sorted(set(names) - package_names - skill_names)
+    if unknown:
+        raise ModelProviderError(f"plan has unknown resources: {', '.join(unknown)}")
+    return packages, skills
+
+
 @dataclass(frozen=True, slots=True)
 class EncryptedCredential:
     ciphertext: bytes
@@ -107,11 +120,15 @@ async def resolve_agent_profile(
 
     tools = tuple(record.permissions.get("tools") or default_tools)
     runtime = await session.get(PiRuntimeSettings, 1)
+    plan_packages, plan_skills = partition_plan_resources(
+        extra_skills, available_profile_packages(), available_profile_skills()
+    )
     packages = tuple(
         dict.fromkeys(
             (
                 *(runtime.default_packages if runtime else DEFAULT_PROFILE_PACKAGES),
                 *record.default_packages,
+                *plan_packages,
             )
         )
     )
@@ -126,7 +143,7 @@ async def resolve_agent_profile(
                 *REQUIRED_PROFILE_SKILLS.get(record.name, ()),
                 *(runtime.default_skills if runtime else ()),
                 *record.default_skills,
-                *extra_skills,
+                *plan_skills,
             )
         )
     )
