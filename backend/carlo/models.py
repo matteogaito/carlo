@@ -320,6 +320,39 @@ class PiRuntimeSettings(TimestampMixin, Base):
     default_skills: Mapped[list[str]] = mapped_column(JSONB, default=list)
 
 
+class PiPackage(TimestampMixin, Base):
+    __tablename__ = "pi_packages"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    source: Mapped[str] = mapped_column(Text)
+    identity: Mapped[str] = mapped_column(String(255), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    active_version: Mapped[str | None] = mapped_column(String(255))
+    active_artifact_path: Mapped[str | None] = mapped_column(Text)
+    resources: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    last_update_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_update_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_update_status: Mapped[str] = mapped_column(String(20), default="NEVER")
+    last_update_error: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentProfilePackage(Base):
+    __tablename__ = "agent_profile_packages"
+
+    agent_profile_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_profiles.id", ondelete="CASCADE"), primary_key=True
+    )
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("pi_packages.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
 class AgentProfile(TimestampMixin, Base):
     __tablename__ = "agent_profiles"
 
