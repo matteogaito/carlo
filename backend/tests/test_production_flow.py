@@ -55,6 +55,7 @@ def test_production_template_and_commands_are_complete() -> None:
         "CARLO_TELEGRAM_BOT_TOKEN",
         "CARLO_TELEGRAM_CHAT_ID",
         "CARLO_TELEGRAM_LEVEL",
+        "CARLO_CREDENTIAL_ENCRYPTION_KEY",
     }
     configured = {
         line.split("=", 1)[0]
@@ -88,6 +89,8 @@ def test_macos_installer_creates_boot_daemons_for_service_user() -> None:
     assert "existing_hidden" not in installer
     assert "<key>GroupName</key><string>$service_group</string>" in installer
     assert '<key>PATH</key><string>$(/usr/bin/dirname "$NPM_BIN"):$SERVICE_HOME/.npm-global/bin:' in installer
+    assert "ensure_encryption_key" in installer
+    assert "/usr/bin/openssl rand -base64 32" in installer
 
 
 def test_production_validation_rejects_placeholders_and_missing_build(

@@ -29,7 +29,8 @@ PostgreSQL owns lifecycle state; Git owns source changes and checkpoints.
   shell, and network-only API/chat traffic;
 - in-application administrator login with durable revocable sessions;
 - restart-safe Telegram notifications for informational and blocking events;
-- configurable provider/model/effort/tool profiles.
+- encrypted, CARLO-managed OpenAI-compatible model providers, synchronized
+  catalogs, proportional Pi compaction, and per-session runtime snapshots.
 
 For now, a task becomes **Done when every approved local validation command
 passes**. Strong final review, merge into `carlo-Dev`, and integration pipelines
@@ -41,7 +42,7 @@ are intentionally deferred.
 - PostgreSQL
 - Node.js and npm
 - Git
-- the `pi` CLI, plus credentials/models configured for Pi
+- the `pi` CLI; CARLO supplies model definitions and credentials to each session
 
 ## Local setup
 
@@ -49,6 +50,7 @@ are intentionally deferred.
 createdb carlov3
 createdb carlov3_test
 cp .env.example .env
+# Replace the key placeholder with: openssl rand -base64 32
 set -a && source .env && set +a
 make install
 make migrate
@@ -58,24 +60,18 @@ make bootstrap-admin
 The databases already exist on the original development host. `carlov3_test` is
 destructive test-only storage; never point `CARLO_DATABASE_URL` at production.
 
-Start the API, log in once with curl, then configure the seeded profiles. Model
-assignments are data, not hardcoded domain behavior:
+After login, open **Settings → Models**, add each OpenAI-compatible endpoint,
+refresh its catalog, and choose a default. Under **Coding agents**, assign a
+provider default or concrete model to `plan`, `implementation`, `discovery`,
+and the other profiles. Existing Pi model strings remain available only as a
+legacy migration path.
 
-```bash
-curl -c /tmp/carlo-cookie -X POST http://localhost:8000/api/auth/login \
-  -H 'content-type: application/json' \
-  -d '{"username":"admin","password":"change-this-password"}'
-
-curl -X PATCH http://localhost:8000/api/agent-profiles/plan \
-  -b /tmp/carlo-cookie -H 'origin: http://localhost:5173' \
-  -H 'content-type: application/json' \
-  -d '{"model":"openai/gpt-5","effort":"high"}'
-
-curl -X PATCH http://localhost:8000/api/agent-profiles/implementation \
-  -b /tmp/carlo-cookie -H 'origin: http://localhost:5173' \
-  -H 'content-type: application/json' \
-  -d '{"model":"your-kat-model","effort":"high"}'
-```
+CARLO encrypts provider keys in PostgreSQL using
+`CARLO_CREDENTIAL_ENCRYPTION_KEY`. Never rotate that key without first
+re-encrypting the stored credentials. Pi receives only the selected model in an
+isolated snapshot below `CARLO_ARTIFACT_ROOT/pi-runtime/<session-id>`; the API
+key exists only in the child process environment. Personal
+`~/.pi/agent/models.json` and `settings.json` do not affect managed sessions.
 
 Use separate terminals:
 
@@ -148,7 +144,9 @@ cp .env.production.example .env.production
 
 Edit `.env.production` and replace every `CHANGE_ME`, `VPN_IP_OR_HOSTNAME`, and
 `/ABSOLUTE/PATH`. `CARLO_APP_ORIGIN` must exactly match the URL opened in the
-browser. Then install, migrate, bootstrap the only administrator, and build:
+browser. Generate `CARLO_CREDENTIAL_ENCRYPTION_KEY` with
+`openssl rand -base64 32`. Then install, migrate, bootstrap the only
+administrator, and build:
 
 ```bash
 set -a && source .env.production && set +a
@@ -198,6 +196,8 @@ installs dependencies, builds the UI, migrates PostgreSQL, bootstraps the admin,
 and installs/starts the API and worker daemons. With the default local database
 URL it also creates the PostgreSQL login `carlo`, assigns ownership of the
 dedicated `carlov3` database to it, and applies migrations as that account.
+If the encryption key is missing or still a placeholder, `install-mac`
+generates it once in that protected file. Existing real keys are never changed.
 
 ```bash
 make uninstall-mac
@@ -223,7 +223,7 @@ React PWA ──HTTP/WebSocket──> FastAPI ──SQLAlchemy──> PostgreSQL
                               └── persisted events ──┘
 
 async worker ──global DB lock──> one task ──> Git worktree
-                                      ├─────> Pi provider
+                                      ├─────> Pi provider + isolated model snapshot
                                       └─────> local validation
 
 async worker ──Discovery queue──> Pi RPC sessions (max 3/project)

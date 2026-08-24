@@ -80,6 +80,34 @@ else
     /usr/sbin/chown "$SERVICE_USER:$service_group" "$CONFIG_FILE"
 fi
 
+ensure_encryption_key() {
+    current_key="$(/usr/bin/sed -n 's/^CARLO_CREDENTIAL_ENCRYPTION_KEY=//p' "$CONFIG_FILE" | /usr/bin/tail -n 1)"
+    if [[ -n "$current_key" && "$current_key" != *CHANGE_ME* ]]; then
+        return
+    fi
+    generated_key="$(/usr/bin/openssl rand -base64 32)"
+    [[ -n "$generated_key" ]] || die "could not generate credential encryption key"
+    temporary_config="$(/usr/bin/mktemp "$CONFIG_FILE.tmp.XXXXXX")"
+    /usr/bin/awk -v replacement="$generated_key" '
+        BEGIN { found = 0 }
+        /^CARLO_CREDENTIAL_ENCRYPTION_KEY=/ {
+            if (!found) print "CARLO_CREDENTIAL_ENCRYPTION_KEY=" replacement
+            found = 1
+            next
+        }
+        { print }
+        END {
+            if (!found) print "CARLO_CREDENTIAL_ENCRYPTION_KEY=" replacement
+        }
+    ' "$CONFIG_FILE" >"$temporary_config"
+    /bin/chmod 600 "$temporary_config"
+    /usr/sbin/chown "$SERVICE_USER:$service_group" "$temporary_config"
+    /bin/mv "$temporary_config" "$CONFIG_FILE"
+    unset current_key generated_key temporary_config
+}
+
+ensure_encryption_key
+
 /usr/bin/rsync -a \
     --exclude .git --exclude .worktrees --exclude .env --exclude .env.production \
     --exclude backend/.venv --exclude frontend/node_modules --exclude frontend/dist \
