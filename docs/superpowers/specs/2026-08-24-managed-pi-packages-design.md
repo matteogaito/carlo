@@ -50,8 +50,10 @@ vertical slice accepts npm and Git sources supported by Pi. Local filesystem
 package sources are excluded because they do not provide a portable update or
 recovery contract.
 
-`PiRuntimeSettings.default_packages` and profile package additions will refer
-to package records rather than names compiled into CARLO. Removing a package
+`PiPackage.is_default` is the single source of truth for global defaults;
+profile additions refer to package records through an association table.
+`PiRuntimeSettings.default_packages` remains only during one compatibility
+release and is no longer authoritative after migration. Removing a package
 from the global defaults affects only sessions created afterward. A package
 needed by an already-persisted task snapshot remains retained on disk.
 
