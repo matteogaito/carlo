@@ -83,7 +83,12 @@ def test_macos_installer_creates_boot_daemons_for_service_user() -> None:
     assert "/Library/LaunchDaemons/com.carlo.worker.plist" in installer
     assert "<key>UserName</key><string>carlo</string>" in installer
     assert "launchctl bootstrap system" in installer
-    assert "REASSIGN OWNED" in installer
+    assert "table_owners" in installer
+    assert "ALTER TABLE %I.%I OWNER TO carlo" in installer
+    assert "ALTER SEQUENCE %I.%I OWNER TO carlo" in installer
+    assert "ALTER TYPE %I.%I OWNER TO carlo" in installer
+    assert "(:5432)?/carlov3$" in installer
+    assert "(carlo(:[^@/]*)?@)?" in installer
     assert "/Users/carlo/.config/carlo/.env.production" in runner
     assert "source" not in installer
     assert "existing_hidden" not in installer

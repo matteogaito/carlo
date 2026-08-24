@@ -108,6 +108,47 @@ ensure_encryption_key() {
 
 ensure_encryption_key
 
+is_local_carlo_database() {
+    [[ "$1" == postgresql+psycopg:///carlov3 ]] ||
+        [[ "$1" =~ ^postgresql\+psycopg://(carlo(:[^@/]*)?@)?(localhost|127\.0\.0\.1)(:5432)?/carlov3$ ]]
+}
+
+transfer_public_ownership() {
+    owner="$1"
+    [[ "$owner" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || die "unsupported PostgreSQL owner: $owner"
+    /usr/bin/dscl . -read "/Users/$owner" >/dev/null 2>&1 ||
+        die "PostgreSQL owner $owner has no matching local account; transfer its public objects to carlo manually"
+    /usr/bin/sudo -u "$owner" "$PSQL_BIN" -v ON_ERROR_STOP=1 carlov3 -c '
+        DO $$
+        DECLARE item record;
+        BEGIN
+            FOR item IN
+                SELECT n.nspname, c.relname
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = '\''public'\'' AND c.relkind IN ('\''r'\'', '\''p'\'')
+                  AND pg_catalog.pg_get_userbyid(c.relowner) = current_user
+            LOOP
+                EXECUTE format('\''ALTER TABLE %I.%I OWNER TO carlo'\'', item.nspname, item.relname);
+            END LOOP;
+            FOR item IN
+                SELECT n.nspname, c.relname
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = '\''public'\'' AND c.relkind = '\''S'\''
+                  AND pg_catalog.pg_get_userbyid(c.relowner) = current_user
+            LOOP
+                EXECUTE format('\''ALTER SEQUENCE %I.%I OWNER TO carlo'\'', item.nspname, item.relname);
+            END LOOP;
+            FOR item IN
+                SELECT n.nspname, t.typname
+                FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+                WHERE n.nspname = '\''public'\'' AND t.typtype = '\''e'\''
+                  AND pg_catalog.pg_get_userbyid(t.typowner) = current_user
+            LOOP
+                EXECUTE format('\''ALTER TYPE %I.%I OWNER TO carlo'\'', item.nspname, item.typname);
+            END LOOP;
+        END $$;'
+}
+
 /usr/bin/rsync -a \
     --exclude .git --exclude .worktrees --exclude .env --exclude .env.production \
     --exclude backend/.venv --exclude frontend/node_modules --exclude frontend/dist \
@@ -120,7 +161,7 @@ UV_CACHE_DIR="$STATE_ROOT/uv-cache" "$UV_BIN" sync --project "$INSTALL_ROOT/back
 "$NPM_BIN" run build --prefix "$INSTALL_ROOT/frontend"
 
 database_url="$(/usr/bin/sed -n 's/^CARLO_DATABASE_URL=//p' "$CONFIG_FILE" | /usr/bin/tail -n 1)"
-if [[ "$database_url" == postgresql+psycopg:///carlov3 ]]; then
+if is_local_carlo_database "$database_url"; then
     [[ -x "$PSQL_BIN" ]] || die "psql was not found"
     caller="${SUDO_USER:-}"
     [[ -n "$caller" && "$caller" != root ]] || die "local PostgreSQL setup requires: sudo make install-mac"
@@ -129,13 +170,18 @@ if [[ "$database_url" == postgresql+psycopg:///carlov3 ]]; then
         "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'carlo') THEN CREATE ROLE carlo LOGIN; END IF; END \$\$;"
     /usr/bin/sudo -u "$caller" "$PSQL_BIN" -v ON_ERROR_STOP=1 postgres -c \
         'ALTER DATABASE carlov3 OWNER TO carlo;'
+    table_owners="$(/usr/bin/sudo -u "$caller" "$PSQL_BIN" -At -v ON_ERROR_STOP=1 carlov3 -c \
+        "SELECT owner FROM (SELECT pg_catalog.pg_get_userbyid(c.relowner) AS owner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S') UNION SELECT pg_catalog.pg_get_userbyid(t.typowner) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' AND t.typtype = 'e') owned WHERE owner <> 'carlo' ORDER BY owner;")"
+    while IFS= read -r table_owner; do
+        [[ -z "$table_owner" ]] || transfer_public_ownership "$table_owner"
+    done <<<"$table_owners"
     /usr/bin/sudo -u "$caller" "$PSQL_BIN" -v ON_ERROR_STOP=1 carlov3 -c \
-        "REASSIGN OWNED BY \"$caller\" TO carlo; ALTER SCHEMA public OWNER TO carlo;"
+        'ALTER SCHEMA public OWNER TO carlo;'
 fi
 
 /usr/bin/sudo -u "$SERVICE_USER" -H "$INSTALL_ROOT/scripts/run-mac-service.sh" migrate
 
-if [[ "$database_url" == postgresql+psycopg:///carlov3 ]]; then
+if is_local_carlo_database "$database_url"; then
     /usr/bin/sudo -u "$SERVICE_USER" "$PSQL_BIN" -v ON_ERROR_STOP=1 carlov3 -c \
         'GRANT USAGE, CREATE ON SCHEMA public TO carlo; GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO carlo; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO carlo; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO carlo; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO carlo;'
 fi

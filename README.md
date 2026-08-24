@@ -200,6 +200,8 @@ installs dependencies, builds the UI, migrates PostgreSQL, bootstraps the admin,
 and installs/starts the API and worker daemons. With the default local database
 URL it also creates the PostgreSQL login `carlo`, assigns ownership of the
 dedicated `carlov3` database to it, and applies migrations as that account.
+Authenticated `localhost` and `127.0.0.1` URLs receive the same ownership
+repair; the API, worker, and migrations still run as `carlo`, never as root.
 If the encryption key is missing or still a placeholder, `install-mac`
 generates it once in that protected file. Existing real keys are never changed.
 
