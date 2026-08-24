@@ -119,6 +119,26 @@ describe('CARLO board', () => {
     expect(detail.style.width).toBe('624px')
   })
 
+  it('collapses a long Markdown megaprompt without hiding its contents', async () => {
+    const megaprompt = `# Marketplace requirements\n\n${'Preserve every original requirement. '.repeat(30)}`
+    const prompted: Task = {
+      ...task,
+      goal: megaprompt,
+      prompt_path: 'prompts/2026-08-24-CAR-1-marketplace.md',
+    }
+    render(<App api={{ ...api, listTasks: async () => [prompted], getTask: async () => prompted }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    const summary = screen.getByText(/Markdown megaprompt · .* characters/)
+    const disclosure = summary.closest('details') as HTMLDetailsElement
+    expect(disclosure.open).toBe(false)
+
+    await userEvent.click(summary)
+    expect(disclosure.open).toBe(true)
+    expect(screen.getByRole('heading', { name: 'Marketplace requirements' })).toBeTruthy()
+    expect(screen.getByText(/Preserve every original requirement/)).toBeTruthy()
+  })
+
   it('summarizes a structured Plan and expands its implementation tasks', async () => {
     const planned: Task = {
       ...task,

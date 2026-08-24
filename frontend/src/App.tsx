@@ -24,6 +24,7 @@ const columns: { status: TaskStatus; label: string; code: string }[] = [
   { status: 'DONE', label: 'Done', code: 'CLEAR' },
   { status: 'FAILED', label: 'Failed', code: 'HALT' },
 ]
+const COLLAPSED_GOAL_LENGTH = 800
 
 function readText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -442,7 +443,7 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
           {planningEventLabel(event)}
         </p>)}
       </section>}
-      <section><h3>Goal</h3><TaskMarkdown>{task.goal}</TaskMarkdown></section>
+      <TaskGoal task={task} />
       {task.planning_question && <section className="planner-question">
         <h3>Planner question</h3>
         <p>{task.planning_question.text}</p>
@@ -492,6 +493,20 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
       ))}</section>}
     </aside>
   )
+}
+
+function TaskGoal({ task }: { task: Task }) {
+  if (task.goal.length <= COLLAPSED_GOAL_LENGTH) {
+    return <section><h3>Goal</h3><TaskMarkdown>{task.goal}</TaskMarkdown></section>
+  }
+  const label = task.prompt_path ? 'Markdown megaprompt' : 'Long request'
+  return <section>
+    <h3>Goal</h3>
+    <details className="original-request">
+      <summary>{label} · {task.goal.length.toLocaleString()} characters</summary>
+      <TaskMarkdown>{task.goal}</TaskMarkdown>
+    </details>
+  </section>
 }
 
 function StructuredPlan({ plan }: { plan: Plan }) {
