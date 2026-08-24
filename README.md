@@ -63,8 +63,7 @@ destructive test-only storage; never point `CARLO_DATABASE_URL` at production.
 After login, open **Settings → Models**, add each OpenAI-compatible endpoint,
 refresh its catalog, and choose a default. Under **Coding agents**, assign a
 provider default or concrete model to `plan`, `implementation`, `discovery`,
-and the other profiles. Existing Pi model strings remain available only as a
-legacy migration path.
+and the other profiles. Profiles without a managed model remain unconfigured.
 
 CARLO encrypts provider keys in PostgreSQL using
 `CARLO_CREDENTIAL_ENCRYPTION_KEY`. Never rotate that key without first

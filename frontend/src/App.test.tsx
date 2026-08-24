@@ -514,6 +514,8 @@ describe('CARLO board', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Refresh Local OMLX' }))
     expect(refreshModelProvider).toHaveBeenCalledWith(1)
     await userEvent.click(screen.getByRole('button', { name: 'Coding agents' }))
+    expect(screen.queryByText(/Legacy Pi/i)).toBeNull()
+    expect(screen.getByRole('option', { name: 'Not configured — choose a managed model' })).toBeTruthy()
     await userEvent.selectOptions(screen.getByLabelText('Model for implementation'), 'model:2')
     await userEvent.click(screen.getByRole('button', { name: 'Save implementation' }))
     expect(updateAgentProfile).toHaveBeenCalledWith('implementation', {

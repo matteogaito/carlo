@@ -157,7 +157,7 @@ function AgentProfiles({ profiles, providers, models, save }: {
     <header><div><span>PI PROFILES</span><h2>Coding agents</h2></div></header>
     <p>Each new session receives an isolated snapshot of the selected model and proportional context policy.</p>
     <div className="profile-list">{profiles.map((profile) => {
-      const initial = profile.available_model_id ? `model:${profile.available_model_id}` : profile.model_provider_id ? `provider:${profile.model_provider_id}` : 'legacy'
+      const initial = profile.available_model_id ? `model:${profile.available_model_id}` : profile.model_provider_id ? `provider:${profile.model_provider_id}` : ''
       return <form key={profile.name} onSubmit={(event) => {
         event.preventDefault()
         const selection = String(new FormData(event.currentTarget).get('model'))
@@ -167,8 +167,8 @@ function AgentProfiles({ profiles, providers, models, save }: {
         })
       }}>
         <div><span>{profile.provider}</span><h3>{profile.name}</h3><small>{profile.default_skills.join(' · ') || 'No default skills'}</small></div>
-        <label>Model for {profile.name}<select name="model" defaultValue={initial}>
-          <option value="legacy">Legacy Pi setting{profile.model ? ` · ${profile.model}` : ''}</option>
+        <label>Model for {profile.name}<select name="model" defaultValue={initial} required>
+          <option value="">Not configured — choose a managed model</option>
           {providers.filter((provider) => provider.active).map((provider) => <option value={`provider:${provider.id}`} key={`provider:${provider.id}`}>{provider.name} · default</option>)}
           {models.filter((model) => model.selectable).map((model) => <option value={`model:${model.id}`} key={`model:${model.id}`}>{model.model_provider_name} · {model.display_name || model.external_id}</option>)}
         </select></label>
