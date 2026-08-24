@@ -1,3 +1,5 @@
+import base64
+import binascii
 import os
 from dataclasses import dataclass
 
@@ -23,6 +25,23 @@ def _positive_integer(name: str, default: int, maximum: int | None = None) -> in
     return value
 
 
+def _credential_key() -> str:
+    value = os.getenv("CARLO_CREDENTIAL_ENCRYPTION_KEY", "")
+    if not value or "CHANGE_ME" in value:
+        return value
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError(
+            "CARLO_CREDENTIAL_ENCRYPTION_KEY must contain 32 base64-encoded bytes"
+        ) from error
+    if len(decoded) != 32:
+        raise ValueError(
+            "CARLO_CREDENTIAL_ENCRYPTION_KEY must contain 32 base64-encoded bytes"
+        )
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_url: str = DEFAULT_DATABASE_URL
@@ -45,6 +64,7 @@ class Settings:
     telegram_bot_token: str = "CHANGE_ME"
     telegram_chat_id: str = "CHANGE_ME"
     telegram_level: str = "all"
+    credential_encryption_key: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -80,4 +100,5 @@ class Settings:
             telegram_bot_token=os.getenv("CARLO_TELEGRAM_BOT_TOKEN", "CHANGE_ME"),
             telegram_chat_id=os.getenv("CARLO_TELEGRAM_CHAT_ID", "CHANGE_ME"),
             telegram_level=telegram_level,
+            credential_encryption_key=_credential_key(),
         )

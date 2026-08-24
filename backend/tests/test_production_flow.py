@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import os
 import subprocess
 
@@ -109,11 +110,21 @@ def test_production_validation_rejects_placeholders_and_missing_build(
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("CARLO")
+    with pytest.raises(ValueError, match="CARLO_CREDENTIAL_ENCRYPTION_KEY"):
+        validate_production_settings(
+            Settings(
+                app_origin="http://100.64.0.10:8000",
+                artifact_root=str(tmp_path / "artifacts"),
+                worktree_root=str(tmp_path / "worktrees"),
+                frontend_dist=str(dist),
+            )
+        )
     validate_production_settings(
         Settings(
             app_origin="http://100.64.0.10:8000",
             artifact_root=str(tmp_path / "artifacts"),
             worktree_root=str(tmp_path / "worktrees"),
             frontend_dist=str(dist),
+            credential_encryption_key=base64.b64encode(b"k" * 32).decode(),
         )
     )

@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 
 from carlo.config import Settings
@@ -53,3 +55,18 @@ def test_invalid_production_settings_are_rejected(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=message):
         Settings.from_env()
+
+
+def test_credential_encryption_key_requires_32_base64_encoded_bytes(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CARLO_CREDENTIAL_ENCRYPTION_KEY", "not-base64")
+
+    with pytest.raises(
+        ValueError, match="CARLO_CREDENTIAL_ENCRYPTION_KEY must contain 32 base64-encoded bytes"
+    ):
+        Settings.from_env()
+
+    key = base64.b64encode(b"k" * 32).decode()
+    monkeypatch.setenv("CARLO_CREDENTIAL_ENCRYPTION_KEY", key)
+    assert Settings.from_env().credential_encryption_key == key

@@ -23,6 +23,8 @@ def validate_production_settings(settings: Settings) -> None:
             raise ValueError(f"CARLO_{name.upper()} must be an absolute path")
     if not (Path(settings.frontend_dist) / "index.html").is_file():
         raise ValueError("frontend build is missing; run make build")
+    if not settings.credential_encryption_key or "CHANGE_ME" in settings.credential_encryption_key:
+        raise ValueError("CARLO_CREDENTIAL_ENCRYPTION_KEY is not configured")
 
 
 def main() -> None:

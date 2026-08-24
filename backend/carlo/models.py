@@ -11,6 +11,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -204,8 +205,122 @@ class LoginFailure(Base):
     )
 
 
+class ModelProvider(TimestampMixin, Base):
+    __tablename__ = "model_providers"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    slug: Mapped[str] = mapped_column(String(80), unique=True)
+    kind: Mapped[str] = mapped_column(String(40), default="openai-compatible")
+    base_url: Mapped[str] = mapped_column(Text)
+    credential_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    credential_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+    credential_key_version: Mapped[int] = mapped_column(Integer, default=1)
+    credential_hint: Mapped[str | None] = mapped_column(String(20))
+    compatibility: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    refresh_interval_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    last_refresh_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_refresh_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_refresh_status: Mapped[str] = mapped_column(String(20), default="NEVER")
+    last_refresh_error: Mapped[str | None] = mapped_column(Text)
+    default_model_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "available_models.id",
+            name="fk_model_providers_default_model_id",
+            use_alter=True,
+        )
+    )
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    models: Mapped[list["AvailableModel"]] = relationship(
+        back_populates="model_provider",
+        foreign_keys="AvailableModel.model_provider_id",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    default_model: Mapped["AvailableModel | None"] = relationship(
+        foreign_keys=[default_model_id], post_update=True
+    )
+
+
+class AvailableModel(TimestampMixin, Base):
+    __tablename__ = "available_models"
+    __table_args__ = (
+        UniqueConstraint("model_provider_id", "external_id"),
+        CheckConstraint(
+            "status IN ('AVAILABLE', 'UNAVAILABLE')",
+            name="ck_available_models_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    model_provider_id: Mapped[int] = mapped_column(
+        ForeignKey("model_providers.id", ondelete="CASCADE"), index=True
+    )
+    external_id: Mapped[str] = mapped_column(String(240))
+    display_name: Mapped[str | None] = mapped_column(String(240))
+    status: Mapped[str] = mapped_column(String(20), default="AVAILABLE", index=True)
+    discovered_context_window: Mapped[int | None] = mapped_column(Integer)
+    discovered_max_tokens: Mapped[int | None] = mapped_column(Integer)
+    context_window_override: Mapped[int | None] = mapped_column(Integer)
+    max_tokens_override: Mapped[int | None] = mapped_column(Integer)
+    input_modalities: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    reasoning: Mapped[bool] = mapped_column(Boolean, default=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, default=dict
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    model_provider: Mapped[ModelProvider] = relationship(
+        back_populates="models", foreign_keys=[model_provider_id]
+    )
+
+    @property
+    def effective_context_window(self) -> int | None:
+        return self.context_window_override or self.discovered_context_window
+
+    @property
+    def effective_max_tokens(self) -> int | None:
+        return self.max_tokens_override or self.discovered_max_tokens
+
+
+class PiRuntimeSettings(TimestampMixin, Base):
+    __tablename__ = "pi_runtime_settings"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_pi_runtime_settings_singleton"),
+        CheckConstraint(
+            "reserve_percent BETWEEN 1 AND 90",
+            name="ck_pi_runtime_settings_reserve_percent",
+        ),
+        CheckConstraint(
+            "keep_recent_percent BETWEEN 1 AND 90",
+            name="ck_pi_runtime_settings_keep_recent_percent",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    compaction_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    reserve_percent: Mapped[int] = mapped_column(Integer, default=10)
+    keep_recent_percent: Mapped[int] = mapped_column(Integer, default=20)
+
+
 class AgentProfile(TimestampMixin, Base):
     __tablename__ = "agent_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "NOT (model_provider_id IS NOT NULL AND available_model_id IS NOT NULL)",
+            name="ck_agent_profiles_one_model_selection",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(String(40), unique=True)
@@ -216,6 +331,12 @@ class AgentProfile(TimestampMixin, Base):
     default_skills: Mapped[list[str]] = mapped_column(JSONB, default=list)
     context_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    model_provider_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_providers.id", ondelete="RESTRICT")
+    )
+    available_model_id: Mapped[int | None] = mapped_column(
+        ForeignKey("available_models.id", ondelete="RESTRICT")
+    )
 
 
 class Task(TimestampMixin, Base):
@@ -245,6 +366,9 @@ class Task(TimestampMixin, Base):
     checkpoint_sha: Mapped[str | None] = mapped_column(String(64))
     active_profile_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_profiles.id")
+    )
+    available_model_id: Mapped[int | None] = mapped_column(
+        ForeignKey("available_models.id", ondelete="RESTRICT")
     )
     planning_session_id: Mapped[str | None] = mapped_column(String(160))
     planning_cursor: Mapped[str | None] = mapped_column(String(160))
