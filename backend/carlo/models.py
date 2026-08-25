@@ -372,7 +372,14 @@ class AgentProfile(TimestampMixin, Base):
 
 class Task(TimestampMixin, Base):
     __tablename__ = "tasks"
-    __table_args__ = (UniqueConstraint("project_id", "sequence"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "sequence"),
+        UniqueConstraint("parent_task_id", "subtask_position"),
+        CheckConstraint(
+            "subtask_position IS NULL OR subtask_position >= 0",
+            name="ck_tasks_subtask_position",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
     project_id: Mapped[int] = mapped_column(
@@ -404,8 +411,21 @@ class Task(TimestampMixin, Base):
     planning_session_id: Mapped[str | None] = mapped_column(String(160))
     planning_cursor: Mapped[str | None] = mapped_column(String(160))
     planning_question: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    parent_task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), index=True
+    )
+    subtask_position: Mapped[int | None] = mapped_column(Integer)
 
     project: Mapped[Project] = relationship(back_populates="tasks", lazy="selectin")
+    parent: Mapped["Task | None"] = relationship(
+        remote_side="Task.id", back_populates="children"
+    )
+    children: Mapped[list["Task"]] = relationship(
+        back_populates="parent",
+        order_by="Task.subtask_position",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     plans: Mapped[list["PlanRevision"]] = relationship(
         back_populates="task", cascade="all, delete-orphan", passive_deletes=True
     )

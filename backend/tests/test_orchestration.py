@@ -127,7 +127,7 @@ async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -
     subprocess.run(["git", "-C", str(repository), "commit", "-m", "base"], check=True)
     subprocess.run(["git", "-C", str(repository), "branch", "carlo-Dev"], check=True)
 
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -236,7 +236,7 @@ async def test_stall_escalates_then_local_validation_completes(
     subprocess.run(["git", "-C", str(repository), "commit", "-m", "base"], check=True)
     subprocess.run(["git", "-C", str(repository), "branch", "carlo-Dev"], check=True)
 
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -374,7 +374,7 @@ async def test_recovery_resumes_validation_without_rerunning_provider(
     ).prepare("CAR-1", "Recover")
     (worktree.path / "feature.txt").write_text("ok")
 
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

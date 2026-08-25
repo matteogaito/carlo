@@ -25,6 +25,15 @@ def _positive_integer(name: str, default: int, maximum: int | None = None) -> in
     return value
 
 
+def _log_level() -> str:
+    value = os.getenv("LOG_LEVEL", "INFO").upper()
+    if value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ValueError(
+            "LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL"
+        )
+    return value
+
+
 def _credential_key() -> str:
     value = os.getenv("CARLO_CREDENTIAL_ENCRYPTION_KEY", "")
     if not value or "CHANGE_ME" in value:
@@ -65,6 +74,7 @@ class Settings:
     telegram_chat_id: str = "CHANGE_ME"
     telegram_level: str = "all"
     credential_encryption_key: str = ""
+    log_level: str = "INFO"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -101,4 +111,5 @@ class Settings:
             telegram_chat_id=os.getenv("CARLO_TELEGRAM_CHAT_ID", "CHANGE_ME"),
             telegram_level=telegram_level,
             credential_encryption_key=_credential_key(),
+            log_level=_log_level(),
         )

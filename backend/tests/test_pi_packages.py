@@ -16,7 +16,7 @@ def executable(path: Path, body: str) -> Path:
 
 @pytest.fixture
 async def package_factory():
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

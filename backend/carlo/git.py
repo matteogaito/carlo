@@ -28,7 +28,12 @@ class GitWorkspace:
         self.integration_branch = integration_branch
 
     async def prepare(
-        self, task_id: str, title: str, *, rework_cycle: int = 0
+        self,
+        task_id: str,
+        title: str,
+        *,
+        rework_cycle: int = 0,
+        base_ref: str | None = None,
     ) -> Worktree:
         await self._git("rev-parse", "--git-dir", cwd=self.repository)
         await self._ensure_integration_branch()
@@ -52,7 +57,14 @@ class GitWorkspace:
         )
         args = ("worktree", "add", str(path), branch)
         if not branch_exists:
-            args = ("worktree", "add", "-b", branch, str(path), self.integration_branch)
+            args = (
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(path),
+                base_ref or self.integration_branch,
+            )
         await self._git(*args, cwd=self.repository)
         return Worktree(branch, path)
 

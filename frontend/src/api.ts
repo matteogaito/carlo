@@ -67,6 +67,10 @@ export interface Task {
   worktree_path: string | null
   checkpoint_sha: string | null
   planning_question: { text: string } | null
+  parent_task_id?: string | null
+  parent_title?: string | null
+  subtask_position?: number | null
+  subtask_count?: number
   available_model_id?: number | null
   used_skills?: string[]
   skill_revisions?: Record<string, string[]>
@@ -355,7 +359,7 @@ export interface Api {
   createPackage(input: { source: string; is_default: boolean }): Promise<AgentPackage>
   updatePackage(id: number, input: { enabled?: boolean; is_default?: boolean }): Promise<AgentPackage>
   refreshPackage(id: number): Promise<AgentPackage>
-  disablePackage(id: number): Promise<AgentPackage>
+  deletePackage(id: number): Promise<void>
   updateAgentProfile(name: string, input: Partial<AgentProfileSettings>): Promise<AgentProfileSettings>
   setTaskModel(id: string, availableModelId: number | null): Promise<Task>
   events(
@@ -458,10 +462,7 @@ export const httpApi: Api = {
     const item = await request<Record<string, unknown>>(`/api/settings/pi-packages/${id}/update`, { method: 'POST' })
     return { ...item, name: String(item.identity), revision: item.active_version == null ? null : String(item.active_version) } as AgentPackage
   },
-  disablePackage: async (id) => {
-    const item = await request<Record<string, unknown>>(`/api/settings/pi-packages/${id}`, { method: 'DELETE' })
-    return { ...item, name: String(item.identity), revision: item.active_version == null ? null : String(item.active_version) } as AgentPackage
-  },
+  deletePackage: (id) => request(`/api/settings/pi-packages/${id}`, { method: 'DELETE' }),
   updateAgentProfile: (name, input) => request(`/api/agent-profiles/${encodeURIComponent(name)}`, {
     method: 'PATCH', body: JSON.stringify(input),
   }),

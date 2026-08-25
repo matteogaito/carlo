@@ -10,7 +10,16 @@ from carlo.admin import bootstrap_admin
 from carlo.api import create_app
 from carlo.config import Settings
 from carlo.model_providers import CredentialCipher
-from carlo.models import AgentProfile, AvailableModel, Base, ModelProvider, PiPackage, Project, Task
+from carlo.models import (
+    AgentProfile,
+    AgentProfilePackage,
+    AvailableModel,
+    Base,
+    ModelProvider,
+    PiPackage,
+    Project,
+    Task,
+)
 from carlo.pi_packages import InstalledPiPackage
 from tests.fakes import FakeProvider
 
@@ -25,7 +34,7 @@ class FakePackageManager:
 
 @pytest.fixture
 async def settings_app() -> AsyncIterator[tuple[object, async_sessionmaker[AsyncSession], str]]:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -40,8 +49,8 @@ async def settings_app() -> AsyncIterator[tuple[object, async_sessionmaker[Async
         await connection.execute(
             text(
                 "INSERT INTO pi_runtime_settings "
-                "(id, compaction_enabled, reserve_percent, keep_recent_percent) "
-                "VALUES (1, true, 10, 20)"
+                "(id, compaction_enabled, reserve_percent, keep_recent_percent, default_packages, default_skills) "
+                "VALUES (1, true, 10, 20, '[\"superpowers\", \"ponytail\"]', '[]')"
             )
         )
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -85,7 +94,11 @@ async def test_admin_manages_explicit_pi_package_sources(settings_app) -> None:
         )
         package_id = created.json()["id"]
         refreshed = await client.post(f"/api/settings/pi-packages/{package_id}/update")
-        disabled = await client.delete(f"/api/settings/pi-packages/{package_id}")
+        disabled = await client.patch(
+            f"/api/settings/pi-packages/{package_id}", json={"enabled": False}
+        )
+        deleted = await client.delete(f"/api/settings/pi-packages/{package_id}")
+        packages = await client.get("/api/settings/pi-packages")
 
     assert created.status_code == 201
     assert {
@@ -102,6 +115,40 @@ async def test_admin_manages_explicit_pi_package_sources(settings_app) -> None:
     assert invalid.status_code == 422
     assert refreshed.status_code == 200
     assert disabled.json()["enabled"] is False
+    assert deleted.status_code == 204
+    assert "npm:pippo" not in {package["identity"] for package in packages.json()}
+
+
+@pytest.mark.asyncio
+async def test_cannot_delete_pi_package_assigned_to_profile(settings_app) -> None:
+    app, factory, _ = settings_app
+    async with factory() as session:
+        package = await session.scalar(
+            select(PiPackage).where(PiPackage.identity == "ponytail")
+        )
+        profile = AgentProfile(name="implementation", provider="pi")
+        session.add(profile)
+        await session.flush()
+        session.add(
+            AgentProfilePackage(agent_profile_id=profile.id, package_id=package.id)
+        )
+        await session.commit()
+        package_id = package.id
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        response = await client.delete(f"/api/settings/pi-packages/{package_id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Pi package is assigned to an agent profile"
+    async with factory() as session:
+        assert await session.get(PiPackage, package_id) is not None
 
 
 @pytest.mark.asyncio

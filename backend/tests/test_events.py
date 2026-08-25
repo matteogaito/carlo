@@ -13,7 +13,7 @@ from tests.fakes import FakeProvider
 
 @pytest.mark.asyncio
 async def test_websocket_and_http_replay_persisted_events() -> None:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

@@ -109,7 +109,7 @@ async def test_runner_api_requires_scan_trust_and_connection_test(tmp_path: Path
     identity = tmp_path / "id_ed25519"
     identity.write_text("private")
     identity.chmod(0o600)
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

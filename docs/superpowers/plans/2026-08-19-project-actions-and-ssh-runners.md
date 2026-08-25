@@ -180,7 +180,7 @@ Create `d1e2f3a4b5c6_project_actions.py` with `revision = "d1e2f3a4b5c6"` and `d
 
 Inspect the generated file to ensure downgrade drops `action_steps`, then `action_runs`, then `runners`, and no unrelated current schema change appears.
 
-Run: `cd backend && CARLO_DATABASE_URL=postgresql+psycopg:///carlov3_test uv run alembic upgrade head`
+Run: `cd backend && CARLO_DATABASE_URL=postgresql+psycopg:///carlo_test uv run alembic upgrade head`
 
 Expected: migration succeeds.
 
@@ -753,7 +753,7 @@ Run: `cd frontend && npm test`
 
 Run: `cd frontend && npm run build`
 
-Expected: all commands PASS. Verify the backend suite uses `carlov3_test`, not production `carlov3`.
+Expected: all commands PASS. Verify the backend suite uses `carlo_test`, not production `carlov3`.
 
 - [ ] **Step 5: Perform a local manual smoke run**
 

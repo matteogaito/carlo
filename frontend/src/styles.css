@@ -89,6 +89,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .task-card strong { font: 700 16px "Avenir Next", ui-rounded, sans-serif; }
 .stage { align-self: end; color: #606d65; font: 600 10px ui-monospace, monospace; text-transform: uppercase; }
 .task-card code { color: #7b5a24; font-size: 10px; }
+.task-parent { align-self: end; justify-self: end; max-width: 90%; overflow: hidden; color: #657169; font: 700 9px ui-monospace, monospace; letter-spacing: .04em; text-overflow: ellipsis; white-space: nowrap; }
+.task-parent-detail { margin: -8px 24px 12px; color: #657169; font: 700 10px ui-monospace, monospace; }
 .empty { margin: 12px 4px; color: #758179; font-size: 13px; }
 
 .task-detail { position: sticky; top: 0; height: calc(100vh - 124px); overflow-y: auto; background: var(--paper); border-left: 1px solid var(--ink); box-shadow: -12px 0 30px rgb(21 32 28 / .08); }

@@ -14,14 +14,40 @@ from carlo.models import (
     Project,
     ProjectMembership,
     Runner,
+    Task,
     User,
     UserSession,
 )
 
 
 @pytest.mark.asyncio
+async def test_task_children_are_persisted_in_plan_order() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/repo")
+        parent = Task(id="CAR-1", project=project, sequence=1, title="Parent", goal="Goal")
+        first = Task(id="CAR-2", project=project, sequence=2, title="API", goal="API", parent=parent, subtask_position=0)
+        second = Task(id="CAR-3", project=project, sequence=3, title="UI", goal="UI", parent=parent, subtask_position=1)
+        session.add_all([parent, second, first])
+        await session.commit()
+        await session.refresh(parent, ["children"])
+        assert [child.id for child in parent.children] == ["CAR-2", "CAR-3"]
+        assert first.parent_task_id == "CAR-1"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_security_schema_supports_admin_membership_sessions_and_delivery() -> None:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -72,7 +98,7 @@ async def test_security_schema_supports_admin_membership_sessions_and_delivery()
 
 @pytest.mark.asyncio
 async def test_action_run_keeps_runner_definition_and_ordered_steps() -> None:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

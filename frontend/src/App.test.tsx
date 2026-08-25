@@ -102,13 +102,25 @@ const api: Api = {
   createPackage: async (input) => ({ name: input.source, revision: null }),
   updatePackage: async () => ({ name: 'package', revision: null }),
   refreshPackage: async () => ({ name: 'package', revision: null }),
-  disablePackage: async () => ({ name: 'package', revision: null }),
+  deletePackage: async () => undefined,
   updateAgentProfile: async () => { throw new Error('unused') },
   setTaskModel: async () => { throw new Error('unused') },
   events: () => () => undefined,
 }
 
 describe('CARLO board', () => {
+  it('shows child cards instead of their aggregate parent', async () => {
+    const parent = { ...task, id: 'CAR-1', title: 'Parent task', subtask_count: 2 }
+    const apiChild = { ...task, id: 'CAR-2', title: 'Add API', parent_task_id: 'CAR-1', parent_title: 'Parent task', subtask_position: 0, subtask_count: 0 }
+    const uiChild = { ...task, id: 'CAR-3', title: 'Add UI', status: 'READY' as const, parent_task_id: 'CAR-1', parent_title: 'Parent task', subtask_position: 1, subtask_count: 0 }
+    render(<App api={{ ...api, listTasks: async () => [parent, apiChild, uiChild] }} />)
+
+    await screen.findByRole('button', { name: /CAR-2 Add API Parent task/ })
+    expect(screen.getByRole('button', { name: /CAR-3 Add UI Parent task/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /CAR-1 Parent task/ })).toBeNull()
+    expect(screen.getAllByText('Parent task')).toHaveLength(2)
+  })
+
   it('maps tasks to six fixed columns and opens task detail', async () => {
     render(<App api={api} />)
 
@@ -529,6 +541,9 @@ describe('CARLO board', () => {
       packageSettings.push(item)
       return item
     })
+    const deletePackage = vi.fn(async (id: number) => {
+      packageSettings.splice(packageSettings.findIndex((item) => item.id === id), 1)
+    })
     let piSettings = { compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20, default_packages: ['superpowers', 'ponytail'], default_skills: [] }
     const updatePiSettings = vi.fn(async (input) => {
       piSettings = { ...piSettings, ...input }
@@ -552,6 +567,7 @@ describe('CARLO board', () => {
       updatePiSettings,
       updatePackage,
       createPackage,
+      deletePackage,
     }} />)
 
     await userEvent.click(await screen.findByRole('button', { name: 'Settings' }))
@@ -574,6 +590,10 @@ describe('CARLO board', () => {
     await userEvent.type(screen.getByLabelText('Package source'), 'npm:pippo')
     await userEvent.click(screen.getByRole('button', { name: 'Install package' }))
     await waitFor(() => expect(createPackage).toHaveBeenCalledWith({ source: 'npm:pippo', is_default: true }))
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await userEvent.click(screen.getByRole('button', { name: 'Delete npm:pippo' }))
+    expect((await screen.findByRole('status', { name: 'Package deleted' })).textContent).toBe('Deleted ✓')
+    expect(screen.queryByText('npm:pippo')).toBeNull()
     expect(screen.queryByText(/Legacy Pi/i)).toBeNull()
     expect(screen.getByRole('option', { name: 'Not configured — choose a managed model' })).toBeTruthy()
     expect(screen.getByRole('option', { name: 'omlx — Qwen3.8-27B' })).toBeTruthy()

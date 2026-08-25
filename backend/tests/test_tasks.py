@@ -17,7 +17,7 @@ async def test_shared_task_creation_allocates_identity_and_prompt(tmp_path: Path
     repository = tmp_path / "repo"
     repository.mkdir()
     key = f"S{uuid4().hex[:6].upper()}"
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 

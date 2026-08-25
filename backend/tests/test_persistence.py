@@ -11,7 +11,7 @@ from carlo.models import Base, Event, Project, Task
 
 @pytest.mark.asyncio
 async def test_task_identity_and_event_survive_a_new_session() -> None:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 
@@ -49,7 +49,7 @@ async def test_task_identity_and_event_survive_a_new_session() -> None:
 
 @pytest.mark.asyncio
 async def test_startup_returns_orphaned_rework_planning_to_failed() -> None:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     key = f"R{uuid4().hex[:6].upper()}"
@@ -128,7 +128,7 @@ async def test_discovery_transcript_turn_and_event_survive_a_new_session() -> No
     DiscoveryMessage = models.DiscoveryMessage
     DiscoveryTurn = models.DiscoveryTurn
 
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 

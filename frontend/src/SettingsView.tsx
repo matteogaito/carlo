@@ -80,6 +80,17 @@ export function SettingsView({ api, event, setError }: {
     }
   }
 
+  async function deletePackage(id: number) {
+    try {
+      await api.deletePackage(id)
+      await load()
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Package deletion failed')
+      return false
+    }
+  }
+
   return <main className="settings-page">
     <header className="settings-heading">
       <div><span>CONTROL PLANE</span><h1>Settings</h1></div>
@@ -116,7 +127,7 @@ export function SettingsView({ api, event, setError }: {
         </div>
       </section>
       {pi && <CompactionSettings value={pi} save={(input) => action(() => api.updatePiSettings(input))} />}
-    </> : <>{pi && <DefaultResources value={pi} packages={packages} skills={skills} save={saveDefaults} add={() => setAddingPackage(true)} action={action} api={api} />}<AgentProfiles profiles={profiles} providers={providers} models={models} packages={packages.filter((item) => item.enabled !== false)} skills={skills} defaults={pi} save={saveProfile} /></>}
+    </> : <>{pi && <DefaultResources value={pi} packages={packages} skills={skills} save={saveDefaults} add={() => setAddingPackage(true)} remove={deletePackage} action={action} api={api} />}<AgentProfiles profiles={profiles} providers={providers} models={models} packages={packages.filter((item) => item.enabled !== false)} skills={skills} defaults={pi} save={saveProfile} /></>}
 
     {adding && <ProviderDialog close={() => setAdding(false)} create={async (input) => {
       await action(() => api.createModelProvider(input))
@@ -134,19 +145,22 @@ export function SettingsView({ api, event, setError }: {
   </main>
 }
 
-function DefaultResources({ value, packages, skills, save, add, action, api }: {
+function DefaultResources({ value, packages, skills, save, add, remove, action, api }: {
   value: PiSettings
   packages: AgentPackage[]
   skills: AgentSkill[]
   save: (input: Partial<PiSettings>) => Promise<boolean>
   add: () => void
+  remove: (id: number) => Promise<boolean>
   action: (operation: () => Promise<unknown>) => Promise<void>
   api: Api
 }) {
   const [saved, setSaved] = useState(false)
+  const [deleted, setDeleted] = useState(false)
   return <section className="settings-section default-resources">
     <header><div><span>EVERY SESSION</span><h2>Global Pi packages</h2></div><button onClick={add}>+ Package</button></header>
     <p>CARLO installs these explicit Pi package sources and keeps unpinned packages updated. Defaults are inherited by every profile.</p>
+    {deleted && <div className="profile-save"><span role="status" aria-label="Package deleted">Deleted ✓</span></div>}
     <div className="package-grid">{packages.map((item) => <article className="package-card" key={item.name}>
       <header><div><b>{item.name}</b><small>{item.source}</small></div><em className={(item.last_update_status || '').toLowerCase()}>{item.last_update_status || 'NEVER'}</em></header>
       <p>{item.active_version ? item.active_version.slice(0, 16) : 'Not installed'} · {item.pinned ? 'Pinned' : 'Unpinned'}</p>
@@ -155,7 +169,8 @@ function DefaultResources({ value, packages, skills, save, add, action, api }: {
       <footer>
         <label className="switch"><input type="checkbox" checked={!!item.is_default} disabled={!item.id || item.enabled === false} onChange={(event) => void action(() => api.updatePackage(item.id!, { is_default: event.target.checked }))} />Default</label>
         <button disabled={!item.id} onClick={() => void action(() => api.refreshPackage(item.id!))}>Update now</button>
-        <button className={item.enabled === false ? '' : 'danger'} disabled={!item.id} onClick={() => item.id && (item.enabled === false ? void action(() => api.updatePackage(item.id!, { enabled: true })) : window.confirm(`Disable ${item.name}?`) && void action(() => api.disablePackage(item.id!)))}>{item.enabled === false ? 'Enable' : 'Disable'}</button>
+        <button disabled={!item.id} onClick={() => item.id && void action(() => api.updatePackage(item.id!, { enabled: item.enabled === false }))}>{item.enabled === false ? 'Enable' : 'Disable'}</button>
+        <button aria-label={`Delete ${item.name}`} className="danger" disabled={!item.id} onClick={() => item.id && window.confirm(`Delete ${item.name} from CARLO? Historical session artifacts will be retained.`) && void remove(item.id).then(setDeleted)}>Delete</button>
       </footer>
     </article>)}</div>
     {!packages.length && <div className="settings-empty"><b>No Pi packages</b><p>Add an npm or Git package source.</p></div>}

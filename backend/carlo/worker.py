@@ -14,6 +14,7 @@ from .maintenance import (
     record_startup,
 )
 from .model_providers import CredentialCipher
+from .logging_config import configure_logging
 from .pi_runtime import PiRuntimeSnapshotBuilder
 from .pi_packages import PiPackageManager
 from .orchestrator import ImplementationPipeline, Orchestrator
@@ -59,6 +60,7 @@ async def run() -> None:
         resource_root=resource_root,
         managed_skills={"frontend-design": "skills/frontend-design"},
         resource_manifest=resource_root / "revisions.json",
+        debug=settings.log_level == "DEBUG",
     )
     pipeline = ImplementationPipeline(
         factory,
@@ -195,6 +197,7 @@ async def _discovery_loop(runtime: DiscoveryRuntime) -> None:
 
 
 def main() -> None:
+    configure_logging(Settings.from_env().log_level)
     asyncio.run(run())
 
 

@@ -33,7 +33,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
     subprocess.run(["git", "-C", str(repository), "commit", "-m", "base"], check=True)
     subprocess.run(["git", "-C", str(repository), "branch", "carlo-Dev"], check=True)
 
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

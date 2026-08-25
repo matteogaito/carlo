@@ -461,7 +461,7 @@ cd frontend && npm run build
 git diff --check
 ```
 
-Expected: all tests and build pass. PostgreSQL must be running with access to `carlov3_test`; if unavailable, report database-backed tests as unverified rather than claiming success.
+Expected: all tests and build pass. PostgreSQL must be running with access to `carlo_test`; if unavailable, report database-backed tests as unverified rather than claiming success.
 
 - [ ] **Step 6: Commit**
 

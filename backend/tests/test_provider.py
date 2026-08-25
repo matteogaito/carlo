@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,67 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
         "--skill", str(skill_root / "carlo-planning"),
         "Inspect the repo",
     ]
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_reports_assistant_api_error(tmp_path: Path) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'message_end', 'message': {"
+        "'role': 'assistant', 'content': [], 'stopReason': 'error', "
+        "'errorMessage': '400: function tools require /v1/responses'}}))\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+
+    with pytest.raises(
+        ProviderError, match=r"400: function tools require /v1/responses"
+    ):
+        await provider.run(
+            AgentProfile("plan", None, None, (), ()),
+            "Plan",
+            str(tmp_path),
+            "CAR-2-plan",
+        )
+
+
+@pytest.mark.asyncio
+async def test_pi_debug_writes_replay_without_api_key(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'final', 'output': 'done'}))\n"
+    )
+    executable.chmod(0o755)
+    runtime_root = tmp_path / "runtime"
+    provider = PiProvider(
+        str(executable),
+        tmp_path / "sessions",
+        runtime_builder=PiRuntimeSnapshotBuilder(runtime_root),
+        debug=True,
+    )
+    profile = AgentProfile(
+        "plan", None, None, (), (), resolved_model=_resolved_model()
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="carlo.provider"):
+        await provider.run(
+            profile, "Inspect this repository", str(tmp_path), "CAR-3-plan"
+        )
+
+    debug_dir = runtime_root / "CAR-3-plan"
+    assert (debug_dir / "instruction.md").read_text() == "Inspect this repository"
+    replay = (debug_dir / "replay.sh").read_text()
+    assert "secret-local-key" not in replay
+    assert "CARLO_PI_MODEL_API_KEY" in replay
+    assert "instruction.md" in replay
+    assert "Pi debug launch session=CAR-3-plan" in caplog.text
+    assert "secret-local-key" not in caplog.text
 
 
 @pytest.mark.asyncio

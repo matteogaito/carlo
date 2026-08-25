@@ -15,7 +15,7 @@ from tests.fakes import FakeProvider
 
 @pytest.fixture
 async def production_app(tmp_path: Path):
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

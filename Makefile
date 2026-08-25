@@ -20,10 +20,10 @@ prod-check:
 	cd backend && uv run python -m carlo.production
 
 prod-api: build prod-check
-	cd backend && uv run uvicorn carlo.main:app --host "$${CARLO_BIND_HOST:-127.0.0.1}" --port "$${CARLO_PORT:-8000}"
+	cd backend && uv run uvicorn carlo.main:app --log-config logging.ini --host "$${CARLO_BIND_HOST:-127.0.0.1}" --port "$${CARLO_PORT:-8000}"
 
 api:
-	cd backend && uv run uvicorn carlo.main:app --reload
+	cd backend && uv run uvicorn carlo.main:app --log-config logging.ini --reload
 
 worker:
 	cd backend && uv run python -m carlo.worker

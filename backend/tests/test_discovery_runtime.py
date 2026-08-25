@@ -79,7 +79,7 @@ class CancellingProvider:
 
 @pytest.mark.asyncio
 async def test_discovery_turn_persists_reply_state_and_memory(tmp_path: Path) -> None:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -120,7 +120,7 @@ async def test_discovery_turn_persists_reply_state_and_memory(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_discovery_stop_cannot_be_overwritten_by_late_agent_output(tmp_path: Path) -> None:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -145,7 +145,7 @@ async def test_discovery_stop_cannot_be_overwritten_by_late_agent_output(tmp_pat
 
 @pytest.mark.asyncio
 async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path) -> None:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

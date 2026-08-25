@@ -10,6 +10,10 @@ from .provider import ResolvedModel, ResolvedPiPackage
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_.-]{1,200}\Z")
 
 
+def runtime_context_window(context_window: int, max_tokens: int) -> int:
+    return max(max_tokens + 1, int(context_window * 0.9))
+
+
 @dataclass(frozen=True, slots=True)
 class PiRuntimeSnapshot:
     agent_dir: Path
@@ -95,7 +99,9 @@ class PiRuntimeSnapshotBuilder:
                                 "name": model.display_name,
                                 "input": list(model.input_modalities),
                                 "reasoning": model.reasoning,
-                                "contextWindow": model.context_window,
+                                "contextWindow": runtime_context_window(
+                                    model.context_window, model.max_tokens
+                                ),
                                 "maxTokens": model.max_tokens,
                                 "cost": {
                                     "input": 0,

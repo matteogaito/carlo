@@ -2,6 +2,7 @@ from pathlib import Path
 import base64
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -10,6 +11,44 @@ from carlo.production import validate_production_settings
 
 
 ROOT = Path(__file__).parents[2]
+
+
+def test_debug_enables_verbose_timestamped_api_and_worker_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    assert Settings.from_env().log_level == "INFO"
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    assert Settings.from_env().log_level == "DEBUG"
+    api = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import logging, uvicorn; from carlo.logging_config import configure_api_logging; "
+            "uvicorn.Config('unused:app', log_config='logging.ini'); "
+            "configure_api_logging('DEBUG'); "
+            "logging.getLogger('carlo.api').debug('api probe')",
+        ],
+        cwd=ROOT / "backend",
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    worker = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import logging; from carlo.logging_config import configure_logging; "
+            "configure_logging('DEBUG'); logging.getLogger('carlo.worker').debug('worker probe')",
+        ],
+        cwd=ROOT / "backend",
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "T" in api.stderr.split(" api probe", 1)[0]
+    assert "T" in worker.stderr.split(" worker probe", 1)[0]
 
 
 def test_launchd_unload_waits_until_service_disappears(tmp_path: Path) -> None:

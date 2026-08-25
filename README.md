@@ -48,7 +48,7 @@ are intentionally deferred.
 
 ```bash
 createdb carlov3
-createdb carlov3_test
+createdb carlo_test
 cp .env.example .env
 # Replace the key placeholder with: openssl rand -base64 32
 set -a && source .env && set +a
@@ -57,7 +57,7 @@ make migrate
 make bootstrap-admin
 ```
 
-The databases already exist on the original development host. `carlov3_test` is
+The databases already exist on the original development host. `carlo_test` is
 destructive test-only storage; never point `CARLO_DATABASE_URL` at production.
 
 After login, open **Settings → Models**, add each OpenAI-compatible endpoint,
@@ -96,13 +96,19 @@ Open `http://localhost:5173`. Add a project whose repository already has a
 committed `carlo-Dev` branch. The Task flow is:
 
 ```text
-Create Task → live Pi planning → zero or more focused questions → Brief/Plan review → explicit approval → Ready
+Create Task → live Pi planning → zero or more focused questions → Brief/Plan review → explicit approval → ordered Tasks
 ```
 
 Task creation starts planning automatically. The half-screen Task panel shows
 repository activity over WebSocket, renders Goal, Brief, and Plan as Markdown,
 and can be resized from its left edge. Closing it does not cancel or delete the
 Task; its state and planning activity remain available from the Board.
+
+When an approved plan contains implementation tasks, CARLO creates one real
+Task card for each item and runs them strictly in order. Every child gets a
+fresh Pi context and starts from the previous child's validated checkpoint; the
+hidden parent completes only after all children complete. A context-limit error
+stops the affected child instead of retrying the same oversized prompt.
 
 ## Discoveries
 
@@ -199,6 +205,22 @@ sudo make install-mac
 make status-mac
 make logs-mac
 ```
+
+Logging defaults to `LOG_LEVEL=INFO`. For diagnostics, set `LOG_LEVEL=DEBUG` in
+the protected production environment and rerun `sudo make install-mac`. API,
+worker, orchestration, and provider logs then include debug messages. Pi
+launches also log their safe command line and write
+`instruction.md` plus an executable `replay.sh` under
+`/usr/local/var/carlo/artifacts/pi-runtime/<session-id>/`. Replay it as the
+service account:
+
+```bash
+sudo -u carlo -H /usr/local/var/carlo/artifacts/pi-runtime/<session-id>/replay.sh
+```
+
+The replay never contains the provider secret. For a keyed provider, export
+`CARLO_PI_MODEL_API_KEY` in that shell first. Set `LOG_LEVEL=INFO` again after
+diagnosis; planning prompts are intentionally preserved in its runtime bundle.
 
 On first install, `.env.production` is copied to
 `/Users/carlo/.config/carlo/.env.production` with mode `600`. Later installs

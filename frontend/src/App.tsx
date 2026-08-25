@@ -107,6 +107,7 @@ export function App({ api = httpApi }: { api?: Api }) {
   }, [api, refresh, selected?.id, user])
 
   const active = useMemo(() => tasks.find((task) => task.status === 'IN_PROGRESS'), [tasks])
+  const boardTasks = useMemo(() => tasks.filter((task) => !task.subtask_count), [tasks])
 
   async function act(action: () => Promise<Task>) {
     try {
@@ -186,7 +187,7 @@ export function App({ api = httpApi }: { api?: Api }) {
       {view === 'board' ? <main className={selected ? 'workspace detail-open' : 'workspace'}>
         <section className="board" aria-label="Task board">
           {columns.map((column) => {
-            const cards = tasks.filter((task) => task.status === column.status)
+            const cards = boardTasks.filter((task) => task.status === column.status)
             return (
               <section className="column" key={column.status} aria-labelledby={`column-${column.status}`}>
                 <header className="column-header">
@@ -200,12 +201,13 @@ export function App({ api = httpApi }: { api?: Api }) {
                       className={task.status === 'IN_PROGRESS' ? 'task-card running' : 'task-card'}
                       key={task.id}
                       onClick={() => void openTask(task.id)}
-                      aria-label={`${task.id} ${task.title}`}
+                      aria-label={`${task.id} ${task.title}${task.parent_title ? ` ${task.parent_title}` : ''}`}
                     >
                       <span className="task-id">{task.id}</span>
                       <strong>{task.title}</strong>
                       <span className="stage">{task.stage.replaceAll('_', ' ')}</span>
                       {task.checkpoint_sha && <code>{task.checkpoint_sha.slice(0, 7)}</code>}
+                      {task.parent_title && <span className="task-parent">{task.parent_title}</span>}
                     </button>
                   ))}
                   {!cards.length && <p className="empty">No tasks at this stage.</p>}
@@ -451,6 +453,7 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
           <button className="close" onClick={close} aria-label="Close task detail">×</button>
         </header>
         <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
+        {task.parent_title && <p className="task-parent-detail">Part of {task.parent_title}</p>}
         <nav className="task-actions" aria-label="Task actions">
           {task.stage === 'created' && <button onClick={startPlanning}>Build Brief & Plan</button>}
           {task.stage === 'awaiting_approval' && task.plan && <button onClick={approve}>Approve Plan → Ready</button>}

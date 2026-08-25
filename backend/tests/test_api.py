@@ -14,7 +14,7 @@ from carlo.config import Settings
 from carlo.models import AgentProfile as AgentProfileRecord
 from carlo.domain import TaskStage, TaskStatus
 from carlo.models import Base, Event, PlanRevision, Project, Task, ValidationRun
-from carlo.provider import AgentProfile, AgentResult
+from carlo.provider import AgentProfile, AgentResult, ProviderError
 from tests.fakes import FakeProvider, add_managed_profiles
 
 
@@ -46,7 +46,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         check=True,
         capture_output=True,
     )
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -179,7 +179,15 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
             f'/api/tasks/{task["id"]}/approve', json={"revision": 1, "version": planned["version"]}
         )
         assert approved.status_code == 200
-        assert approved.json()["status"] == "READY"
+        assert approved.json()["status"] == "IN_PROGRESS"
+        listed = (await client.get("/api/tasks")).json()
+        child = next(item for item in listed if item["parent_task_id"] == task["id"])
+        assert (child["title"], child["status"], child["stage"]) == (
+            "Add the login endpoint",
+            "READY",
+            "queued",
+        )
+        assert child["parent_title"] == "Login"
 
         async with factory() as session:
             session.add(
@@ -224,7 +232,7 @@ async def test_failed_task_rework_replans_original_goal_and_preserves_history(
         check=True,
         capture_output=True,
     )
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -339,7 +347,7 @@ async def test_failed_rework_planning_returns_task_to_retryable_failed_state(
         check=True,
         capture_output=True,
     )
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -369,7 +377,11 @@ async def test_failed_rework_planning_returns_task_to_retryable_failed_state(
             )
         )
         await session.commit()
-    app = create_app(factory, FakeProvider("{}"), Settings(app_origin="http://test"))
+    class FailingProvider(FakeProvider):
+        async def run(self, *args, **kwargs):
+            raise ProviderError("400: function tools require /v1/responses")
+
+    app = create_app(factory, FailingProvider(""), Settings(app_origin="http://test"))
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
@@ -381,11 +393,18 @@ async def test_failed_rework_planning_returns_task_to_retryable_failed_state(
         client.headers["Origin"] = "http://test"
         response = await client.post("/api/tasks/CAR-1/rework")
         assert response.status_code == 502
+        assert response.json()["detail"] == "400: function tools require /v1/responses"
         task = (await client.get("/api/tasks/CAR-1")).json()
         assert task["status"] == "FAILED"
         assert task["stage"] == "blocked"
         assert any(
             event["type"] == "task.rework.planning_failed"
+            for event in task["events"]
+        )
+        assert any(
+            event["type"] == "planning.failed"
+            and event["payload"]["error"]
+            == "400: function tools require /v1/responses"
             for event in task["events"]
         )
     await engine.dispose()
@@ -402,7 +421,7 @@ async def test_task_rejects_non_markdown_upload_without_creating_file(
         check=True,
         capture_output=True,
     )
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -459,7 +478,7 @@ async def test_planning_runs_concurrently_without_the_implementation_lock(
         check=True,
         capture_output=True,
     )
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

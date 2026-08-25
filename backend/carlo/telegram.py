@@ -418,9 +418,24 @@ async def notification_loop(notifier: TelegramNotifier) -> None:
 
 
 async def command_loop(bot: TelegramCommandBot) -> None:
+    retry_seconds = 2
+    unavailable = False
     while True:
         try:
             await bot.poll_once()
+            if unavailable:
+                logger.info("Telegram command polling recovered")
+            retry_seconds = 2
+            unavailable = False
+        except TelegramError as error:
+            logger.warning(
+                "Telegram command polling unavailable; retrying in %ss: %s",
+                retry_seconds,
+                error,
+            )
+            unavailable = True
+            await asyncio.sleep(retry_seconds)
+            retry_seconds = min(retry_seconds * 2, 60)
         except Exception:
             logger.exception("Telegram command cycle failed")
             await asyncio.sleep(2)

@@ -93,7 +93,7 @@ def test_openai_catalog_parser_reads_all_models_and_common_context_fields() -> N
 
 @pytest.fixture
 async def model_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(models.Base.metadata.create_all)
         await connection.execute(
@@ -106,8 +106,8 @@ async def model_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         await connection.execute(
             text(
                 "INSERT INTO pi_runtime_settings "
-                "(id, compaction_enabled, reserve_percent, keep_recent_percent) "
-                "VALUES (1, true, 10, 20)"
+                "(id, compaction_enabled, reserve_percent, keep_recent_percent, default_packages, default_skills) "
+                "VALUES (1, true, 10, 20, '[\"superpowers\", \"ponytail\"]', '[]')"
             )
         )
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -375,6 +375,33 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
         assert plan_resolved.packages == ("superpowers", "ponytail")
     assert historical.packages == ("superpowers", "ponytail")
     assert "ponytail" not in historical.skills
+
+
+@pytest.mark.asyncio
+async def test_official_openai_provider_uses_responses_api(model_factory) -> None:
+    module = importlib.import_module("carlo.model_providers")
+    async with model_factory() as session:
+        provider = models.ModelProvider(
+            name="OpenAI",
+            slug="openai",
+            kind="openai-compatible",
+            base_url="https://api.openai.com/v1",
+        )
+        model = models.AvailableModel(
+            model_provider=provider,
+            external_id="gpt-5.6-sol",
+            status="AVAILABLE",
+            discovered_context_window=65_536,
+            discovered_max_tokens=16_384,
+        )
+        profile = models.AgentProfile(name="plan", provider="pi")
+        session.add_all([provider, model, profile])
+        await session.flush()
+        profile.available_model_id = model.id
+
+        resolved = await module.resolve_agent_profile(session, profile, None)
+
+    assert resolved.resolved_model.api == "openai-responses"
 
 
 @pytest.mark.asyncio

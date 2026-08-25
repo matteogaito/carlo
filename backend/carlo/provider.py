@@ -1,7 +1,9 @@
 import asyncio
 import json
+import logging
 import os
 import re
+import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,9 +13,14 @@ from .maintenance import pi_process_lock
 
 PI_JSON_EVENT_LIMIT = 4 * 1024 * 1024
 GIT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
+logger = logging.getLogger("carlo.provider")
 
 
 class ProviderError(RuntimeError):
+    pass
+
+
+class ContextLimitError(ProviderError):
     pass
 
 
@@ -141,6 +148,7 @@ class PiProvider:
         managed_packages: tuple[str, ...] = (),
         managed_skills: dict[str, str] | None = None,
         resource_manifest: Path | None = None,
+        debug: bool = False,
     ) -> None:
         self.executable = executable
         self.session_dir = session_dir
@@ -150,6 +158,7 @@ class PiProvider:
         self.managed_packages = managed_packages
         self.managed_skills = managed_skills or {}
         self.resource_manifest = resource_manifest
+        self.debug = debug
         self.lock_path = self.session_dir.parent / "pi-runtime.lock"
         self._processes: dict[str, asyncio.subprocess.Process] = {}
 
@@ -181,6 +190,13 @@ class PiProvider:
         ]
         for extension in extensions:
             command.extend(("--extension", str(extension)))
+        if self.debug:
+            logger.debug(
+                "Pi debug RPC launch session=%s cwd=%s command=%s",
+                session_id,
+                cwd,
+                shlex.join(command),
+            )
         async with pi_process_lock(self.lock_path, exclusive=False):
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -226,6 +242,10 @@ class PiProvider:
         ]
         command.extend(self._profile_arguments(profile, model, external_skills))
         command.append(instruction)
+        if self.debug:
+            self._write_debug_replay(
+                session_id, cwd, command, instruction, runtime_environment
+            )
 
         async with pi_process_lock(self.lock_path, exclusive=False):
             process = await asyncio.create_subprocess_exec(
@@ -321,6 +341,45 @@ class PiProvider:
             **snapshot.environment,
             "PI_CODING_AGENT_DIR": str(snapshot.agent_dir),
         }, snapshot.packages
+
+    def _write_debug_replay(
+        self,
+        session_id: str,
+        cwd: str,
+        command: list[str],
+        instruction: str,
+        environment: dict[str, str],
+    ) -> None:
+        debug_dir = Path(
+            environment.get(
+                "PI_CODING_AGENT_DIR", str(self.session_dir / f"{session_id}-debug")
+            )
+        )
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        instruction_path = debug_dir / "instruction.md"
+        instruction_path.write_text(instruction)
+        replay_path = debug_dir / "replay.sh"
+        key_guard = (
+            ': "${CARLO_PI_MODEL_API_KEY:?Export CARLO_PI_MODEL_API_KEY before replay}"\n'
+            if "CARLO_PI_MODEL_API_KEY" in environment
+            else ""
+        )
+        replay_path.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f"cd {shlex.quote(cwd)}\n"
+            f"export PI_CODING_AGENT_DIR={shlex.quote(str(debug_dir))}\n"
+            f"{key_guard}"
+            f"exec {shlex.join(command[:-1])} "
+            f'"$(cat {shlex.quote(str(instruction_path))})"\n'
+        )
+        replay_path.chmod(0o700)
+        logger.debug(
+            "Pi debug launch session=%s cwd=%s replay=%s command=%s",
+            session_id,
+            cwd,
+            replay_path,
+            shlex.join([*command[:-1], "<instruction.md>"]),
+        )
 
     def _profile_arguments(
         self,
@@ -572,6 +631,13 @@ def _final_output(events: tuple[dict[str, Any], ...]) -> str:
         message = event.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
+        if message.get("stopReason") == "error" and isinstance(
+            message.get("errorMessage"), str
+        ):
+            error_message = message["errorMessage"]
+            if "prompt too long" in error_message.lower() and "context window" in error_message.lower():
+                raise ContextLimitError(error_message)
+            raise ProviderError(error_message)
         content = message.get("content", [])
         text = "".join(
             part.get("text", "")

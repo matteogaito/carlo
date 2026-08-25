@@ -27,7 +27,7 @@ def test_legacy_resource_updater_only_manages_standalone_skills() -> None:
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

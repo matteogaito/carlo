@@ -157,7 +157,7 @@ async def test_action_api_discovers_enqueues_reads_console_and_cancels(
         "version: 1\nactions:\n  test:\n    name: Run tests\n    env_file: .env.dev\n    commands: ['python check.py', 'python verify.py']\n",
     )
     (source / ".env.dev").write_text("TOKEN=super-secret\n")
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(
@@ -231,7 +231,7 @@ async def test_action_api_reports_catalog_error_and_blocks_dirty_run(tmp_path: P
         tmp_path,
         "version: 1\nactions: {test: {name: Test, commands: ['true']}}\n",
     )
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

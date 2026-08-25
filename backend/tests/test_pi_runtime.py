@@ -39,7 +39,7 @@ def test_pi_runtime_snapshot_is_isolated_atomic_and_secret_free(tmp_path: Path) 
     assert snapshot.agent_dir == tmp_path / "runtime" / "DIMMELA-1-implementation-1"
     models = json.loads((snapshot.agent_dir / "models.json").read_text())
     assert models["providers"]["omlx"]["apiKey"] == "$CARLO_PI_MODEL_API_KEY"
-    assert models["providers"]["omlx"]["models"][0]["contextWindow"] == 65_536
+    assert models["providers"]["omlx"]["models"][0]["contextWindow"] == 58_982
     settings = json.loads((snapshot.agent_dir / "settings.json").read_text())
     assert settings == {
         "compaction": {

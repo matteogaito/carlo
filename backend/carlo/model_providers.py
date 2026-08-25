@@ -206,7 +206,12 @@ async def resolve_agent_profile(
     )
     api_key = _provider_api_key(provider, cipher, selected=True)
     compatibility = dict(provider.compatibility)
-    api = str(compatibility.pop("api", "openai-completions"))
+    default_api = (
+        "openai-responses"
+        if urlparse(provider.base_url).hostname == "api.openai.com"
+        else "openai-completions"
+    )
+    api = str(compatibility.pop("api", default_api))
     packages: tuple[Any, ...] = (
         tuple(
             ResolvedPiPackage(

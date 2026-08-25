@@ -21,7 +21,7 @@ export CARLO_FRONTEND_DIST="$INSTALL_ROOT/frontend/dist"
 cd "$INSTALL_ROOT/backend"
 case "${1:-}" in
     api)
-        exec .venv/bin/uvicorn carlo.main:app --host "${CARLO_BIND_HOST:-0.0.0.0}" --port "${CARLO_PORT:-8000}"
+        exec .venv/bin/uvicorn carlo.main:app --log-config logging.ini --log-level "${LOG_LEVEL:-INFO}" --host "${CARLO_BIND_HOST:-0.0.0.0}" --port "${CARLO_PORT:-8000}"
         ;;
     worker)
         exec .venv/bin/python -m carlo.worker

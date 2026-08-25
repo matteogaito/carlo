@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 import pytest
@@ -17,10 +19,37 @@ from carlo.models import (
 )
 from carlo.telegram import (
     TelegramCommandBot,
+    TelegramError,
     TelegramNotifier,
+    command_loop,
     format_event,
     telegram_enabled,
 )
+
+
+@pytest.mark.asyncio
+async def test_command_polling_uses_warning_and_backoff_for_network_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class OfflineBot:
+        async def poll_once(self) -> bool:
+            raise TelegramError("Telegram request failed")
+
+    delays: list[float] = []
+
+    async def stop_after_two_retries(delay: float) -> None:
+        delays.append(delay)
+        if len(delays) == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("carlo.telegram.asyncio.sleep", stop_after_two_retries)
+    with caplog.at_level(logging.WARNING, logger="carlo.telegram"):
+        with pytest.raises(asyncio.CancelledError):
+            await command_loop(OfflineBot())  # type: ignore[arg-type]
+
+    assert delays == [2, 4]
+    assert [record.levelname for record in caplog.records] == ["WARNING", "WARNING"]
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 class FakeTransport:
@@ -51,7 +80,7 @@ class FakeTransport:
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(

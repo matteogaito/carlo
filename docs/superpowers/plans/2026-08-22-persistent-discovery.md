@@ -784,7 +784,7 @@ Run:
 
 ```bash
 make test
-git -c safe.directory=/Users/Shared/Projects/codex/carlov3 diff --check
+git diff --check
 /bin/bash -n scripts/install-mac.sh scripts/run-mac-service.sh
 ```
 

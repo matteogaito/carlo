@@ -35,7 +35,7 @@ from .model_providers import (
     model_runtime_evidence,
     resolve_agent_profile,
 )
-from .provider import AgentProfile, AgentResult, CodingAgentProvider
+from .provider import AgentProfile, AgentResult, CodingAgentProvider, ContextLimitError
 
 IMPLEMENTATION_LOCK = 1_128_352_847
 MAX_INTERRUPTS = 3
@@ -73,6 +73,10 @@ class Orchestrator:
                     return None
                 try:
                     outcome = await self.runner(task_id)
+                except ContextLimitError as error:
+                    await self._context_limit(task_id, error)
+                    await self._finish(task_id, "failed")
+                    return task_id
                 except GitError as error:
                     await self._interrupt(task_id, error)
                     await self._finish(task_id, "failed")
@@ -92,28 +96,54 @@ class Orchestrator:
                 )
                 await lock_connection.commit()
 
+    async def _context_limit(self, task_id: str, error: ContextLimitError) -> None:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            if task is None:
+                return
+            session.add(
+                Event(
+                    task=task,
+                    type="execution.context_limit",
+                    payload={"error": str(error)[:500]},
+                )
+            )
+            await session.commit()
+
     async def _claim_next(self) -> str | None:
         async with self.session_factory() as session:
-            active = await session.scalar(
+            active_tasks = (
+                await session.scalars(
                 select(Task)
                 .where(Task.status == TaskStatus.IN_PROGRESS)
                 .order_by(Task.created_at, Task.id)
                 .with_for_update(skip_locked=True)
-                .limit(1)
-            )
+                )
+            ).all()
+            active = None
+            for candidate in active_tasks:
+                if await self._eligible(session, candidate):
+                    active = candidate
+                    break
             if active is not None:
                 if active.stage == TaskStage.BLOCKED:
                     return None
                 session.add(Event(task=active, type="recovery.resumed", payload={}))
                 await session.commit()
                 return active.id
-            task = await session.scalar(
+            ready_tasks = (
+                await session.scalars(
                 select(Task)
                 .where(Task.status == TaskStatus.READY, Task.stage == TaskStage.QUEUED)
                 .order_by(Task.priority.desc(), Task.created_at, Task.id)
                 .with_for_update(skip_locked=True)
-                .limit(1)
-            )
+                )
+            ).all()
+            task = None
+            for candidate in ready_tasks:
+                if await self._eligible(session, candidate):
+                    task = candidate
+                    break
             if task is None:
                 return None
             task.status, task.stage = transition(task.status, task.stage, "start")
@@ -121,6 +151,23 @@ class Orchestrator:
             session.add(Event(task=task, type="execution.started", payload={}))
             await session.commit()
             return task.id
+
+    @staticmethod
+    async def _eligible(session: AsyncSession, task: Task) -> bool:
+        if await session.scalar(
+            select(func.count(Task.id)).where(Task.parent_task_id == task.id)
+        ):
+            return False
+        if task.parent_task_id is None:
+            return True
+        unfinished = await session.scalar(
+            select(func.count(Task.id)).where(
+                Task.parent_task_id == task.parent_task_id,
+                Task.subtask_position < task.subtask_position,
+                Task.status != TaskStatus.DONE,
+            )
+        )
+        return not unfinished
 
     async def _finish(self, task_id: str, outcome: str) -> None:
         async with self.session_factory() as session:
@@ -143,7 +190,45 @@ class Orchestrator:
                 event_type = "execution.failed"
             task.version += 1
             session.add(Event(task=task, type=event_type, payload={"outcome": outcome}))
+            await self._sync_parent(session, task)
             await session.commit()
+
+    @staticmethod
+    async def _sync_parent(session: AsyncSession, child: Task) -> None:
+        if child.parent_task_id is None:
+            return
+        parent = await session.scalar(
+            select(Task).where(Task.id == child.parent_task_id).with_for_update()
+        )
+        if parent is None:
+            return
+        siblings = list(
+            (
+                await session.scalars(
+                    select(Task)
+                    .where(Task.parent_task_id == parent.id)
+                    .order_by(Task.subtask_position)
+                )
+            ).all()
+        )
+        previous = (parent.status, parent.stage)
+        event_type = None
+        if siblings and all(sibling.status == TaskStatus.DONE for sibling in siblings):
+            parent.status, parent.stage = TaskStatus.DONE, TaskStage.COMPLETE
+            parent.checkpoint_sha = siblings[-1].checkpoint_sha
+            event_type = "subtasks.completed"
+        elif any(sibling.status == TaskStatus.FAILED for sibling in siblings):
+            parent.status, parent.stage = TaskStatus.FAILED, TaskStage.BLOCKED
+            event_type = "subtasks.blocked"
+        elif any(sibling.stage == TaskStage.BLOCKED for sibling in siblings):
+            parent.status, parent.stage = TaskStatus.IN_PROGRESS, TaskStage.BLOCKED
+            event_type = "subtasks.blocked"
+        else:
+            parent.status, parent.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
+        if previous != (parent.status, parent.stage):
+            parent.version += 1
+            if event_type:
+                session.add(Event(task=parent, type=event_type, payload={"child": child.id}))
 
     async def _interrupt(self, task_id: str, error: Exception) -> int:
         async with self.session_factory() as session:
@@ -227,11 +312,23 @@ class ImplementationPipeline:
             task.project.integration_branch,
         )
         rework_cycle, previous_cycle_attempt = await self._rework_context(task_id)
+        base_ref = None
+        if task.parent_task_id is not None and task.subtask_position:
+            async with self.session_factory() as session:
+                predecessor = await session.scalar(
+                    select(Task).where(
+                        Task.parent_task_id == task.parent_task_id,
+                        Task.subtask_position == task.subtask_position - 1,
+                    )
+                )
+                if predecessor is None or predecessor.checkpoint_sha is None:
+                    raise GitError("previous subtask has no validated checkpoint")
+                base_ref = predecessor.checkpoint_sha
         if task.worktree_path and task.branch_name:
             worktree = Worktree(task.branch_name, Path(task.worktree_path))
         else:
             worktree = await workspace.prepare(
-                task.id, task.title, rework_cycle=rework_cycle
+                task.id, task.title, rework_cycle=rework_cycle, base_ref=base_ref
             )
             async with self.session_factory() as session:
                 current = await session.get(Task, task_id)

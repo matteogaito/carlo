@@ -881,22 +881,40 @@ def create_app(
         await session.commit()
         return _pi_package_view(package)
 
-    @api.delete("/settings/pi-packages/{package_id}")
-    async def disable_pi_package(
+    @api.delete(
+        "/settings/pi-packages/{package_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    async def delete_pi_package(
         package_id: int,
         session: AsyncSession = Depends(get_session),
-    ) -> dict[str, Any]:
+    ) -> Response:
         package = await session.get(PiPackage, package_id)
         if package is None:
             raise HTTPException(404, "Pi package not found")
-        package.enabled = False
-        package.is_default = False
-        await session.execute(
-            delete(AgentProfilePackage).where(AgentProfilePackage.package_id == package.id)
+        assigned = await session.scalar(
+            select(AgentProfilePackage.package_id).where(
+                AgentProfilePackage.package_id == package.id
+            )
         )
-        session.add(Event(type="pi.package.disabled", payload={"package_id": package.id, "identity": package.identity}))
+        legacy_assignment = await session.scalar(
+            select(AgentProfileRecord.id).where(
+                AgentProfileRecord.default_packages.contains([package.identity])
+            )
+        )
+        if assigned is not None or legacy_assignment is not None:
+            raise HTTPException(409, "Pi package is assigned to an agent profile")
+        runtime = await session.get(PiRuntimeSettings, 1)
+        if runtime is not None:
+            runtime.default_packages = [
+                identity
+                for identity in runtime.default_packages
+                if identity != package.identity
+            ]
+        session.add(Event(type="pi.package.deleted", payload={"package_id": package.id, "identity": package.identity}))
+        await session.delete(package)
         await session.commit()
-        return _pi_package_view(package)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @api.patch("/agent-profiles/{name}")
     async def update_agent_profile(
@@ -1551,7 +1569,7 @@ def create_app(
                 Event(task=task, type="planning.failed", payload={"error": str(error)})
             )
             await session.commit()
-            raise HTTPException(502, "planning provider failed") from error
+            raise HTTPException(502, str(error)) from error
 
         if result.used_skills or result.resource_revisions:
             session.add(
@@ -1580,7 +1598,7 @@ def create_app(
         except ValueError as error:
             session.add(Event(task=task, type="planning.failed", payload={"error": str(error)}))
             await session.commit()
-            raise HTTPException(502, "planning provider returned invalid output") from error
+            raise HTTPException(502, str(error)) from error
 
         revision = (
             await session.scalar(
@@ -1753,8 +1771,79 @@ def create_app(
         task.approved_plan_revision = payload.revision
         task.version += 1
         plan.approved_at = datetime.now(UTC)
-        session.add(
-            Event(task=task, type="plan.approved", payload={"revision": payload.revision})
+        items = plan.metadata_json.get("implementation_tasks") or []
+        children: list[Task] = []
+        if task.parent_task_id is None and items:
+            existing = (
+                await session.scalars(
+                    select(Task)
+                    .where(Task.parent_task_id == task.id)
+                    .order_by(Task.subtask_position)
+                )
+            ).all()
+            if existing:
+                children = list(existing)
+            else:
+                project = await session.scalar(
+                    select(Project)
+                    .where(Project.id == task.project_id)
+                    .with_for_update()
+                )
+                if project is None:
+                    raise HTTPException(404, "project not found")
+                for position, item in enumerate(items):
+                    sequence = project.next_task_sequence
+                    project.next_task_sequence += 1
+                    child = Task(
+                        id=f"{project.key}-{sequence}",
+                        project=project,
+                        sequence=sequence,
+                        title=str(item["title"]),
+                        goal=str(item["prompt"]),
+                        priority=task.priority,
+                        created_source="plan",
+                        status=TaskStatus.READY,
+                        stage=TaskStage.QUEUED,
+                        approved_plan_revision=1,
+                        available_model_id=task.available_model_id,
+                        parent=task,
+                        subtask_position=position,
+                    )
+                    child_metadata = {
+                        **plan.metadata_json,
+                        "title": str(item["title"]),
+                        "description": str(item["prompt"]),
+                        "implementation_tasks": [item],
+                        "implementation_phases": [str(item["title"])],
+                    }
+                    child_plan = PlanRevision(
+                        task=child,
+                        revision=1,
+                        brief_markdown=plan.brief_markdown,
+                        plan_markdown=str(item["prompt"]),
+                        metadata_json=child_metadata,
+                        approved_at=plan.approved_at,
+                    )
+                    session.add_all(
+                        [
+                            child,
+                            child_plan,
+                            Event(task=child, type="task.created", payload={"source": "plan"}),
+                            Event(task=child, type="plan.approved", payload={"revision": 1}),
+                        ]
+                    )
+                    children.append(child)
+                task.status = TaskStatus.IN_PROGRESS
+                task.stage = TaskStage.IMPLEMENTING
+        session.add_all(
+            [
+                Event(task=task, type="plan.approved", payload={"revision": payload.revision}),
+                *(
+                    [Event(task=task, type="subtasks.created", payload={"children": [child.id for child in children]})]
+                    if children
+                    else []
+                ),
+            ]
         )
         await session.commit()
         return await _task_view(session, task)
@@ -2196,6 +2285,17 @@ async def _task_view(
         .order_by(PlanRevision.revision.desc())
         .limit(1)
     )
+    parent_title = None
+    if task.parent_task_id:
+        parent_title = await session.scalar(
+            select(Task.title).where(Task.id == task.parent_task_id)
+        )
+    subtask_count = int(
+        await session.scalar(
+            select(func.count(Task.id)).where(Task.parent_task_id == task.id)
+        )
+        or 0
+    )
     view = {
         "id": task.id,
         "project_id": task.project_id,
@@ -2212,6 +2312,10 @@ async def _task_view(
         "checkpoint_sha": task.checkpoint_sha,
         "available_model_id": task.available_model_id,
         "planning_question": task.planning_question,
+        "parent_task_id": task.parent_task_id,
+        "parent_title": parent_title,
+        "subtask_position": task.subtask_position,
+        "subtask_count": subtask_count,
         "used_skills": [],
         "skill_revisions": {},
         "loaded_packages": {},

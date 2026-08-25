@@ -18,7 +18,7 @@ from tests.fakes import FakeProvider
 async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     subprocess.run(["git", "init", "-b", "main", str(repository)], check=True, capture_output=True)
-    engine = create_async_engine("postgresql+psycopg:///carlov3_test")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.execute(text("TRUNCATE projects, users, agent_profiles RESTART IDENTITY CASCADE"))
