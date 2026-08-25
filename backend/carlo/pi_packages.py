@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+from glob import has_magic
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,16 +74,19 @@ class PiPackageManager:
         agent_dir = staging / "agent"
         try:
             async with pi_process_lock(self.lock_path):
-                process = await asyncio.create_subprocess_exec(
-                    str(self.pi_executable),
-                    "install",
-                    source,
-                    "--no-approve",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env={**os.environ, "PI_CODING_AGENT_DIR": str(agent_dir)},
-                )
-                stdout, stderr = await process.communicate()
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        str(self.pi_executable),
+                        "install",
+                        source,
+                        "--no-approve",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env={**os.environ, "PI_CODING_AGENT_DIR": str(agent_dir)},
+                    )
+                    stdout, stderr = await process.communicate()
+                except OSError as error:
+                    raise PiPackageError(str(error)) from error
             if process.returncode:
                 message = (stderr or stdout).decode(errors="replace").strip()[-500:]
                 raise PiPackageError(message or f"Pi exited with {process.returncode}")
@@ -114,9 +118,11 @@ class PiPackageManager:
                 return root
         else:
             candidates = [
-                path.parent
-                for path in (agent_dir / "git").glob("*/package.json")
-                if path.is_file() and not path.parent.is_symlink()
+                metadata.parent
+                for metadata in (agent_dir / "git").rglob(".git")
+                if metadata.is_dir()
+                and not metadata.parent.is_symlink()
+                and (metadata.parent / "package.json").is_file()
             ]
             if len(candidates) == 1:
                 return candidates[0]
@@ -179,32 +185,40 @@ class PiPackageManager:
                 isinstance(entry, str) for entry in entries
             ):
                 raise PiPackageError(f"invalid Pi {kind} manifest")
-            for entry in entries:
+            exclusions = [entry[1:].removeprefix("./") for entry in entries if entry.startswith("!")]
+            for entry in (entry for entry in entries if not entry.startswith("!")):
                 clean = entry.removeprefix("./")
-                path = (package_root / clean).resolve()
-                try:
-                    path.relative_to(package_root.resolve())
-                except ValueError as error:
-                    raise PiPackageError("Pi package resource escapes its root") from error
-                if not path.exists():
+                matches = list(package_root.glob(clean)) if has_magic(clean) else [package_root / clean]
+                matches = [
+                    path for path in matches
+                    if not any(path.relative_to(package_root).match(pattern) for pattern in exclusions)
+                ]
+                if not matches:
                     raise PiPackageError(f"Pi package resource is missing: {clean}")
-                if kind == "skills":
-                    result[kind].extend(
-                        skill.parent.name for skill in path.rglob("SKILL.md")
-                    )
-                elif path.is_dir():
-                    suffixes = {
-                        "extensions": {".js", ".ts"},
-                        "prompts": {".md"},
-                        "themes": {".json"},
-                    }[kind]
-                    result[kind].extend(
-                        str(item.relative_to(package_root))
-                        for item in path.rglob("*")
-                        if item.is_file() and item.suffix in suffixes
-                    )
-                else:
-                    result[kind].append(str(path.relative_to(package_root)))
+                for candidate in matches:
+                    path = candidate.resolve()
+                    try:
+                        path.relative_to(package_root.resolve())
+                    except ValueError as error:
+                        raise PiPackageError("Pi package resource escapes its root") from error
+                    if not path.exists():
+                        raise PiPackageError(f"Pi package resource is missing: {clean}")
+                    if kind == "skills":
+                        skill_files = [path] if path.is_file() and path.name == "SKILL.md" else path.rglob("SKILL.md")
+                        result[kind].extend(skill.parent.name for skill in skill_files)
+                    elif path.is_dir():
+                        suffixes = {
+                            "extensions": {".js", ".ts"},
+                            "prompts": {".md"},
+                            "themes": {".json"},
+                        }[kind]
+                        result[kind].extend(
+                            str(item.relative_to(package_root))
+                            for item in path.rglob("*")
+                            if item.is_file() and item.suffix in suffixes
+                        )
+                    else:
+                        result[kind].append(str(path.relative_to(package_root)))
         return {key: list(dict.fromkeys(values)) for key, values in result.items()}
 
     @staticmethod

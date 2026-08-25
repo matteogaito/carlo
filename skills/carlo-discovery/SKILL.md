@@ -50,7 +50,7 @@ Each proposal contains:
   assumptions, relevant files and symbols;
 - `plan_markdown`: ordered, technical implementation strategy with invariants,
   error handling, validation and stopping conditions;
-- `metadata`: `skills`, concise ordered `implementation_phases`, verified
+- `metadata`: `packages`, standalone `skills`, concise ordered `implementation_phases`, verified
   `validation_commands`, the four validation/deployment booleans, `risk_flags`,
   and `affected_areas`, using the same contract as CARLO planning.
 

@@ -10,8 +10,17 @@ from carlo.admin import bootstrap_admin
 from carlo.api import create_app
 from carlo.config import Settings
 from carlo.model_providers import CredentialCipher
-from carlo.models import AgentProfile, AvailableModel, Base, ModelProvider, Project, Task
+from carlo.models import AgentProfile, AvailableModel, Base, ModelProvider, PiPackage, Project, Task
+from carlo.pi_packages import InstalledPiPackage
 from tests.fakes import FakeProvider
+
+
+class FakePackageManager:
+    async def install(self, source: str) -> InstalledPiPackage:
+        identity = source.split("@", 1)[0]
+        return InstalledPiPackage(
+            identity, source, "1.5.0", f"/tmp/{identity.replace(':', '-')}", {"skills": ["pippo"]}
+        )
 
 
 @pytest.fixture
@@ -24,7 +33,7 @@ async def settings_app() -> AsyncIterator[tuple[object, async_sessionmaker[Async
                 "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
                 "user_sessions, project_memberships, users, events, validation_runs, "
                 "escalations, attempts, plan_revisions, tasks, projects, agent_profiles, "
-                "available_models, model_providers, pi_runtime_settings "
+                "agent_profile_packages, pi_packages, available_models, model_providers, pi_runtime_settings "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -36,15 +45,63 @@ async def settings_app() -> AsyncIterator[tuple[object, async_sessionmaker[Async
             )
         )
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add_all(
+            [
+                PiPackage(source="git:superpowers", identity="superpowers", enabled=True, is_default=True, active_version="a" * 40, active_artifact_path="/tmp/superpowers"),
+                PiPackage(source="git:ponytail", identity="ponytail", enabled=True, is_default=True, active_version="b" * 40, active_artifact_path="/tmp/ponytail"),
+            ]
+        )
+        await session.commit()
     await bootstrap_admin(factory, "admin", "admin-password")
     key = base64.b64encode(b"k" * 32).decode()
     app = create_app(
         factory,
         FakeProvider("{}"),
         Settings(app_origin="http://test", credential_encryption_key=key),
+        package_manager=FakePackageManager(),
     )
     yield app, factory, key
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_admin_manages_explicit_pi_package_sources(settings_app) -> None:
+    app, _, _ = settings_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        client.headers["Origin"] = "http://test"
+        created = await client.post(
+            "/api/settings/pi-packages",
+            json={"source": "npm:pippo", "is_default": True},
+        )
+        duplicate = await client.post(
+            "/api/settings/pi-packages",
+            json={"source": "npm:pippo@2.0.0", "is_default": False},
+        )
+        invalid = await client.post(
+            "/api/settings/pi-packages",
+            json={"source": "/tmp/local-package", "is_default": False},
+        )
+        package_id = created.json()["id"]
+        refreshed = await client.post(f"/api/settings/pi-packages/{package_id}/update")
+        disabled = await client.delete(f"/api/settings/pi-packages/{package_id}")
+
+    assert created.status_code == 201
+    assert {
+        key: created.json()[key]
+        for key in ("identity", "is_default", "pinned", "active_version", "last_update_status")
+    } == {
+        "identity": "npm:pippo",
+        "is_default": True,
+        "pinned": False,
+        "active_version": "1.5.0",
+        "last_update_status": "SUCCESS",
+    }
+    assert duplicate.status_code == 409
+    assert invalid.status_code == 422
+    assert refreshed.status_code == 200
+    assert disabled.json()["enabled"] is False
 
 
 @pytest.mark.asyncio

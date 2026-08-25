@@ -35,6 +35,7 @@ LABELS = {
     "pi.update_failed": "Pi weekly update failed",
     "pi.resources_updated": "Pi skills updated",
     "pi.resources_update_failed": "Pi skills update failed",
+    "pi.packages_update_completed": "Pi packages updated",
 }
 NOTIFY_EVENTS = frozenset(LABELS)
 DETAIL_FIELDS = {
@@ -51,6 +52,7 @@ DETAIL_FIELDS = {
     "pi.update_failed": ("error", "exit_code"),
     "pi.resources_updated": ("summary",),
     "pi.resources_update_failed": ("error",),
+    "pi.packages_update_completed": ("summary", "updated", "unchanged", "failed"),
 }
 ALWAYS_NOTIFY_EVENTS = {
     "system.started",
@@ -59,6 +61,7 @@ ALWAYS_NOTIFY_EVENTS = {
     "pi.update_failed",
     "pi.resources_updated",
     "pi.resources_update_failed",
+    "pi.packages_update_completed",
 }
 BLOCKING_EVENTS = {
     "planning.failed",

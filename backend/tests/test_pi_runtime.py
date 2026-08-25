@@ -55,6 +55,16 @@ def test_pi_runtime_snapshot_is_isolated_atomic_and_secret_free(tmp_path: Path) 
     assert snapshot.manifest["context_window"] == 65_536
     assert "api_key" not in snapshot.manifest
 
+    package_root = tmp_path / "new-package"
+    package_root.mkdir()
+    package = provider.ResolvedPiPackage(
+        9, "npm:new", "npm:new", "2.0.0", str(package_root), {"skills": ["new"]}
+    )
+    resumed = runtime.PiRuntimeSnapshotBuilder(tmp_path / "runtime").materialize(
+        "DIMMELA-1-implementation-1", resolved, (package,)
+    )
+    assert resumed.packages == ()
+
 
 def test_pi_runtime_cleanup_only_removes_its_temporary_files(tmp_path: Path) -> None:
     runtime = importlib.import_module("carlo.pi_runtime")

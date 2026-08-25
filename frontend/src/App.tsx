@@ -415,8 +415,11 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
     .filter((event) => event.type.startsWith('planning.'))
     .slice(0, 8)
     .reverse()
-  const resourceOnly = Object.keys(task.skill_revisions || {})
+  const legacyResources = Object.keys(task.skill_revisions || {})
     .filter((name) => !(task.used_skills || []).includes(name))
+  const loadedPackages = Object.keys(task.loaded_packages || {}).length
+    ? Object.keys(task.loaded_packages || {})
+    : legacyResources
   return (
     <aside className="task-detail" aria-label={`${task.id} details`} style={{ width }}>
       <div
@@ -486,7 +489,7 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
       </>}
       <div className="skill-ledger">
         <SkillChips label="Skills used" skills={task.used_skills || []} empty="None recorded" revisions={task.skill_revisions} />
-        {!!resourceOnly.length && <SkillChips label="Managed Pi resources" skills={resourceOnly} empty="" revisions={task.skill_revisions} />}
+        {!!loadedPackages.length && <SkillChips label="Pi packages loaded" skills={loadedPackages} empty="" revisions={task.loaded_packages || task.skill_revisions} />}
       </div>
       {!structuredPlan && !!phases.length && <section><h3>Implementation phases</h3><ol className="implementation-phases">
         {phases.map((phase, index) => <li key={`${index}-${phase}`}><span>{index + 1}</span><p>{phase}</p></li>)}

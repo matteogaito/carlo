@@ -10,6 +10,7 @@ import {
   type ActionCatalog,
   type ActionRun,
   type AgentProfileSettings,
+  type AgentPackage,
   type AvailableModel,
   type Api,
   type Discovery,
@@ -98,6 +99,10 @@ const api: Api = {
   listAgentProfiles: async () => [],
   listSkills: async () => [],
   listPackages: async () => [],
+  createPackage: async (input) => ({ name: input.source, revision: null }),
+  updatePackage: async () => ({ name: 'package', revision: null }),
+  refreshPackage: async () => ({ name: 'package', revision: null }),
+  disablePackage: async () => ({ name: 'package', revision: null }),
   updateAgentProfile: async () => { throw new Error('unused') },
   setTaskModel: async () => { throw new Error('unused') },
   events: () => () => undefined,
@@ -510,6 +515,20 @@ describe('CARLO board', () => {
     const refreshModelProvider = vi.fn(async () => undefined)
     const updateModelProvider = vi.fn(async () => provider)
     const updateAgentProfile = vi.fn(async () => profile)
+    const packageSettings: AgentPackage[] = [
+      { id: 1, name: 'superpowers', source: 'git:superpowers', revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', active_version: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', enabled: true, pinned: false, is_default: true, resources: {}, last_update_status: 'SUCCESS' },
+      { id: 2, name: 'ponytail', source: 'git:ponytail', revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', active_version: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', enabled: true, pinned: false, is_default: true, resources: { skills: ['ponytail'] }, last_update_status: 'SUCCESS' },
+    ]
+    const updatePackage = vi.fn(async (id: number, input: { enabled?: boolean; is_default?: boolean }) => {
+      const item = packageSettings.find((candidate) => candidate.id === id)!
+      Object.assign(item, input)
+      return item
+    })
+    const createPackage = vi.fn(async (input: { source: string; is_default: boolean }) => {
+      const item: AgentPackage = { id: 3, name: input.source, source: input.source, revision: '1.0.0', active_version: '1.0.0', enabled: true, pinned: false, is_default: input.is_default, resources: {}, last_update_status: 'SUCCESS' }
+      packageSettings.push(item)
+      return item
+    })
     let piSettings = { compaction_enabled: true, reserve_percent: 10, keep_recent_percent: 20, default_packages: ['superpowers', 'ponytail'], default_skills: [] }
     const updatePiSettings = vi.fn(async (input) => {
       piSettings = { ...piSettings, ...input }
@@ -521,10 +540,7 @@ describe('CARLO board', () => {
       listModelProviders: async () => [provider],
       listModels: async () => [model],
       listAgentProfiles: async () => [profile],
-      listPackages: async () => [
-        { name: 'superpowers', revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
-        { name: 'ponytail', revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
-      ],
+      listPackages: async () => packageSettings,
       listSkills: async () => [
         { name: 'carlo-planning', source: 'carlo', revision: null, required_profiles: ['brief', 'plan'] },
         { name: 'carlo-ui-design', source: 'carlo', revision: null, required_profiles: [] },
@@ -534,6 +550,8 @@ describe('CARLO board', () => {
       updateModelProvider,
       updateAgentProfile,
       updatePiSettings,
+      updatePackage,
+      createPackage,
     }} />)
 
     await userEvent.click(await screen.findByRole('button', { name: 'Settings' }))
@@ -545,18 +563,17 @@ describe('CARLO board', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Refresh Local OMLX' }))
     expect(refreshModelProvider).toHaveBeenCalledWith(1)
     await userEvent.click(screen.getByRole('button', { name: 'Coding agents' }))
-    expect(screen.getByRole('heading', { name: 'Default resources' })).toBeTruthy()
-    const defaultSuperpowers = screen.getByRole('checkbox', { name: 'Default superpowers' }) as HTMLInputElement
-    const defaultPonytail = screen.getByRole('checkbox', { name: 'Default ponytail' }) as HTMLInputElement
+    expect(screen.getByRole('heading', { name: 'Global Pi packages' })).toBeTruthy()
+    const [defaultSuperpowers, defaultPonytail] = screen.getAllByRole('checkbox', { name: 'Default' }) as HTMLInputElement[]
     expect(defaultSuperpowers.checked).toBe(true)
     expect(defaultPonytail.checked).toBe(true)
-    expect(screen.getAllByText('bbbbbbb').length).toBeGreaterThan(0)
+    expect(screen.getByText('Skills: ponytail')).toBeTruthy()
     await userEvent.click(defaultPonytail)
-    await userEvent.click(screen.getByRole('button', { name: 'Save default resources' }))
-    expect(updatePiSettings).toHaveBeenCalledWith({
-      default_packages: ['superpowers'],
-      default_skills: [],
-    })
+    await waitFor(() => expect(updatePackage).toHaveBeenCalledWith(2, { is_default: false }))
+    await userEvent.click(screen.getByRole('button', { name: '+ Package' }))
+    await userEvent.type(screen.getByLabelText('Package source'), 'npm:pippo')
+    await userEvent.click(screen.getByRole('button', { name: 'Install package' }))
+    await waitFor(() => expect(createPackage).toHaveBeenCalledWith({ source: 'npm:pippo', is_default: true }))
     expect(screen.queryByText(/Legacy Pi/i)).toBeNull()
     expect(screen.getByRole('option', { name: 'Not configured — choose a managed model' })).toBeTruthy()
     expect(screen.getByRole('option', { name: 'omlx — Qwen3.8-27B' })).toBeTruthy()

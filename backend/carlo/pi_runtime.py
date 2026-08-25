@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .provider import ResolvedModel
+from .provider import ResolvedModel, ResolvedPiPackage
 
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_.-]{1,200}\Z")
 
@@ -16,6 +16,7 @@ class PiRuntimeSnapshot:
     model_pattern: str
     environment: dict[str, str]
     manifest: dict[str, Any]
+    packages: tuple[ResolvedPiPackage, ...]
 
 
 class PiRuntimeSnapshotBuilder:
@@ -23,7 +24,10 @@ class PiRuntimeSnapshotBuilder:
         self.root = root
 
     def materialize(
-        self, session_id: str, model: ResolvedModel
+        self,
+        session_id: str,
+        model: ResolvedModel,
+        packages: tuple[ResolvedPiPackage, ...] = (),
     ) -> PiRuntimeSnapshot:
         if not _SAFE_SESSION_ID.fullmatch(session_id):
             raise ValueError("invalid Pi session ID")
@@ -34,6 +38,21 @@ class PiRuntimeSnapshotBuilder:
         if agent_dir.is_symlink():
             raise ValueError("Pi runtime session must not be a symlink")
         agent_dir.mkdir(exist_ok=True)
+
+        manifest_path = agent_dir / "manifest.json"
+        if manifest_path.is_file():
+            previous = json.loads(manifest_path.read_text())
+            packages = tuple(
+                ResolvedPiPackage(
+                    int(item["id"]),
+                    str(item["identity"]),
+                    str(item["source"]),
+                    str(item["version"]),
+                    str(item["artifact_path"]),
+                    dict(item.get("resources") or {}),
+                )
+                for item in previous.get("packages", [])
+            )
 
         manifest = {
             "model_provider_id": model.model_provider_id,
@@ -47,6 +66,17 @@ class PiRuntimeSnapshotBuilder:
                 "reserve_tokens": model.reserve_tokens,
                 "keep_recent_tokens": model.keep_recent_tokens,
             },
+            "packages": [
+                {
+                    "id": package.package_id,
+                    "identity": package.identity,
+                    "source": package.source,
+                    "version": package.version,
+                    "artifact_path": package.artifact_path,
+                    "resources": package.resources,
+                }
+                for package in packages
+            ],
         }
         self._write_json(
             agent_dir / "models.json",
@@ -97,6 +127,7 @@ class PiRuntimeSnapshotBuilder:
             if model.api_key
             else {},
             manifest=manifest,
+            packages=packages,
         )
 
     def cleanup_temporary_files(self) -> None:

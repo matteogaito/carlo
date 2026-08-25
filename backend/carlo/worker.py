@@ -8,12 +8,14 @@ from .config import Settings
 from .db import make_engine, make_session_factory
 from .discovery_runtime import DiscoveryRuntime
 from .maintenance import (
+    ensure_managed_pi_packages,
     ensure_pi_resources,
     maintenance_loop,
     record_startup,
 )
 from .model_providers import CredentialCipher
 from .pi_runtime import PiRuntimeSnapshotBuilder
+from .pi_packages import PiPackageManager
 from .orchestrator import ImplementationPipeline, Orchestrator
 from .provider import PiProvider
 from .ssh import SshTransport
@@ -44,12 +46,17 @@ async def run() -> None:
     )
     runtime_builder.cleanup_temporary_files()
     resource_root = Path(settings.artifact_root) / "pi-resources"
+    lock_path = Path(settings.artifact_root) / "pi-runtime.lock"
+    package_manager = PiPackageManager(
+        Path(settings.pi_executable),
+        Path(settings.artifact_root) / "pi-packages",
+        lock_path,
+    )
     provider = PiProvider(
         settings.pi_executable,
         Path(settings.artifact_root) / "pi-sessions",
         runtime_builder=runtime_builder,
         resource_root=resource_root,
-        managed_packages=("superpowers", "ponytail"),
         managed_skills={"frontend-design": "skills/frontend-design"},
         resource_manifest=resource_root / "revisions.json",
     )
@@ -112,8 +119,9 @@ async def run() -> None:
         factory,
         "git",
         resource_root,
-        Path(settings.artifact_root) / "pi-runtime.lock",
+        lock_path,
     )
+    await ensure_managed_pi_packages(factory, package_manager)
     await discovery_runtime.recover()
     discovery_task = asyncio.create_task(_discovery_loop(discovery_runtime))
     maintenance_task = asyncio.create_task(
@@ -121,9 +129,10 @@ async def run() -> None:
             factory,
             settings.npm_executable,
             settings.pi_executable,
-            Path(settings.artifact_root) / "pi-runtime.lock",
+            lock_path,
             cipher,
             resource_root,
+            package_manager,
         )
     )
     try:

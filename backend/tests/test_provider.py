@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from carlo.pi_runtime import PiRuntimeSnapshotBuilder
-from carlo.provider import AgentProfile, PiProvider, ProviderError, ResolvedModel
+from carlo.provider import AgentProfile, PiProvider, ProviderError, ResolvedModel, ResolvedPiPackage
 
 
 def _resolved_model() -> ResolvedModel:
@@ -173,6 +173,36 @@ async def test_pi_provider_loads_only_packages_selected_by_the_profile(
     argv = result.events[-1]["argv"]
     assert ["-e", str(ponytail)] == argv[:2]
     assert str(superpowers) not in argv
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_loads_resolved_package_artifacts(tmp_path: Path) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "print(json.dumps({'type': 'final', 'output': 'done', 'argv': sys.argv[1:]}))\n"
+    )
+    executable.chmod(0o755)
+    first = tmp_path / "pippo"
+    second = tmp_path / "tools"
+    first.mkdir()
+    second.mkdir()
+    packages = (
+        ResolvedPiPackage(1, "npm:pippo", "npm:pippo", "1.5.0", str(first), {"skills": ["pippo"]}),
+        ResolvedPiPackage(2, "git:tools", "git:tools", "a" * 40, str(second), {"skills": []}),
+    )
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+
+    result = await provider.run(
+        AgentProfile("implementation", None, None, (), (), packages=packages),
+        "Implement",
+        str(tmp_path),
+        "CAR-8-implementation",
+    )
+
+    assert result.events[-1]["argv"][:4] == ["-e", str(first), "-e", str(second)]
+    assert result.loaded_packages == {"npm:pippo": "1.5.0", "git:tools": "a" * 40}
 
 
 @pytest.mark.asyncio

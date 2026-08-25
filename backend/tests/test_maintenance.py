@@ -20,18 +20,9 @@ from carlo.model_providers import CredentialCipher
 from carlo.models import Base, Event, ModelProvider
 
 
-def test_carlo_manages_both_pi_workflow_packages() -> None:
+def test_legacy_resource_updater_only_manages_standalone_skills() -> None:
     packages = {resource.name: resource for resource in MANAGED_PI_RESOURCES}
-    assert packages["superpowers"].required_paths == (
-        "package.json",
-        ".pi/extensions/superpowers.ts",
-        "skills/using-superpowers/SKILL.md",
-    )
-    assert packages["ponytail"].required_paths == (
-        "package.json",
-        "pi-extension/index.js",
-        "skills/ponytail/SKILL.md",
-    )
+    assert set(packages) == {"frontend-design"}
 
 
 @pytest.fixture

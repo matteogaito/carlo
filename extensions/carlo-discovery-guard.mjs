@@ -41,6 +41,7 @@ export default function (pi) {
         brief_markdown: Type.String(),
         plan_markdown: Type.String(),
         metadata: Type.Object({
+          packages: Type.Array(Type.String()),
           skills: Type.Array(Type.String()),
           implementation_phases: Type.Array(Type.String()),
           validation_commands: Type.Array(Type.String()),

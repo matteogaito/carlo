@@ -209,9 +209,12 @@ class ImplementationPipeline:
             implementation.id,
             task.available_model_id,
             tuple(
-                skill
-                for skill in plan.metadata_json.get("skills", [])
-                if isinstance(skill, str)
+                resource
+                for resource in (
+                    *plan.metadata_json.get("packages", []),
+                    *plan.metadata_json.get("skills", []),
+                )
+                if isinstance(resource, str)
             ),
         )
         escalation_profile = await self._resolve_profile(escalation.id)
@@ -575,6 +578,7 @@ class ImplementationPipeline:
                         "event_count": len(result.events),
                         "skills": list(result.used_skills),
                         "revisions": result.resource_revisions,
+                        "packages": result.loaded_packages,
                     },
                 )
             )

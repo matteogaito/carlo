@@ -17,11 +17,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .models import (
+    AgentProfilePackage,
     AgentProfile as AgentProfileRecord,
     AvailableModel,
     Event,
     ModelProvider,
     PiRuntimeSettings,
+    PiPackage,
 )
 
 MODEL_CATALOG_LIMIT = 8 * 1024 * 1024
@@ -116,14 +118,41 @@ async def resolve_agent_profile(
     extra_skills: tuple[str, ...] = (),
     default_tools: tuple[str, ...] = ("read", "grep", "find", "ls"),
 ) -> Any:
-    from .provider import AgentProfile, ResolvedModel
+    from .provider import AgentProfile, ResolvedModel, ResolvedPiPackage
 
     tools = tuple(record.permissions.get("tools") or default_tools)
     runtime = await session.get(PiRuntimeSettings, 1)
-    plan_packages, plan_skills = partition_plan_resources(
-        extra_skills, available_profile_packages(), available_profile_skills()
+    records = list(
+        await session.scalars(
+            select(PiPackage)
+            .outerjoin(
+                AgentProfilePackage,
+                AgentProfilePackage.package_id == PiPackage.id,
+            )
+            .where(
+                PiPackage.enabled.is_(True),
+                (PiPackage.is_default.is_(True))
+                | (AgentProfilePackage.agent_profile_id == record.id)
+                | (PiPackage.identity.in_(extra_skills)),
+            )
+            .distinct()
+            .order_by(PiPackage.identity)
+        )
     )
-    packages = tuple(
+    dynamic_package_names = {package.identity for package in records}
+    supplied_skills = {
+        skill
+        for package in records
+        for skill in package.resources.get("skills", [])
+        if isinstance(skill, str)
+    }
+    plan_packages, plan_skills = partition_plan_resources(
+        extra_skills,
+        dynamic_package_names or available_profile_packages(),
+        available_profile_skills() | supplied_skills,
+    )
+    plan_skills = tuple(skill for skill in plan_skills if skill not in supplied_skills)
+    legacy_packages = () if records else tuple(
         dict.fromkeys(
             (
                 *(runtime.default_packages if runtime else DEFAULT_PROFILE_PACKAGES),
@@ -132,7 +161,7 @@ async def resolve_agent_profile(
             )
         )
     )
-    unknown_packages = sorted(set(packages) - available_profile_packages())
+    unknown_packages = sorted(set(legacy_packages) - available_profile_packages())
     if unknown_packages:
         raise ModelProviderError(
             f"agent profile has unknown packages: {', '.join(unknown_packages)}"
@@ -178,6 +207,21 @@ async def resolve_agent_profile(
     api_key = _provider_api_key(provider, cipher, selected=True)
     compatibility = dict(provider.compatibility)
     api = str(compatibility.pop("api", "openai-completions"))
+    packages: tuple[Any, ...] = (
+        tuple(
+            ResolvedPiPackage(
+                package.id,
+                package.identity,
+                package.source,
+                package.active_version or "unresolved",
+                package.active_artifact_path or "",
+                package.resources,
+            )
+            for package in records
+        )
+        if records
+        else legacy_packages
+    )
     return AgentProfile(
         name=record.name,
         model=None,

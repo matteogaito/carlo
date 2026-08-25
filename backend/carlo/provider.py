@@ -41,6 +41,16 @@ class ResolvedModel:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedPiPackage:
+    package_id: int
+    identity: str
+    source: str
+    version: str
+    artifact_path: str
+    resources: dict[str, list[str]]
+
+
+@dataclass(frozen=True, slots=True)
 class AgentProfile:
     name: str
     model: str | None
@@ -48,7 +58,7 @@ class AgentProfile:
     tools: tuple[str, ...]
     skills: tuple[str, ...]
     resolved_model: ResolvedModel | None = None
-    packages: tuple[str, ...] = ()
+    packages: tuple[ResolvedPiPackage | str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +69,7 @@ class AgentResult:
     exit_code: int
     used_skills: tuple[str, ...] = ()
     resource_revisions: dict[str, str] = field(default_factory=dict)
+    loaded_packages: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,11 +165,11 @@ class PiProvider:
         if self.status(session_id) == "running":
             raise ProviderError(f"session is already running: {session_id}")
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        model, runtime_environment = self._runtime(profile, session_id)
+        model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
         package_paths, external_skills, _ = self._resource_snapshot()
         command = [
             self.executable,
-            *self._package_arguments(profile, package_paths),
+            *self._package_arguments(runtime_packages, package_paths),
             "--mode",
             "rpc",
             "--approve",
@@ -199,11 +210,11 @@ class PiProvider:
         on_event: AgentEventHandler | None = None,
     ) -> AgentResult:
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        model, runtime_environment = self._runtime(profile, session_id)
+        model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
         package_paths, external_skills, resource_revisions = self._resource_snapshot()
         command = [
             self.executable,
-            *self._package_arguments(profile, package_paths),
+            *self._package_arguments(runtime_packages, package_paths),
             "--mode",
             "json",
             "--print",
@@ -260,6 +271,11 @@ class PiProvider:
         if process.returncode:
             raise ProviderError(stderr.decode(errors="replace").strip())
         event_tuple = tuple(events)
+        loaded_packages = {
+            package.identity: package.version
+            for package in runtime_packages
+            if isinstance(package, ResolvedPiPackage)
+        }
         return AgentResult(
             session_id=session_id,
             output=_final_output(event_tuple),
@@ -267,10 +283,14 @@ class PiProvider:
             exit_code=process.returncode or 0,
             used_skills=_used_skills(instruction, event_tuple),
             resource_revisions={
-                name: revision
-                for name, revision in resource_revisions.items()
-                if name in profile.packages or name in profile.skills
+                **loaded_packages,
+                **{
+                    name: revision
+                    for name, revision in resource_revisions.items()
+                    if name in profile.packages or name in profile.skills
+                },
             },
+            loaded_packages=loaded_packages,
         )
 
     async def stop(self, session_id: str) -> None:
@@ -285,14 +305,22 @@ class PiProvider:
 
     def _runtime(
         self, profile: AgentProfile, session_id: str
-    ) -> tuple[str | None, dict[str, str]]:
+    ) -> tuple[str | None, dict[str, str], tuple[ResolvedPiPackage | str, ...]]:
         if not profile.resolved_model or not self.runtime_builder:
-            return profile.model, {}
-        snapshot = self.runtime_builder.materialize(session_id, profile.resolved_model)
+            return profile.model, {}, profile.packages
+        snapshot = self.runtime_builder.materialize(
+            session_id,
+            profile.resolved_model,
+            tuple(
+                package
+                for package in profile.packages
+                if isinstance(package, ResolvedPiPackage)
+            ),
+        )
         return snapshot.model_pattern, {
             **snapshot.environment,
             "PI_CODING_AGENT_DIR": str(snapshot.agent_dir),
-        }
+        }, snapshot.packages
 
     def _profile_arguments(
         self,
@@ -320,18 +348,23 @@ class PiProvider:
         return arguments
 
     def _package_arguments(
-        self, profile: AgentProfile, paths: dict[str, Path]
+        self, packages: tuple[ResolvedPiPackage | str, ...], paths: dict[str, Path]
     ) -> list[str]:
-        missing = sorted(set(profile.packages) - paths.keys())
+        legacy = tuple(
+            package for package in packages if isinstance(package, str)
+        )
+        missing = sorted(set(legacy) - paths.keys())
         if missing:
             raise ProviderError(
                 f"managed Pi package is unavailable: {', '.join(missing)}"
             )
-        return [
-            argument
-            for name in profile.packages
-            for argument in ("-e", str(paths[name]))
-        ]
+        arguments: list[str] = []
+        for package in packages:
+            path = paths[package] if isinstance(package, str) else Path(package.artifact_path)
+            if path.is_symlink() or not path.is_absolute() or not path.is_dir():
+                raise ProviderError(f"managed Pi package is unavailable: {package}")
+            arguments.extend(("-e", str(path)))
+        return arguments
 
     def _resource_snapshot(
         self,
@@ -343,7 +376,7 @@ class PiProvider:
         except (OSError, json.JSONDecodeError) as error:
             if self.managed_packages or self.managed_skills:
                 raise ProviderError("managed Pi resource manifest is unavailable") from error
-            return (), {}, {}
+            return {}, {}, {}
         revisions = {
             name: revision
             for name, revision in value.items()

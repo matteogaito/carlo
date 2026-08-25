@@ -98,7 +98,8 @@ async def model_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         await connection.run_sync(models.Base.metadata.create_all)
         await connection.execute(
             text(
-                "TRUNCATE model_providers, available_models, pi_runtime_settings "
+                "TRUNCATE agent_profile_packages, pi_packages, model_providers, "
+                "available_models, pi_runtime_settings "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -372,8 +373,72 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
             "carlo-ui-design",
         )
         assert plan_resolved.packages == ("superpowers", "ponytail")
-        assert historical.packages == ("superpowers", "ponytail")
-        assert "ponytail" not in historical.skills
+    assert historical.packages == ("superpowers", "ponytail")
+    assert "ponytail" not in historical.skills
+
+
+@pytest.mark.asyncio
+async def test_agent_profile_resolution_uses_database_packages(
+    model_factory, tmp_path,
+) -> None:
+    module = importlib.import_module("carlo.model_providers")
+    default_artifact = tmp_path / "pippo"
+    profile_artifact = tmp_path / "profile-tools"
+    default_artifact.mkdir()
+    profile_artifact.mkdir()
+    async with model_factory() as session:
+        provider = models.ModelProvider(
+            name="Local",
+            slug="omlx",
+            kind="openai-compatible",
+            base_url="http://local.test/v1",
+        )
+        model = models.AvailableModel(
+            model_provider=provider,
+            external_id="qwen",
+            status="AVAILABLE",
+            discovered_context_window=65_536,
+            discovered_max_tokens=16_384,
+        )
+        profile = models.AgentProfile(name="implementation", provider="pi")
+        session.add_all([provider, model, profile])
+        await session.flush()
+        profile.available_model_id = model.id
+        default = models.PiPackage(
+            source="npm:pippo",
+            identity="npm:pippo",
+            enabled=True,
+            is_default=True,
+            active_version="1.5.0",
+            active_artifact_path=str(default_artifact),
+            resources={"skills": ["pippo"]},
+        )
+        selected = models.PiPackage(
+            source="git:github.com/owner/profile-tools",
+            identity="git:github.com/owner/profile-tools",
+            enabled=True,
+            is_default=False,
+            active_version="a" * 40,
+            active_artifact_path=str(profile_artifact),
+            resources={"skills": ["profile-tools"]},
+        )
+        session.add_all([default, selected])
+        await session.flush()
+        session.add(
+            models.AgentProfilePackage(
+                agent_profile_id=profile.id, package_id=selected.id
+            )
+        )
+        await session.flush()
+
+        resolved = await module.resolve_agent_profile(session, profile, None)
+
+    assert [package.identity for package in resolved.packages] == [
+        "git:github.com/owner/profile-tools",
+        "npm:pippo",
+    ]
+    assert resolved.packages[1].version == "1.5.0"
+    assert resolved.packages[1].artifact_path == str(default_artifact)
 
 
 @pytest.mark.asyncio

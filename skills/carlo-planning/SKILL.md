@@ -127,6 +127,7 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
       }
     ],
     "skills": [],
+    "packages": [],
     "implementation_phases": ["Coherent implementation outcome"],
     "validation_commands": [],
     "browser_validation": false,
@@ -141,7 +142,8 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
 
 `implementation_phases` mirrors the ordered task titles for compatibility.
 `validation_commands` contains only commands verified from repository evidence.
-Use booleans for the four flags and arrays of strings for every list. CARLO adds
+`packages` contains Pi packages needed by implementation; `skills` contains
+standalone implementation skills. Use booleans for the four flags and arrays of strings for every list. CARLO adds
 the actual planning profile and loaded skills after Pi returns; do not invent
 that runtime history in the output.
 

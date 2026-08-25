@@ -45,6 +45,7 @@ export interface Plan {
     amendment?: { summary: string; reason: string }
     validation_commands?: string[]
     skills?: string[]
+    packages?: string[]
     implementation_phases?: string[]
     [key: string]: unknown
   }
@@ -69,6 +70,7 @@ export interface Task {
   available_model_id?: number | null
   used_skills?: string[]
   skill_revisions?: Record<string, string[]>
+  loaded_packages?: Record<string, string[]>
   plan: Plan | null
   attempts?: {
     number: number
@@ -296,6 +298,15 @@ export interface AgentSkill {
 export interface AgentPackage {
   name: string
   revision: string | null
+  id?: number
+  source?: string
+  enabled?: boolean
+  pinned?: boolean
+  is_default?: boolean
+  active_version?: string | null
+  resources?: Record<string, string[]>
+  last_update_status?: string
+  last_update_error?: string | null
 }
 
 export interface Api {
@@ -341,6 +352,10 @@ export interface Api {
   listAgentProfiles(): Promise<AgentProfileSettings[]>
   listSkills(): Promise<AgentSkill[]>
   listPackages(): Promise<AgentPackage[]>
+  createPackage(input: { source: string; is_default: boolean }): Promise<AgentPackage>
+  updatePackage(id: number, input: { enabled?: boolean; is_default?: boolean }): Promise<AgentPackage>
+  refreshPackage(id: number): Promise<AgentPackage>
+  disablePackage(id: number): Promise<AgentPackage>
   updateAgentProfile(name: string, input: Partial<AgentProfileSettings>): Promise<AgentProfileSettings>
   setTaskModel(id: string, availableModelId: number | null): Promise<Task>
   events(
@@ -426,7 +441,27 @@ export const httpApi: Api = {
   }),
   listAgentProfiles: () => request('/api/agent-profiles'),
   listSkills: () => request('/api/settings/skills'),
-  listPackages: () => request('/api/settings/packages'),
+  listPackages: async () => (await request<Array<Record<string, unknown>>>('/api/settings/pi-packages')).map((item) => ({
+    ...item,
+    name: String(item.identity),
+    revision: item.active_version == null ? null : String(item.active_version),
+  })) as AgentPackage[],
+  createPackage: async (input) => {
+    const item = await request<Record<string, unknown>>('/api/settings/pi-packages', { method: 'POST', body: JSON.stringify(input) })
+    return { ...item, name: String(item.identity), revision: item.active_version == null ? null : String(item.active_version) } as AgentPackage
+  },
+  updatePackage: async (id, input) => {
+    const item = await request<Record<string, unknown>>(`/api/settings/pi-packages/${id}`, { method: 'PATCH', body: JSON.stringify(input) })
+    return { ...item, name: String(item.identity), revision: item.active_version == null ? null : String(item.active_version) } as AgentPackage
+  },
+  refreshPackage: async (id) => {
+    const item = await request<Record<string, unknown>>(`/api/settings/pi-packages/${id}/update`, { method: 'POST' })
+    return { ...item, name: String(item.identity), revision: item.active_version == null ? null : String(item.active_version) } as AgentPackage
+  },
+  disablePackage: async (id) => {
+    const item = await request<Record<string, unknown>>(`/api/settings/pi-packages/${id}`, { method: 'DELETE' })
+    return { ...item, name: String(item.identity), revision: item.active_version == null ? null : String(item.active_version) } as AgentPackage
+  },
   updateAgentProfile: (name, input) => request(`/api/agent-profiles/${encodeURIComponent(name)}`, {
     method: 'PATCH', body: JSON.stringify(input),
   }),

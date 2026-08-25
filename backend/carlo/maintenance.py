@@ -16,7 +16,7 @@ import fcntl
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .models import Event
+from .models import AgentProfilePackage, Event, PiPackage
 from .model_providers import (
     CredentialCipher,
     DiscoveredModel,
@@ -40,29 +40,122 @@ class ManagedPiResource:
 
 MANAGED_PI_RESOURCES = (
     ManagedPiResource(
-        "superpowers",
-        "https://github.com/obra/superpowers.git",
-        (
-            "package.json",
-            ".pi/extensions/superpowers.ts",
-            "skills/using-superpowers/SKILL.md",
-        ),
-    ),
-    ManagedPiResource(
-        "ponytail",
-        "https://github.com/DietrichGebert/ponytail.git",
-        (
-            "package.json",
-            "pi-extension/index.js",
-            "skills/ponytail/SKILL.md",
-        ),
-    ),
-    ManagedPiResource(
         "frontend-design",
         "https://github.com/anthropics/skills.git",
         ("skills/frontend-design/SKILL.md",),
     ),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PackageRefreshSummary:
+    updated: tuple[str, ...]
+    unchanged: tuple[str, ...]
+    failed: tuple[str, ...]
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "updated": list(self.updated),
+            "unchanged": list(self.unchanged),
+            "failed": list(self.failed),
+            "summary": (
+                f"{len(self.updated)} updated · {len(self.unchanged)} unchanged · "
+                f"{len(self.failed)} failed"
+            ),
+        }
+
+
+async def refresh_managed_pi_packages(
+    factory: async_sessionmaker[AsyncSession],
+    manager: object,
+    now: datetime | None = None,
+) -> PackageRefreshSummary:
+    now = now or datetime.now(UTC)
+    async with factory() as session:
+        packages = list(
+            await session.scalars(
+                select(PiPackage).where(PiPackage.enabled.is_(True)).order_by(PiPackage.identity)
+            )
+        )
+    updated: list[str] = []
+    unchanged: list[str] = []
+    failed: list[str] = []
+    for package in packages:
+        active = bool(
+            package.active_artifact_path
+            and Path(package.active_artifact_path).is_dir()
+        )
+        recent_failure = package.last_update_status == "FAILED" and package.last_update_attempt_at and now - package.last_update_attempt_at < FAILURE_RETRY_INTERVAL
+        recent_success = package.last_update_success_at and now - package.last_update_success_at < UPDATE_INTERVAL
+        if (package.pinned and active) or recent_failure or (active and recent_success):
+            unchanged.append(package.identity)
+            continue
+        try:
+            installed = await manager.install(package.source)  # type: ignore[attr-defined]
+        except Exception as error:
+            async with factory() as session:
+                current = await session.get(PiPackage, package.id)
+                if current is not None:
+                    current.last_update_attempt_at = now
+                    current.last_update_status = "FAILED"
+                    current.last_update_error = str(error)[-500:]
+                    await session.commit()
+            failed.append(package.identity)
+            continue
+        async with factory() as session:
+            current = await session.get(PiPackage, package.id)
+            if current is not None:
+                current.active_version = installed.resolved_version
+                current.active_artifact_path = installed.artifact_path
+                current.resources = installed.resources
+                current.last_update_attempt_at = now
+                current.last_update_success_at = now
+                current.last_update_status = "SUCCESS"
+                current.last_update_error = None
+                await session.commit()
+        updated.append(f"{package.identity}@{installed.resolved_version}")
+    summary = PackageRefreshSummary(tuple(updated), tuple(unchanged), tuple(failed))
+    if updated or failed:
+        async with factory() as session:
+            session.add(
+                Event(
+                    type="pi.packages_update_completed",
+                    payload=summary.as_payload(),
+                    created_at=now,
+                )
+            )
+            await session.commit()
+    return summary
+
+
+async def ensure_managed_pi_packages(
+    factory: async_sessionmaker[AsyncSession], manager: object
+) -> None:
+    await refresh_managed_pi_packages(factory, manager)
+    async with factory() as session:
+        packages = list(
+            await session.scalars(
+                select(PiPackage)
+                .outerjoin(
+                    AgentProfilePackage,
+                    AgentProfilePackage.package_id == PiPackage.id,
+                )
+                .where(
+                    PiPackage.enabled.is_(True),
+                    (PiPackage.is_default.is_(True))
+                    | (AgentProfilePackage.package_id.is_not(None)),
+                )
+                .distinct()
+            )
+        )
+    missing = sorted(
+        package.identity
+        for package in packages
+        if not package.active_artifact_path
+        or not Path(package.active_artifact_path).is_dir()
+    )
+    if missing:
+        raise RuntimeError(f"managed Pi packages are unavailable: {', '.join(missing)}")
 
 
 def _resource_manifest_complete(
@@ -254,6 +347,7 @@ async def maintenance_loop(
     lock_path: Path,
     credential_cipher: CredentialCipher | None = None,
     resource_root: Path | None = None,
+    package_manager: object | None = None,
 ) -> None:
     while True:
         await run_maintenance_cycle(
@@ -263,6 +357,7 @@ async def maintenance_loop(
             lock_path,
             credential_cipher,
             resource_root=resource_root,
+            package_manager=package_manager,
         )
         await asyncio.sleep(60)
 
@@ -275,6 +370,7 @@ async def run_maintenance_cycle(
     credential_cipher: CredentialCipher | None,
     *,
     resource_root: Path | None = None,
+    package_manager: object | None = None,
     now: datetime | None = None,
     model_fetcher=fetch_openai_models,
 ) -> None:
@@ -300,6 +396,11 @@ async def run_maintenance_cycle(
             )
         except Exception:
             logger.exception("weekly Pi resource update cycle failed")
+    if package_manager is not None:
+        try:
+            await refresh_managed_pi_packages(factory, package_manager, now=now)
+        except Exception:
+            logger.exception("weekly Pi package update cycle failed")
 
 
 async def _update_due(

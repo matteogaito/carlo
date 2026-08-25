@@ -24,6 +24,7 @@ export function SettingsView({ api, event, setError }: {
   const [packages, setPackages] = useState<AgentPackage[]>([])
   const [pi, setPi] = useState<PiSettings | null>(null)
   const [adding, setAdding] = useState(false)
+  const [addingPackage, setAddingPackage] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -43,7 +44,7 @@ export function SettingsView({ api, event, setError }: {
 
   useEffect(() => { void load() }, [load])
   useEffect(() => {
-    if (event?.type.startsWith('model_provider.') || event?.type === 'model.updated' || event?.type === 'agent_profile.updated') {
+    if (event?.type.startsWith('model_provider.') || event?.type === 'model.updated' || event?.type === 'agent_profile.updated' || event?.type.startsWith('pi.package')) {
       void load()
     }
   }, [event, load])
@@ -115,37 +116,59 @@ export function SettingsView({ api, event, setError }: {
         </div>
       </section>
       {pi && <CompactionSettings value={pi} save={(input) => action(() => api.updatePiSettings(input))} />}
-    </> : <>{pi && <DefaultResources value={pi} packages={packages} skills={skills} save={saveDefaults} />}<AgentProfiles profiles={profiles} providers={providers} models={models} packages={packages} skills={skills} defaults={pi} save={saveProfile} /></>}
+    </> : <>{pi && <DefaultResources value={pi} packages={packages} skills={skills} save={saveDefaults} add={() => setAddingPackage(true)} action={action} api={api} />}<AgentProfiles profiles={profiles} providers={providers} models={models} packages={packages.filter((item) => item.enabled !== false)} skills={skills} defaults={pi} save={saveProfile} /></>}
 
     {adding && <ProviderDialog close={() => setAdding(false)} create={async (input) => {
       await action(() => api.createModelProvider(input))
       setAdding(false)
     }} />}
+    {addingPackage && <PackageDialog close={() => setAddingPackage(false)} create={async (input) => {
+      try {
+        await api.createPackage(input)
+        await load()
+        setAddingPackage(false)
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : 'Package installation failed')
+      }
+    }} />}
   </main>
 }
 
-function DefaultResources({ value, packages, skills, save }: {
+function DefaultResources({ value, packages, skills, save, add, action, api }: {
   value: PiSettings
   packages: AgentPackage[]
   skills: AgentSkill[]
   save: (input: Partial<PiSettings>) => Promise<boolean>
+  add: () => void
+  action: (operation: () => Promise<unknown>) => Promise<void>
+  api: Api
 }) {
   const [saved, setSaved] = useState(false)
   return <section className="settings-section default-resources">
-    <header><div><span>EVERY SESSION</span><h2>Default resources</h2></div></header>
-    <p>These packages and skills are loaded for every Pi profile. Profiles can add resources, never exclude defaults.</p>
-    <form key={`${value.default_packages.join(',')}|${value.default_skills.join(',')}`} onChange={() => setSaved(false)} onSubmit={(event) => {
+    <header><div><span>EVERY SESSION</span><h2>Global Pi packages</h2></div><button onClick={add}>+ Package</button></header>
+    <p>CARLO installs these explicit Pi package sources and keeps unpinned packages updated. Defaults are inherited by every profile.</p>
+    <div className="package-grid">{packages.map((item) => <article className="package-card" key={item.name}>
+      <header><div><b>{item.name}</b><small>{item.source}</small></div><em className={(item.last_update_status || '').toLowerCase()}>{item.last_update_status || 'NEVER'}</em></header>
+      <p>{item.active_version ? item.active_version.slice(0, 16) : 'Not installed'} · {item.pinned ? 'Pinned' : 'Unpinned'}</p>
+      {item.last_update_error && <p className="provider-error">{item.last_update_error}</p>}
+      {!!item.resources?.skills?.length && <small>Skills: {item.resources.skills.join(' · ')}</small>}
+      <footer>
+        <label className="switch"><input type="checkbox" checked={!!item.is_default} disabled={!item.id || item.enabled === false} onChange={(event) => void action(() => api.updatePackage(item.id!, { is_default: event.target.checked }))} />Default</label>
+        <button disabled={!item.id} onClick={() => void action(() => api.refreshPackage(item.id!))}>Update now</button>
+        <button className={item.enabled === false ? '' : 'danger'} disabled={!item.id} onClick={() => item.id && (item.enabled === false ? void action(() => api.updatePackage(item.id!, { enabled: true })) : window.confirm(`Disable ${item.name}?`) && void action(() => api.disablePackage(item.id!)))}>{item.enabled === false ? 'Enable' : 'Disable'}</button>
+      </footer>
+    </article>)}</div>
+    {!packages.length && <div className="settings-empty"><b>No Pi packages</b><p>Add an npm or Git package source.</p></div>}
+    <form key={value.default_skills.join(',')} onChange={() => setSaved(false)} onSubmit={(event) => {
       event.preventDefault()
       setSaved(false)
       const data = new FormData(event.currentTarget)
       void save({
-        default_packages: data.getAll('packages').map(String),
         default_skills: data.getAll('skills').map(String),
       }).then(setSaved)
     }}>
-      <ResourceChoices legend="Packages" name="packages" values={packages} selected={value.default_packages} labelPrefix="Default" />
-      <ResourceChoices legend="Skills" name="skills" values={skills} selected={value.default_skills} labelPrefix="Default" />
-      <div className="profile-save"><button type="submit">Save default resources</button>{saved && <span role="status" aria-label="Default resources saved">Saved ✓</span>}</div>
+      <ResourceChoices legend="Standalone default skills" name="skills" values={skills} selected={value.default_skills} labelPrefix="Default" />
+      <div className="profile-save"><button type="submit">Save default skills</button>{saved && <span role="status" aria-label="Default resources saved">Saved ✓</span>}</div>
     </form>
   </section>
 }
@@ -226,7 +249,7 @@ function AgentProfiles({ profiles, providers, models, packages, skills, defaults
     <p>Each new session receives an isolated snapshot of the selected model and proportional context policy.</p>
     <div className="profile-list">{profiles.map((profile) => {
       const initial = profile.available_model_id ? String(profile.available_model_id) : ''
-      const inheritedPackages = defaults?.default_packages || []
+      const inheritedPackages = packages.filter((item) => item.is_default).map((item) => item.name)
       const inheritedSkills = defaults?.default_skills || []
       return <form key={`${profile.name}|${inheritedPackages.join(',')}|${inheritedSkills.join(',')}`} onChange={() => setSaved(null)} onSubmit={(event) => {
         event.preventDefault()
@@ -295,6 +318,24 @@ function ProviderDialog({ close, create }: {
       <label className="provider-auth"><input type="checkbox" checked={requiresKey} onChange={(event) => setRequiresKey(event.target.checked)} />Requires API key</label>
       {requiresKey && <label>API key<span className="secret-field"><input name="api_key" type={showKey ? 'text' : 'password'} required autoComplete="new-password" /><button type="button" onClick={() => setShowKey((value) => !value)}>{showKey ? 'Hide' : 'Show'} API key</button></span></label>}
       <footer><button type="button" onClick={close}>Cancel</button><button className="primary" type="submit">Add provider</button></footer>
+    </form>
+  </section></div>
+}
+
+function PackageDialog({ close, create }: {
+  close: () => void
+  create: (input: { source: string; is_default: boolean }) => Promise<void>
+}) {
+  return <div className="modal-backdrop"><section className="modal-panel provider-dialog" role="dialog" aria-modal="true" aria-labelledby="package-title">
+    <header><div><span>PI PACKAGE</span><h2 id="package-title">Add package</h2></div><button className="close" onClick={close} aria-label="Close package form">×</button></header>
+    <form onSubmit={(event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const data = new FormData(event.currentTarget)
+      void create({ source: String(data.get('source')), is_default: data.get('default') === 'on' })
+    }}>
+      <label>Package source<input name="source" required autoFocus placeholder="npm:package or git:github.com/owner/repo" /></label>
+      <label className="provider-auth"><input name="default" type="checkbox" defaultChecked />Load in every Pi profile</label>
+      <footer><button type="button" onClick={close}>Cancel</button><button className="primary" type="submit">Install package</button></footer>
     </form>
   </section></div>
 }

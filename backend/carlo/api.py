@@ -23,7 +23,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.responses import FileResponse
@@ -60,12 +60,15 @@ from .models import (
     Project,
     ModelProvider,
     PiRuntimeSettings,
+    PiPackage,
+    AgentProfilePackage,
     Runner,
     Task,
     User,
     ValidationRun,
 )
 from .provider import AgentProfile, CodingAgentProvider, ProviderError
+from .pi_packages import PiPackageError, PiPackageManager, parse_package_source
 from .ssh import HostScan, SshError, SshTransport, validate_runner
 from .telegram import TelegramNotifier, TelegramTransport, telegram_enabled
 
@@ -185,6 +188,16 @@ class PiRuntimeSettingsUpdate(BaseModel):
     default_skills: list[str] | None = None
 
 
+class PiPackageCreate(BaseModel):
+    source: str = Field(min_length=1, max_length=2048)
+    is_default: bool = False
+
+
+class PiPackageUpdate(BaseModel):
+    enabled: bool | None = None
+    is_default: bool | None = None
+
+
 class TaskModelUpdate(BaseModel):
     available_model_id: int | None = None
 
@@ -195,6 +208,7 @@ class PlanMetadata(BaseModel):
     key_points: list[str] = Field(default_factory=list)
     implementation_tasks: list["ImplementationTask"] = Field(default_factory=list)
     skills: list[str]
+    packages: list[str] = Field(default_factory=list)
     implementation_phases: list[str] = Field(default_factory=list)
     validation_commands: list[str]
     browser_validation: bool
@@ -284,6 +298,7 @@ def create_app(
     settings: Settings | None = None,
     ssh_transport: SshTransport | None = None,
     resource_bootstrap: Callable[[], Awaitable[None]] | None = None,
+    package_manager: PiPackageManager | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     credential_cipher = (
@@ -752,12 +767,136 @@ def create_app(
         return _skill_catalog(_pi_resource_revisions(settings))
 
     @api.get("/settings/packages")
-    async def list_packages() -> list[dict[str, Any]]:
-        revisions = _pi_resource_revisions(settings)
+    async def list_packages(
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        packages = list(
+            await session.scalars(
+                select(PiPackage).where(PiPackage.enabled.is_(True)).order_by(PiPackage.identity)
+            )
+        )
         return [
-            {"name": name, "revision": revisions.get(name)}
-            for name in sorted(available_profile_packages())
+            {"name": package.identity, "revision": package.active_version}
+            for package in packages
         ]
+
+    @api.get("/settings/pi-packages")
+    async def list_pi_packages(
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        packages = list(await session.scalars(select(PiPackage).order_by(PiPackage.identity)))
+        return [_pi_package_view(package) for package in packages]
+
+    @api.post("/settings/pi-packages", status_code=status.HTTP_201_CREATED)
+    async def create_pi_package(
+        payload: PiPackageCreate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        if package_manager is None:
+            raise HTTPException(503, "Pi package management is unavailable")
+        try:
+            parsed = parse_package_source(payload.source)
+        except PiPackageError as error:
+            raise HTTPException(422, str(error)) from error
+        if await session.scalar(select(PiPackage.id).where(PiPackage.identity == parsed.identity)):
+            raise HTTPException(409, "Pi package identity already exists")
+        try:
+            installed = await package_manager.install(payload.source)
+        except PiPackageError as error:
+            raise HTTPException(502, str(error)) from error
+        package = PiPackage(
+            source=payload.source,
+            identity=parsed.identity,
+            enabled=True,
+            pinned=parsed.pinned,
+            is_default=payload.is_default,
+            active_version=installed.resolved_version,
+            active_artifact_path=installed.artifact_path,
+            resources=installed.resources,
+            last_update_attempt_at=datetime.now(UTC),
+            last_update_success_at=datetime.now(UTC),
+            last_update_status="SUCCESS",
+        )
+        try:
+            session.add(package)
+            await session.flush()
+            session.add(Event(type="pi.package.created", payload={"package_id": package.id, "identity": package.identity}))
+            await session.commit()
+        except IntegrityError as error:
+            await session.rollback()
+            raise HTTPException(409, "Pi package identity already exists") from error
+        return _pi_package_view(package)
+
+    @api.patch("/settings/pi-packages/{package_id}")
+    async def update_pi_package(
+        package_id: int,
+        payload: PiPackageUpdate,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        package = await session.get(PiPackage, package_id)
+        if package is None:
+            raise HTTPException(404, "Pi package not found")
+        if payload.enabled is not None:
+            package.enabled = payload.enabled
+            if not payload.enabled:
+                package.is_default = False
+        if payload.is_default is not None:
+            if payload.is_default and (
+                not package.enabled
+                or not package.active_artifact_path
+                or not Path(package.active_artifact_path).is_dir()
+            ):
+                raise HTTPException(422, "only an installed enabled package can be default")
+            package.is_default = payload.is_default
+        session.add(Event(type="pi.package.updated", payload={"package_id": package.id, "fields": sorted(payload.model_fields_set)}))
+        await session.commit()
+        return _pi_package_view(package)
+
+    @api.post("/settings/pi-packages/{package_id}/update")
+    async def refresh_pi_package(
+        package_id: int,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        if package_manager is None:
+            raise HTTPException(503, "Pi package management is unavailable")
+        package = await session.get(PiPackage, package_id)
+        if package is None:
+            raise HTTPException(404, "Pi package not found")
+        try:
+            installed = await package_manager.install(package.source)
+        except PiPackageError as error:
+            package.last_update_attempt_at = datetime.now(UTC)
+            package.last_update_status = "FAILED"
+            package.last_update_error = str(error)[-500:]
+            await session.commit()
+            raise HTTPException(502, str(error)) from error
+        package.active_version = installed.resolved_version
+        package.active_artifact_path = installed.artifact_path
+        package.resources = installed.resources
+        package.last_update_attempt_at = datetime.now(UTC)
+        package.last_update_success_at = datetime.now(UTC)
+        package.last_update_status = "SUCCESS"
+        package.last_update_error = None
+        session.add(Event(type="pi.package.refreshed", payload={"package_id": package.id, "version": package.active_version}))
+        await session.commit()
+        return _pi_package_view(package)
+
+    @api.delete("/settings/pi-packages/{package_id}")
+    async def disable_pi_package(
+        package_id: int,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        package = await session.get(PiPackage, package_id)
+        if package is None:
+            raise HTTPException(404, "Pi package not found")
+        package.enabled = False
+        package.is_default = False
+        await session.execute(
+            delete(AgentProfilePackage).where(AgentProfilePackage.package_id == package.id)
+        )
+        session.add(Event(type="pi.package.disabled", payload={"package_id": package.id, "identity": package.identity}))
+        await session.commit()
+        return _pi_package_view(package)
 
     @api.patch("/agent-profiles/{name}")
     async def update_agent_profile(
@@ -780,14 +919,32 @@ def create_app(
         if "default_packages" in payload.model_fields_set:
             if payload.default_packages is None:
                 raise HTTPException(422, "default_packages cannot be null")
+            package_rows = list(
+                await session.scalars(
+                    select(PiPackage).where(
+                        PiPackage.enabled.is_(True),
+                        PiPackage.identity.in_(payload.default_packages),
+                    )
+                )
+            )
             unknown_packages = sorted(
-                set(payload.default_packages) - available_profile_packages()
+                set(payload.default_packages) - {package.identity for package in package_rows}
             )
             if unknown_packages:
                 raise HTTPException(
                     422, f"unknown packages: {', '.join(unknown_packages)}"
                 )
             payload.default_packages = list(dict.fromkeys(payload.default_packages))
+            await session.execute(
+                delete(AgentProfilePackage).where(
+                    AgentProfilePackage.agent_profile_id == profile.id
+                )
+            )
+            session.add_all(
+                AgentProfilePackage(agent_profile_id=profile.id, package_id=package.id)
+                for package in package_rows
+                if not package.is_default
+            )
         if "default_skills" in payload.model_fields_set and payload.default_skills is None:
             raise HTTPException(422, "default_skills cannot be null")
         if payload.default_skills is not None:
@@ -1405,6 +1562,7 @@ def create_app(
                         "session_id": result.session_id,
                         "skills": list(result.used_skills),
                         "revisions": result.resource_revisions,
+                        "packages": result.loaded_packages,
                     },
                 )
             )
@@ -1853,6 +2011,25 @@ def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
     }
 
 
+def _pi_package_view(package: PiPackage) -> dict[str, Any]:
+    return {
+        "id": package.id,
+        "source": package.source,
+        "identity": package.identity,
+        "enabled": package.enabled,
+        "pinned": package.pinned,
+        "is_default": package.is_default,
+        "active_version": package.active_version,
+        "resources": package.resources,
+        "last_update_status": package.last_update_status,
+        "last_update_error": package.last_update_error,
+        "last_update_attempt_at": package.last_update_attempt_at.isoformat()
+        if package.last_update_attempt_at else None,
+        "last_update_success_at": package.last_update_success_at.isoformat()
+        if package.last_update_success_at else None,
+    }
+
+
 def _skill_catalog(revisions: dict[str, str] | None = None) -> list[dict[str, Any]]:
     revisions = revisions or {}
     bundled = {
@@ -2037,6 +2214,7 @@ async def _task_view(
         "planning_question": task.planning_question,
         "used_skills": [],
         "skill_revisions": {},
+        "loaded_packages": {},
         "plan": None
         if plan is None
         else {
@@ -2061,19 +2239,29 @@ async def _task_view(
     ).all()
     used_skills: list[str] = []
     skill_revisions: dict[str, list[str]] = {}
+    loaded_packages: dict[str, list[str]] = {}
     for event in skill_events:
         values = event.payload.get("skills")
         if isinstance(values, list):
             used_skills.extend(skill for skill in values if isinstance(skill, str))
+        packages = event.payload.get("packages")
+        package_names = set(packages) if isinstance(packages, dict) else set()
         revisions = event.payload.get("revisions")
         if isinstance(revisions, dict):
             for name, revision in revisions.items():
-                if isinstance(name, str) and isinstance(revision, str):
+                if isinstance(name, str) and isinstance(revision, str) and name not in package_names:
                     values = skill_revisions.setdefault(name, [])
+                    if revision not in values:
+                        values.append(revision)
+        if isinstance(packages, dict):
+            for name, revision in packages.items():
+                if isinstance(name, str) and isinstance(revision, str):
+                    values = loaded_packages.setdefault(name, [])
                     if revision not in values:
                         values.append(revision)
     view["used_skills"] = list(dict.fromkeys(used_skills))
     view["skill_revisions"] = skill_revisions
+    view["loaded_packages"] = loaded_packages
     attempts = (
         await session.scalars(
             select(Attempt)

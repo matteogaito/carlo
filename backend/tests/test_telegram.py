@@ -295,17 +295,24 @@ async def test_explicit_system_notifications_ignore_blocking_filter(factory) -> 
         "pi.resources_updated",
         payload={"summary": "superpowers@abc1234, frontend-design@def5678"},
     )
+    await add_event(
+        factory,
+        "pi.packages_update_completed",
+        payload={"summary": "1 updated · 1 unchanged · 0 failed"},
+    )
 
     assert await notifier.deliver_next() is True
     assert await notifier.deliver_next() is True
     assert await notifier.deliver_next() is True
     assert await notifier.deliver_next() is True
-    assert len(transport.messages) == 4
+    assert await notifier.deliver_next() is True
+    assert len(transport.messages) == 5
     assert "CARLO started" in transport.messages[0][2]
     assert "CARLO worker started" in transport.messages[1][2]
     assert "Pi weekly update completed" in transport.messages[2][2]
     assert "Pi skills updated" in transport.messages[3][2]
     assert "superpowers@abc1234" in transport.messages[3][2]
+    assert "Pi packages updated" in transport.messages[4][2]
 
 
 @pytest.mark.asyncio
