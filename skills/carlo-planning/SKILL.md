@@ -70,6 +70,11 @@ Tasks remain internal parts of the CARLO Task, not separate Kanban cards. Order
 them by dependency and keep their count as small as the implementation permits.
 Use exact locations discovered in the repository; never invent paths.
 
+Each item must be an independently verifiable outcome. Create a separate implementation task
+when work crosses independently testable subsystems or
+requires a distinct validation loop. Keep tightly coupled files together; do
+not split by arbitrary file count, prompt length, or organizational neatness.
+
 Leave freedom over low-risk details such as variable names, equivalent local
 structures, and trivial refactors. Avoid exact line numbers and patch-sized
 pseudocode unless correctness genuinely depends on them.

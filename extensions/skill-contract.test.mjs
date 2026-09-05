@@ -9,6 +9,13 @@ test("Discovery skill defines the state and task handoff contracts", async () =>
   }
 });
 
+test("Planning skill splits work at independent validation boundaries", async () => {
+  const skill = await readFile("skills/carlo-planning/SKILL.md", "utf8");
+  for (const required of ["independently verifiable outcome", "distinct validation loop", "separate implementation task"]) {
+    assert.match(skill, new RegExp(required));
+  }
+});
+
 test("CARLO UI skill keeps the saved visual reference discoverable", async () => {
   const skill = await readFile("skills/carlo-ui-design/SKILL.md", "utf8");
   assert.match(skill, /reference\.png/);
