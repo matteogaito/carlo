@@ -175,7 +175,11 @@ async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path
             discovered_context_window=65_536,
             discovered_max_tokens=16_384,
         )
-        profile = AgentProfile(name=f"discovery-{key}", provider="pi")
+        profile = AgentProfile(
+            name=f"plan-{key}",
+            provider="pi",
+            default_skills=["carlo-planning", "frontend-design"],
+        )
         project = Project(name=key, key=key, repository_path=str(tmp_path))
         discovery = Discovery(
             project=project,
@@ -227,6 +231,10 @@ async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path
 
     assert first_process.profiles[0].resolved_model.external_id == "first"
     assert second_process.profiles[0].resolved_model.external_id == "first"
+    assert first_process.profiles[0].skills == (
+        "carlo-discovery",
+        "frontend-design",
+    )
     await restarted.close()
     await engine.dispose()
 

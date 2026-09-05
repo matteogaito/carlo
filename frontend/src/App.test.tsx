@@ -613,7 +613,7 @@ describe('CARLO board', () => {
       listAgentProfiles: async () => [profile],
       listPackages: async () => packageSettings,
       listSkills: async () => [
-        { name: 'carlo-planning', source: 'carlo', revision: null, required_profiles: ['brief', 'plan'] },
+        { name: 'carlo-planning', source: 'carlo', revision: null, required_profiles: ['plan'] },
         { name: 'carlo-ui-design', source: 'carlo', revision: null, required_profiles: [] },
         { name: 'frontend-design', source: 'managed', revision: 'cccccccccccccccccccccccccccccccccccccccc', required_profiles: [] },
       ],

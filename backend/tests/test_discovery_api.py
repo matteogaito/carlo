@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from carlo.admin import bootstrap_admin
 from carlo.api import create_app
 from carlo.config import Settings
-from carlo.models import Base, Discovery
+from carlo.models import AgentProfile, Base, Discovery
 from tests.fakes import FakeProvider
 
 
@@ -37,6 +37,10 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
         assert discovery["status"] == "OPEN"
         assert discovery["messages"][0]["content"] == "How should imports work?"
         assert discovery["current_turn"]["status"] == "QUEUED"
+        async with factory() as session:
+            record = await session.get(Discovery, discovery["id"])
+            profile = await session.get(AgentProfile, record.profile_id)
+            assert profile.name == "plan"
 
         reply = await client.post(f'/api/discoveries/{discovery["id"]}/messages', json={"content": "Focus on CSV first"})
         assert reply.status_code == 202

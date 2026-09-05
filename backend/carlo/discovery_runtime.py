@@ -126,10 +126,11 @@ class DiscoveryRuntime:
                             "ls",
                             "discovery_state",
                         ),
+                        workflow_skill="carlo-discovery",
                     )
                     if profile
                     else AgentProfile(
-                        "discovery",
+                        "plan",
                         None,
                         None,
                         ("read", "bash", "grep", "find", "ls", "discovery_state"),

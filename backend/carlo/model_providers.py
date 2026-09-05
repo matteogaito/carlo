@@ -31,9 +31,7 @@ MANAGED_PROFILE_PACKAGES = ("superpowers", "ponytail")
 DEFAULT_PROFILE_PACKAGES = MANAGED_PROFILE_PACKAGES
 MANAGED_PROFILE_SKILLS = ("frontend-design",)
 REQUIRED_PROFILE_SKILLS: dict[str, tuple[str, ...]] = {
-    "brief": ("carlo-planning",),
     "plan": ("carlo-planning",),
-    "discovery": ("carlo-discovery",),
 }
 
 
@@ -117,6 +115,7 @@ async def resolve_agent_profile(
     task_model_id: int | None = None,
     extra_skills: tuple[str, ...] = (),
     default_tools: tuple[str, ...] = ("read", "grep", "find", "ls"),
+    workflow_skill: str | None = None,
 ) -> Any:
     from .provider import AgentProfile, ResolvedModel, ResolvedPiPackage
 
@@ -166,13 +165,26 @@ async def resolve_agent_profile(
         raise ModelProviderError(
             f"agent profile has unknown packages: {', '.join(unknown_packages)}"
         )
+    configured_skills = (
+        *(runtime.default_skills if runtime else ()),
+        *record.default_skills,
+        *plan_skills,
+    )
+    if workflow_skill:
+        configured_skills = tuple(
+            skill
+            for skill in configured_skills
+            if skill not in {"carlo-planning", "carlo-discovery"}
+        )
     skills = tuple(
         dict.fromkeys(
             (
-                *REQUIRED_PROFILE_SKILLS.get(record.name, ()),
-                *(runtime.default_skills if runtime else ()),
-                *record.default_skills,
-                *plan_skills,
+                *(
+                    (workflow_skill,)
+                    if workflow_skill
+                    else REQUIRED_PROFILE_SKILLS.get(record.name, ())
+                ),
+                *configured_skills,
             )
         )
     )

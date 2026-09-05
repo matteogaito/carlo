@@ -357,6 +357,12 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
             session, profile, cipher, task_model_id=override.id
         )
         plan_resolved = await module.resolve_agent_profile(session, plan_profile, cipher)
+        discovery_resolved = await module.resolve_agent_profile(
+            session,
+            plan_profile,
+            cipher,
+            workflow_skill="carlo-discovery",
+        )
         historical = await module.resolve_agent_profile(
             session, plan_profile, cipher, extra_skills=("ponytail",)
         )
@@ -369,6 +375,12 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
         assert task_resolved.tools == ("read", "edit")
         assert plan_resolved.skills == (
             "carlo-planning",
+            "frontend-design",
+            "carlo-ui-design",
+        )
+        assert discovery_resolved.name == "plan"
+        assert discovery_resolved.skills == (
+            "carlo-discovery",
             "frontend-design",
             "carlo-ui-design",
         )

@@ -1275,7 +1275,7 @@ def create_app(
         project = await session.get(Project, payload.project_id)
         if project is None:
             raise HTTPException(404, "project not found")
-        profile = await _profile(session, "discovery")
+        profile = await _profile(session, "plan")
         discovery = Discovery(
             project=project,
             title=payload.title,
@@ -2074,19 +2074,12 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
         select(AgentProfileRecord).where(AgentProfileRecord.name == name)
     )
     if profile is None:
-        source = None
-        if name == "discovery":
-            source = await session.scalar(
-                select(AgentProfileRecord).where(AgentProfileRecord.name == "plan")
-            )
         profile = AgentProfileRecord(
             name=name,
-            provider=source.provider if source else "pi",
-            effort=source.effort if source else None,
-            available_model_id=source.available_model_id if source else None,
-            permissions={"tools": ["read", "bash", "grep", "find", "ls", "discovery_state"]}
-            if name == "discovery"
-            else {},
+            provider="pi",
+            effort=None,
+            available_model_id=None,
+            permissions={},
             default_skills=list(REQUIRED_PROFILE_SKILLS.get(name, ()))
             + (["frontend-design"] if name == "plan" else []),
             default_packages=[],

@@ -450,7 +450,7 @@ async def test_agent_profiles_select_known_skills_and_keep_core_skills(
     skills = {item["name"]: item for item in catalog.json()}
     assert skills["carlo-ui-design"]["source"] == "carlo"
     assert skills["frontend-design"]["source"] == "managed"
-    assert skills["carlo-planning"]["required_profiles"] == ["brief", "plan"]
+    assert skills["carlo-planning"]["required_profiles"] == ["plan"]
     assert {item["name"] for item in packages.json()} == {"ponytail", "superpowers"}
     assert defaults.json()["default_packages"] == ["superpowers", "ponytail"]
     assert saved_defaults.json()["default_skills"] == ["carlo-ui-design"]
