@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -38,6 +38,7 @@ const task: Task = {
   worktree_path: '/tmp/CAR-1-login-flow',
   checkpoint_sha: 'abc1234',
   planning_question: null,
+  updated_at: '2026-09-05T08:00:00Z',
   plan: {
     revision: 1,
     brief_markdown: '# Brief',
@@ -66,6 +67,7 @@ const api: Api = {
   getDiscovery: async () => { throw new Error('unused') },
   createDiscovery: async () => { throw new Error('unused') },
   sendDiscoveryMessage: async () => { throw new Error('unused') },
+  uploadDiscoveryScreenshot: async () => { throw new Error('unused') },
   stopDiscovery: async () => { throw new Error('unused') },
   closeDiscovery: async () => { throw new Error('unused') },
   createDiscoveryTasks: async () => [],
@@ -74,6 +76,9 @@ const api: Api = {
   createTask: async () => { throw new Error('unused') },
   startPlanning: async () => task,
   reworkTask: async () => task,
+  stopTask: async () => task,
+  holdTask: async () => task,
+  resumeTask: async () => task,
   answerPlanning: async () => task,
   approvePlan: async () => task,
   listProjectActions: async () => ({ project_id: 1, commit_sha: 'abc', branch: 'main', dirty_paths: [], actions: [], error: null }),
@@ -109,16 +114,67 @@ const api: Api = {
 }
 
 describe('CARLO board', () => {
-  it('shows child cards instead of their aggregate parent', async () => {
+  it('filters by project and hides done tasks untouched for 14 days', async () => {
+    const projects: Project[] = [
+      { id: 1, name: 'CARLO', key: 'CAR', repository_path: '/tmp/carlo', default_branch: 'main', integration_branch: 'main', validation_commands: [] },
+      { id: 2, name: 'Operations', key: 'OPS', repository_path: '/tmp/ops', default_branch: 'main', integration_branch: 'main', validation_commands: [] },
+    ]
+    const carTask = { ...task, id: 'CAR-1', title: 'Current CARLO work', project_id: 1 }
+    const opsTask = { ...task, id: 'OPS-1', title: 'Operations work', project_id: 2, status: 'READY' as const }
+    const recentDone = { ...task, id: 'CAR-2', title: 'Recent result', project_id: 1, status: 'DONE' as const, updated_at: new Date(Date.now() - 13 * 86400000).toISOString() }
+    const oldDone = { ...task, id: 'CAR-3', title: 'Old result', project_id: 1, status: 'DONE' as const, updated_at: new Date(Date.now() - 15 * 86400000).toISOString() }
+    render(<App api={{ ...api, listProjects: async () => projects, listTasks: async () => [carTask, opsTask, recentDone, oldDone] }} />)
+
+    const projectBar = await screen.findByRole('navigation', { name: 'Projects' })
+    const carFilter = await within(projectBar).findByRole('button', { name: 'CAR · CARLO' })
+    expect(carFilter.style.backgroundColor).not.toBe('')
+    expect(screen.getByRole('button', { name: /CAR-2.*Recent result/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /CAR-3.*Old result/ })).toBeNull()
+
+    await userEvent.click(within(projectBar).getByRole('button', { name: 'OPS · Operations' }))
+    expect(screen.getByRole('button', { name: /OPS-1.*Operations work/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /CAR-1.*Current CARLO work/ })).toBeNull()
+  })
+
+  it('switches between execution tasks and goals without hiding standalone tasks', async () => {
+    const project: Project = { id: 1, name: 'CARLO', key: 'CAR', repository_path: '/tmp/carlo', default_branch: 'main', integration_branch: 'main', validation_commands: [] }
     const parent = { ...task, id: 'CAR-1', title: 'Parent task', subtask_count: 2 }
     const apiChild = { ...task, id: 'CAR-2', title: 'Add API', parent_task_id: 'CAR-1', parent_title: 'Parent task', subtask_position: 0, subtask_count: 0 }
     const uiChild = { ...task, id: 'CAR-3', title: 'Add UI', status: 'READY' as const, parent_task_id: 'CAR-1', parent_title: 'Parent task', subtask_position: 1, subtask_count: 0 }
-    render(<App api={{ ...api, listTasks: async () => [parent, apiChild, uiChild] }} />)
+    const standalone = { ...task, id: 'CAR-4', title: 'Standalone task', status: 'TEST' as const, parent_task_id: null, subtask_count: 0 }
+    render(<App api={{ ...api, listProjects: async () => [project], listTasks: async () => [parent, apiChild, uiChild, standalone] }} />)
 
     await screen.findByRole('button', { name: /CAR-2 Add API Parent task/ })
     expect(screen.getByRole('button', { name: /CAR-3 Add UI Parent task/ })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /CAR-1 Parent task/ })).toBeNull()
+    expect(screen.getByRole('button', { name: /CAR-4 Standalone task/ })).toBeTruthy()
     expect(screen.getAllByText('Parent task')).toHaveLength(2)
+
+    const toggle = screen.getByRole('button', { name: 'Execution tasks → Goals' })
+    expect(toggle.nextElementSibling).toBe(screen.getByRole('button', { name: 'CAR · CARLO' }))
+    await userEvent.click(toggle)
+    expect(screen.getByRole('button', { name: /CAR-1 Parent task/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /CAR-2 Add API/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /CAR-3 Add UI/ })).toBeNull()
+    expect(screen.getByRole('button', { name: /CAR-4 Standalone task/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Goals → Execution tasks' })).toBeTruthy()
+  })
+
+  it('opens the aggregate parent from a child card detail', async () => {
+    const parent: Task = { ...task, id: 'CAR-1', title: 'Parent task', subtask_count: 2, status: 'READY', stage: 'queued', parent_task_id: null as string | null, parent_title: null as string | null }
+    const child: Task = { ...task, id: 'CAR-2', title: 'Add API', parent_task_id: 'CAR-1', parent_title: 'Parent task', subtask_position: 0, subtask_count: 0 }
+    const getTask = async (id: string) => (id === 'CAR-2' ? child : parent)
+    const resumeTask = vi.fn(async () => ({ ...parent, status: 'IN_PROGRESS' as const, stage: 'implementing' }))
+    render(<App api={{ ...api, listTasks: async () => [parent, child], getTask, resumeTask }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-2.*Add API Parent task/ }))
+    const link = screen.getByRole('button', { name: /Part of Parent task/ })
+    expect(screen.getByRole('heading', { name: 'Add API' }).nextElementSibling).toBe(link)
+    await userEvent.click(link)
+
+    expect(await screen.findByRole('heading', { name: 'Parent task' })).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Resume execution' }))
+    expect(resumeTask).toHaveBeenCalledWith('CAR-1')
   })
 
   it('maps tasks to six fixed columns and opens task detail', async () => {

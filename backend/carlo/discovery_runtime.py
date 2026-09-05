@@ -104,7 +104,9 @@ class DiscoveryRuntime:
                 return
             profile = await session.get(ProfileRecord, discovery.profile_id) if discovery.profile_id else None
             project = discovery.project
-            message = turn.input_message.content
+            input_message = turn.input_message
+            message = input_message.content
+            image_path = input_message.metadata_json.get("image_path") if input_message.metadata_json else None
             memory = _memory_markdown(discovery)
             pinned_model_id = discovery.state.get("model_runtime", {}).get(
                 "available_model_id"
@@ -159,6 +161,11 @@ class DiscoveryRuntime:
         pending_tools: dict[str, dict[str, Any]] = {}
         tools: list[dict[str, Any]] = []
         try:
+            if image_path:
+                message = (
+                    f"{message}\n\nAllegato immagine. Leggilo con il tool read "
+                    f"prima di rispondere: `{image_path}`"
+                )
             async for event in live.session.prompt(f"{memory}\n\n# User message\n{message}"):
                 if await self._should_stop(turn_id, discovery_id):
                     await live.session.abort()

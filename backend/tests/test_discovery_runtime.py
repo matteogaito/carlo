@@ -229,3 +229,57 @@ async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path
     assert second_process.profiles[0].resolved_model.external_id == "first"
     await restarted.close()
     await engine.dispose()
+
+
+class ImageSession(Session):
+    async def prompt(self, message):
+        assert "Allegato immagine" in message
+        assert ".png" in message
+        assert "tool read" in message
+        yield ConversationEvent("message_update", {"delta": "Screenshot analizzato."})
+        yield ConversationEvent("agent_end", {})
+
+
+class ImageProvider:
+    def __init__(self):
+        self.session = ImageSession()
+
+    async def open_conversation(self, *args, **kwargs):
+        return self.session
+
+
+@pytest.mark.asyncio
+async def test_discovery_message_passes_screenshot_path_to_pi(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    key = f"IMG{uuid4().hex[:6].upper()}"
+    image_path = str(tmp_path / "shot.png")
+    async with factory() as session:
+        discovery = Discovery(
+            project=Project(name=key, key=key, repository_path=str(tmp_path)),
+            title="Screenshot",
+            provider_session_id=f"discovery-{key}",
+            state={},
+            memory_path=str(tmp_path / "MEMORY.md"),
+        )
+        message = DiscoveryMessage(
+            discovery=discovery,
+            sequence=1,
+            role="user",
+            content="Guarda questo",
+            metadata_json={"image_path": image_path},
+        )
+        session.add(DiscoveryTurn(discovery=discovery, input_message=message))
+        await session.commit()
+        discovery_id = discovery.id
+
+    runtime = DiscoveryRuntime(factory, ImageProvider(), Path("/guard.mjs"))
+    assert await runtime.run_next() == discovery_id
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        assert discovery.turns[0].status == "COMPLETED"
+        assert discovery.messages[-1].content == "Screenshot analizzato."
+    await runtime.close()
+    await engine.dispose()

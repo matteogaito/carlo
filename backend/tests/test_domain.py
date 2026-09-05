@@ -24,3 +24,15 @@ def test_approved_amendment_resumes_implementation() -> None:
     assert transition(
         TaskStatus.IN_PROGRESS, TaskStage.BLOCKED, "approve_amendment"
     ) == (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING)
+
+
+def test_stop_resets_in_progress_task_to_ready() -> None:
+    assert transition(
+        TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING, "stop"
+    ) == (TaskStatus.READY, TaskStage.QUEUED)
+
+
+def test_hold_parks_in_progress_task_to_not_ready() -> None:
+    assert transition(
+        TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING, "hold"
+    ) == (TaskStatus.NOT_READY, TaskStage.CREATED)

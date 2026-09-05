@@ -60,6 +60,7 @@ export interface Task {
   prompt_path: string | null
   status: TaskStatus
   stage: string
+  updated_at: string
   priority: number
   version: number
   approved_plan_revision: number | null
@@ -323,6 +324,7 @@ export interface Api {
   getDiscovery(id: number): Promise<Discovery>
   createDiscovery(input: { project_id: number; title: string; message: string }): Promise<Discovery>
   sendDiscoveryMessage(id: number, content: string): Promise<Discovery>
+  uploadDiscoveryScreenshot(id: number, file: File): Promise<Discovery>
   stopDiscovery(id: number): Promise<Discovery>
   closeDiscovery(id: number): Promise<Discovery>
   createDiscoveryTasks(id: number, proposalIds?: string[]): Promise<Task[]>
@@ -331,6 +333,9 @@ export interface Api {
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'> & { prompt_filename?: string }): Promise<Task>
   startPlanning(id: string): Promise<Task>
   reworkTask(id: string): Promise<Task>
+  stopTask(id: string): Promise<Task>
+  holdTask(id: string): Promise<Task>
+  resumeTask(id: string): Promise<Task>
   answerPlanning(id: string, answer: string): Promise<Task>
   approvePlan(id: string, revision: number, version: number): Promise<Task>
   listProjectActions(projectId: number): Promise<ActionCatalog>
@@ -397,6 +402,17 @@ export const httpApi: Api = {
   getDiscovery: (id) => request(`/api/discoveries/${id}`),
   createDiscovery: (input) => request('/api/discoveries', { method: 'POST', body: JSON.stringify(input) }),
   sendDiscoveryMessage: (id, content) => request(`/api/discoveries/${id}/messages`, { method: 'POST', body: JSON.stringify({ content }) }),
+  uploadDiscoveryScreenshot: async (id, file) => {
+    const body = new FormData()
+    body.append('file', file)
+    const response = await fetch(`/api/discoveries/${id}/screenshots`, { method: 'POST', body, credentials: 'same-origin' })
+    if (!response.ok) {
+      if (response.status === 401) throw new AuthenticationRequired()
+      const detail = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(detail.detail || `Upload failed (${response.status})`)
+    }
+    return response.json() as Promise<Discovery>
+  },
   stopDiscovery: (id) => request(`/api/discoveries/${id}/stop`, { method: 'POST' }),
   closeDiscovery: (id) => request(`/api/discoveries/${id}/close`, { method: 'POST' }),
   createDiscoveryTasks: (id, proposalIds = []) => request(`/api/discoveries/${id}/tasks`, { method: 'POST', body: JSON.stringify({ proposal_ids: proposalIds }) }),
@@ -405,6 +421,9 @@ export const httpApi: Api = {
   createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
   startPlanning: (id) => request(`/api/tasks/${id}/plan`, { method: 'POST' }),
   reworkTask: (id) => request(`/api/tasks/${id}/rework`, { method: 'POST' }),
+  stopTask: (id) => request(`/api/tasks/${id}/stop`, { method: 'POST' }),
+  holdTask: (id) => request(`/api/tasks/${id}/hold`, { method: 'POST' }),
+  resumeTask: (id) => request(`/api/tasks/${id}/resume`, { method: 'POST' }),
   answerPlanning: (id, answer) => request(`/api/tasks/${id}/plan/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
   approvePlan: (id, revision, version) => request(`/api/tasks/${id}/approve`, {
     method: 'POST',

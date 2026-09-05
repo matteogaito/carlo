@@ -140,6 +140,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         task = task_response.json()
         assert task["id"] == "CAR-1"
         assert task["status"] == "NOT_READY"
+        assert task["updated_at"]
         assert task["prompt_path"].endswith("-CAR-1-login.md")
         prompt = repository / task["prompt_path"]
         assert prompt.parent == repository / "prompts"
@@ -188,6 +189,28 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
             "queued",
         )
         assert child["parent_title"] == "Login"
+
+        async with factory() as session:
+            parent_record = await session.get(Task, task["id"])
+            child_record = await session.get(Task, child["id"])
+            assert parent_record is not None and child_record is not None
+            parent_record.status, parent_record.stage = TaskStatus.READY, TaskStage.QUEUED
+            child_record.status, child_record.stage = TaskStatus.READY, TaskStage.IMPLEMENTING
+            await session.commit()
+
+        resumed = await client.post(f'/api/tasks/{task["id"]}/resume')
+        assert resumed.status_code == 200
+        assert (resumed.json()["status"], resumed.json()["stage"]) == (
+            "IN_PROGRESS",
+            "implementing",
+        )
+        async with factory() as session:
+            resumed_child = await session.get(Task, child["id"])
+            assert resumed_child is not None
+            assert (resumed_child.status, resumed_child.stage) == (
+                TaskStatus.READY,
+                TaskStage.QUEUED,
+            )
 
         async with factory() as session:
             session.add(

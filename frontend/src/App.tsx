@@ -27,6 +27,8 @@ const columns: { status: TaskStatus; label: string; code: string }[] = [
   { status: 'FAILED', label: 'Failed', code: 'HALT' },
 ]
 const COLLAPSED_GOAL_LENGTH = 800
+const DONE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
+const PROJECT_COLORS = ['#dbe9e1', '#f2dfb7', '#d9e4f2', '#eadbea', '#f2d7d1', '#dce5bd']
 
 function readText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -46,7 +48,9 @@ export function App({ api = httpApi }: { api?: Api }) {
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
   const [view, setView] = useState<'board' | 'discoveries' | 'actions' | 'settings'>('board')
+  const [boardLevel, setBoardLevel] = useState<'execution' | 'goals'>('execution')
   const [lastEvent, setLastEvent] = useState<Event | null>(null)
+  const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null)
   const [installUpdate, setInstallUpdate] = useState<(() => void) | null>(null)
   const [detailWidth, setDetailWidth] = useState(() => Math.round(window.innerWidth / 2))
 
@@ -107,7 +111,14 @@ export function App({ api = httpApi }: { api?: Api }) {
   }, [api, refresh, selected?.id, user])
 
   const active = useMemo(() => tasks.find((task) => task.status === 'IN_PROGRESS'), [tasks])
-  const boardTasks = useMemo(() => tasks.filter((task) => !task.subtask_count), [tasks])
+  const visibleTasks = useMemo(() => tasks.filter((task) =>
+    (selectedProjectId === null || task.project_id === selectedProjectId)
+    && (task.status !== 'DONE' || Date.parse(task.updated_at) >= Date.now() - DONE_RETENTION_MS)
+  ), [selectedProjectId, tasks])
+  const boardTasks = useMemo(() => visibleTasks.filter((task) =>
+    boardLevel === 'goals' ? !task.parent_task_id : !task.subtask_count
+  ), [boardLevel, visibleTasks])
+  const hasAggregates = visibleTasks.some((task) => task.subtask_count)
 
   async function act(action: () => Promise<Task>) {
     try {
@@ -181,6 +192,19 @@ export function App({ api = httpApi }: { api?: Api }) {
         <button className={view === 'settings' ? 'active' : ''} onClick={() => { setView('settings'); setSelected(null) }}>Settings</button>
       </nav>
       {view === 'board' && <CreateStrip api={api} projects={projects} refresh={refresh} setError={setError} onTaskCreated={beginPlanning} />}
+      {view === 'board' && <nav className="project-filter" aria-label="Projects">
+        <button className={selectedProjectId === null ? 'active' : ''} aria-pressed={selectedProjectId === null} onClick={() => setSelectedProjectId(null)}>All</button>
+        {hasAggregates && <button className="board-level-toggle" onClick={() => setBoardLevel(boardLevel === 'execution' ? 'goals' : 'execution')}>
+          {boardLevel === 'execution' ? 'Execution tasks → Goals' : 'Goals → Execution tasks'}
+        </button>}
+        {projects.map((project) => <button
+          key={project.id}
+          className={selectedProjectId === project.id ? 'active' : ''}
+          aria-pressed={selectedProjectId === project.id}
+          style={{ backgroundColor: PROJECT_COLORS[(project.id - 1) % PROJECT_COLORS.length] }}
+          onClick={() => setSelectedProjectId(project.id)}
+        >{project.key} · {project.name}</button>)}
+      </nav>}
       {error && <div className="error-banner" role="alert">{error}</div>}
       {installUpdate && <div className="update-banner">A CARLO update is ready.<button onClick={installUpdate}>Update now</button></div>}
 
@@ -223,6 +247,10 @@ export function App({ api = httpApi }: { api?: Api }) {
             close={() => setSelected(null)}
             startPlanning={() => void act(() => api.startPlanning(selected.id))}
             rework={() => void act(() => api.reworkTask(selected.id))}
+            stop={() => void act(() => api.stopTask(selected.id))}
+            hold={() => void act(() => api.holdTask(selected.id))}
+            resume={() => void act(() => api.resumeTask(selected.id))}
+            onOpenParent={() => selected.parent_task_id && void openTask(selected.parent_task_id)}
             approve={() => selected.plan && void act(() =>
               api.approvePlan(selected.id, selected.plan!.revision, selected.version)
             )}
@@ -393,11 +421,15 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, rework, approve, answerPlanning, models, setModel, width, resize }: {
+function TaskDetail({ task, close, startPlanning, rework, stop, hold, resume, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
   rework: () => void
+  stop: () => void
+  hold: () => void
+  resume: () => void
+  onOpenParent: () => void
   approve: () => void
   answerPlanning: (answer: string) => void
   models: AvailableModel[]
@@ -449,15 +481,21 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
       />
       <div className="task-detail-top">
         <header>
-          <div><span className="task-id">{task.id}</span><h2>{task.title}</h2></div>
+          <div>
+            <span className="task-id">{task.id}</span>
+            <h2>{task.title}</h2>
+            {task.parent_task_id && task.parent_title && <button className="task-parent-link" onClick={onOpenParent}>Part of {task.parent_title} · {task.parent_task_id} →</button>}
+          </div>
           <button className="close" onClick={close} aria-label="Close task detail">×</button>
         </header>
         <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
-        {task.parent_title && <p className="task-parent-detail">Part of {task.parent_title}</p>}
         <nav className="task-actions" aria-label="Task actions">
           {task.stage === 'created' && <button onClick={startPlanning}>Build Brief & Plan</button>}
           {task.stage === 'awaiting_approval' && task.plan && <button onClick={approve}>Approve Plan → Ready</button>}
           {task.status === 'IN_PROGRESS' && task.stage === 'blocked' && Boolean(task.plan?.metadata.amendment) && <button onClick={approve}>Approve amendment</button>}
+          {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && <button className="danger" onClick={stop}>Stop → Ready</button>}
+          {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && !task.parent_task_id && <button onClick={hold}>Put in Not Ready</button>}
+          {task.status === 'READY' && Boolean(task.subtask_count) && <button onClick={resume}>Resume execution</button>}
           {task.status === 'FAILED' && <button onClick={rework}>Rework from original request</button>}
         </nav>
         {!['IN_PROGRESS', 'TEST', 'DONE'].includes(task.status) && <label className="task-model-select">Task model<select value={task.available_model_id || ''} onChange={(event) => setModel(Number(event.target.value) || null)}>
@@ -523,7 +561,7 @@ function TaskDetail({ task, close, startPlanning, rework, approve, answerPlannin
         </dl>
       </section>
       {!!task.events?.length && <section><h3>Activity</h3>{task.events.slice(0, 12).map((event) => (
-        <p className="timeline-row" key={event.sequence}><time>{new Date(event.created_at).toLocaleTimeString()}</time>{event.type.replaceAll('.', ' ')}</p>
+        <p className="timeline-row" key={event.sequence}><time>{new Date(event.created_at).toLocaleTimeString()}</time><span className="event-type">{event.type.replaceAll('.', ' ')}</span>{event.type === 'pi.step' && typeof event.payload?.summary === 'string' && event.payload.summary ? <em className="event-summary">{event.payload.summary}</em> : null}</p>
       ))}</section>}
     </aside>
   )

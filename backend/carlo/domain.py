@@ -84,6 +84,38 @@ _TRANSITIONS = {
         TaskStatus.IN_PROGRESS,
         TaskStage.IMPLEMENTING,
     ),
+    (TaskStatus.IN_PROGRESS, TaskStage.PREPARING_GIT, "stop"): (
+        TaskStatus.READY,
+        TaskStage.QUEUED,
+    ),
+    (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING, "stop"): (
+        TaskStatus.READY,
+        TaskStage.QUEUED,
+    ),
+    (TaskStatus.IN_PROGRESS, TaskStage.VALIDATING, "stop"): (
+        TaskStatus.READY,
+        TaskStage.QUEUED,
+    ),
+    (TaskStatus.IN_PROGRESS, TaskStage.ESCALATING, "stop"): (
+        TaskStatus.READY,
+        TaskStage.QUEUED,
+    ),
+    (TaskStatus.IN_PROGRESS, TaskStage.PREPARING_GIT, "hold"): (
+        TaskStatus.NOT_READY,
+        TaskStage.CREATED,
+    ),
+    (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING, "hold"): (
+        TaskStatus.NOT_READY,
+        TaskStage.CREATED,
+    ),
+    (TaskStatus.IN_PROGRESS, TaskStage.VALIDATING, "hold"): (
+        TaskStatus.NOT_READY,
+        TaskStage.CREATED,
+    ),
+    (TaskStatus.IN_PROGRESS, TaskStage.ESCALATING, "hold"): (
+        TaskStatus.NOT_READY,
+        TaskStage.CREATED,
+    ),
     (TaskStatus.FAILED, TaskStage.BLOCKED, "rework"): (
         TaskStatus.NOT_READY,
         TaskStage.BRIEFING,

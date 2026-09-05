@@ -106,22 +106,7 @@ export function SettingsView({ api, event, setError }: {
         <div className="provider-grid">
           {providers.map((provider) => {
             const catalog = models.filter((model) => model.model_provider_id === provider.id)
-            return <article className="provider-card" key={provider.id}>
-              <header>
-                <div><i className={provider.last_refresh_status.toLowerCase()} /><span>{provider.slug}</span><h3>{provider.name}</h3></div>
-                <button aria-label={`Refresh ${provider.name}`} onClick={() => void action(() => api.refreshModelProvider(provider.id))}>Refresh</button>
-              </header>
-              <dl><dt>Endpoint</dt><dd>{provider.base_url}</dd><dt>Credential</dt><dd>{provider.credential_hint || 'Not required'}</dd><dt>Catalog</dt><dd>{catalog.length} models · {provider.last_refresh_status}</dd></dl>
-              {provider.last_refresh_error && <p className="provider-error">{provider.last_refresh_error}</p>}
-              <div className="model-ledger">
-                {catalog.map((model) => <ModelRow key={model.id} model={model} api={api} action={action} />)}
-                {!catalog.length && <p>No models loaded. Refresh this provider.</p>}
-              </div>
-              <footer>
-                <button onClick={() => void action(() => api.updateModelProvider(provider.id, { active: !provider.active }))}>{provider.active ? 'Disable' : 'Enable'}</button>
-                <button className="danger" onClick={() => window.confirm(`Delete ${provider.name}?`) && void action(() => api.deleteModelProvider(provider.id))}>Delete</button>
-              </footer>
-            </article>
+            return <ProviderCard key={provider.id} provider={provider} catalog={catalog} api={api} action={action} />
           })}
           {!providers.length && <div className="settings-empty"><b>No model providers</b><p>Add an OpenAI-compatible endpoint to let CARLO own Pi configuration.</p></div>}
         </div>
@@ -200,6 +185,45 @@ function ResourceChoices({ legend, name, values, selected, disabled = [], labelP
     const inherited = disabled.includes(resource.name)
     return <label key={resource.name}><input aria-label={`${labelPrefix} ${resource.name}`} name={name} value={resource.name} type="checkbox" defaultChecked={inherited || selected.includes(resource.name)} disabled={inherited} />{resource.name}{resource.revision && <small>{resource.revision.slice(0, 7)}</small>}{inherited && <small>default</small>}</label>
   })}</div></fieldset>
+}
+
+const MODELS_PER_PAGE = 5
+
+function ProviderCard({ provider, catalog, api, action }: {
+  provider: ModelProvider
+  catalog: AvailableModel[]
+  api: Api
+  action: (operation: () => Promise<unknown>) => Promise<void>
+}) {
+  const [query, setQuery] = useState('')
+  const [page, setPage] = useState(0)
+  const filtered = catalog.filter((model) => `${model.display_name || ''} ${model.external_id}`.toLowerCase().includes(query.trim().toLowerCase()))
+  const pages = Math.max(1, Math.ceil(filtered.length / MODELS_PER_PAGE))
+  const current = Math.min(page, pages - 1)
+  const visible = filtered.slice(current * MODELS_PER_PAGE, current * MODELS_PER_PAGE + MODELS_PER_PAGE)
+  return <article className="provider-card">
+    <header>
+      <div><i className={provider.last_refresh_status.toLowerCase()} /><span>{provider.slug}</span><h3>{provider.name}</h3></div>
+      <button aria-label={`Refresh ${provider.name}`} onClick={() => void action(() => api.refreshModelProvider(provider.id))}>Refresh</button>
+    </header>
+    <dl><dt>Endpoint</dt><dd>{provider.base_url}</dd><dt>Credential</dt><dd>{provider.credential_hint || 'Not required'}</dd><dt>Catalog</dt><dd>{catalog.length} models · {provider.last_refresh_status}</dd></dl>
+    {provider.last_refresh_error && <p className="provider-error">{provider.last_refresh_error}</p>}
+    <label className="model-filter"><span aria-hidden="true">⌕</span><input aria-label={`Filter ${provider.name} models`} placeholder="Filter models…" value={query} onChange={(event) => { setQuery(event.target.value); setPage(0) }} /></label>
+    <div className="model-ledger">
+      {visible.map((model) => <ModelRow key={model.id} model={model} api={api} action={action} />)}
+      {!catalog.length && <p>No models loaded. Refresh this provider.</p>}
+      {!!catalog.length && !filtered.length && <p>No models match “{query}”.</p>}
+    </div>
+    {pages > 1 && <nav className="model-pager" aria-label={`${provider.name} model pages`}>
+      <button disabled={current === 0} onClick={() => setPage(current - 1)}>← Prev</button>
+      <span>{current + 1} / {pages}</span>
+      <button disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>Next →</button>
+    </nav>}
+    <footer>
+      <button onClick={() => void action(() => api.updateModelProvider(provider.id, { active: !provider.active }))}>{provider.active ? 'Disable' : 'Enable'}</button>
+      <button className="danger" onClick={() => window.confirm(`Delete ${provider.name}?`) && void action(() => api.deleteModelProvider(provider.id))}>Delete</button>
+    </footer>
+  </article>
 }
 
 function ModelRow({ model, api, action }: {

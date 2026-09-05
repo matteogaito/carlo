@@ -1,5 +1,6 @@
 import json
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,12 @@ from carlo.models import (
     Task,
     ValidationRun,
 )
-from carlo.orchestrator import ImplementationPipeline, Orchestrator, major_deviation
+from carlo.orchestrator import (
+    ImplementationPipeline,
+    Orchestrator,
+    TaskStopRequested,
+    major_deviation,
+)
 from carlo.provider import AgentProfile, AgentResult
 from carlo.git import GitWorkspace
 from tests.fakes import add_managed_profiles
@@ -188,7 +194,7 @@ async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -
         await session.commit()
 
     class Provider:
-        async def run(self, profile, instruction, cwd, session_id):
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
             Path(cwd, "feature.txt").write_text("fresh\n")
             return AgentResult(session_id, "done", (), 0)
 
@@ -292,6 +298,7 @@ async def test_stall_escalates_then_local_validation_completes(
             instruction: str,
             cwd: str,
             session_id: str,
+            on_event=None,
         ) -> AgentResult:
             if profile.name == "escalation":
                 self.escalation_instruction = instruction
@@ -446,4 +453,68 @@ async def test_recovery_resumes_validation_without_rerunning_provider(
         task = await session.get(Task, "CAR-1")
         assert task.checkpoint_sha
         assert await session.scalar(select(func.count(ValidationRun.id))) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stop_kills_running_provider_step() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    class _NullProvider:
+        pass
+
+    pipeline = ImplementationPipeline(
+        factory,
+        _NullProvider(),
+        Path("/tmp/carlo-test-wt"),
+        Path("/tmp/carlo-test-art"),
+    )
+
+    async with factory() as session:
+        project = Project(
+            name="X",
+            key="X",
+            repository_path=f"/tmp/x-{uuid.uuid4().hex}.git",
+            integration_branch="main",
+        )
+        task = Task(
+            id="CAR-KILL",
+            project=project,
+            sequence=1,
+            title="Kill me",
+            goal="do work",
+            status="IN_PROGRESS",
+            stage="IMPLEMENTING",
+        )
+        session.add_all([project, task])
+        await session.commit()
+
+    handler = pipeline._pi_step_handler("CAR-KILL")
+    handler_event: dict = {"type": "response", "output": "thinking\x00 hard"}
+
+    await handler(handler_event)  # task IN_PROGRESS -> emits pi.step
+    async with factory() as session:
+        task = await session.get(Task, "CAR-KILL")
+        task.status = "READY"
+        task.stage = "QUEUED"
+        await session.commit()
+
+    with pytest.raises(TaskStopRequested):
+        await handler(handler_event)  # stopped -> kill request
+
+    async with factory() as session:
+        event = await session.scalar(
+            select(Event).where(Event.task_id == "CAR-KILL", Event.type == "pi.step")
+        )
+        assert event is not None
+        assert event.payload["summary"] == "thinking hard"
     await engine.dispose()

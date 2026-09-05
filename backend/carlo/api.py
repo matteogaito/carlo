@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 from uuid import uuid4
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,10 +15,12 @@ from fastapi import (
     APIRouter,
     Depends,
     FastAPI,
+    File,
     HTTPException,
     Request,
     Response,
     Query,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -1341,6 +1344,62 @@ def create_app(
         await session.commit()
         return await _discovery_view(session, discovery)
 
+    @api.post("/discoveries/{discovery_id}/screenshots", status_code=status.HTTP_202_ACCEPTED)
+    async def upload_discovery_screenshot(
+        discovery_id: int,
+        file: UploadFile = File(...),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        discovery = await _discovery_or_404(session, discovery_id, lock=True)
+        if discovery.status != "OPEN":
+            raise HTTPException(409, "discovery is closed")
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(422, "empty screenshot")
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(file.filename or "image.png").name) or "image.png"
+        folder = (
+            Path(settings.artifact_root).resolve()
+            / "discoveries"
+            / str(discovery.id)
+            / "attachments"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{uuid4().hex}-{name}"
+        path.write_bytes(raw)
+        sequence = await _next_discovery_sequence(session, discovery.id)
+        message = DiscoveryMessage(
+            discovery=discovery,
+            sequence=sequence,
+            role="user",
+            content=f"Ho allegato uno screenshot: `{name}`. Leggilo con il tool read prima di rispondere.",
+            metadata_json={"image_path": str(path), "image_name": name},
+        )
+        session.add(message)
+        await session.flush()
+        turn = DiscoveryTurn(discovery=discovery, input_message=message)
+        discovery.last_active_at = datetime.now(UTC)
+        session.add_all(
+            [turn, Event(discovery=discovery, type="discovery.screenshot.queued", payload={"name": name})]
+        )
+        await session.commit()
+        return await _discovery_view(session, discovery)
+
+    @api.get("/discoveries/{discovery_id}/screenshots/{file_name}")
+    async def get_discovery_screenshot(
+        discovery_id: int, file_name: str, session: AsyncSession = Depends(get_session)
+    ) -> Response:
+        discovery = await _discovery_or_404(session, discovery_id)
+        base = (
+            Path(settings.artifact_root).resolve()
+            / "discoveries"
+            / str(discovery.id)
+            / "attachments"
+        )
+        resolved = (base / file_name).resolve()
+        if not str(resolved).startswith(str(base)) or not resolved.is_file():
+            raise HTTPException(404, "screenshot not found")
+        return FileResponse(resolved)
+
     @api.post("/discoveries/{discovery_id}/stop")
     async def stop_discovery(
         discovery_id: int, session: AsyncSession = Depends(get_session)
@@ -1461,6 +1520,13 @@ def create_app(
                 turn.finished_at = now
             session.add(Event(discovery=discovery, type="discovery.closed", payload={}))
             await session.commit()
+            folder = (
+                Path(settings.artifact_root).resolve()
+                / "discoveries"
+                / str(discovery.id)
+                / "attachments"
+            )
+            shutil.rmtree(folder, ignore_errors=True)
         return await _discovery_view(session, discovery)
 
     @api.get("/tasks")
@@ -1733,6 +1799,77 @@ def create_app(
             )
             await session.commit()
             raise
+
+    @api.post("/tasks/{task_id}/stop")
+    async def stop_task(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        if task is None:
+            raise HTTPException(404, "task not found")
+        try:
+            task.status, task.stage = transition(task.status, task.stage, "stop")
+        except InvalidTransition as error:
+            raise HTTPException(409, str(error)) from error
+        if task.parent_task_id is None:
+            session.add(
+                Event(
+                    task=task,
+                    type="task.stopped",
+                    payload={"reset": "ready"},
+                )
+            )
+        await session.commit()
+        return await _task_view(session, task)
+
+    @api.post("/tasks/{task_id}/hold")
+    async def hold_task(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        if task is None:
+            raise HTTPException(404, "task not found")
+        try:
+            task.status, task.stage = transition(task.status, task.stage, "hold")
+        except InvalidTransition as error:
+            raise HTTPException(409, str(error)) from error
+        session.add(Event(task=task, type="task.held", payload={"reset": "not_ready"}))
+        await session.commit()
+        return await _task_view(session, task)
+
+    @api.post("/tasks/{task_id}/resume")
+    async def resume_task(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        if task is None:
+            raise HTTPException(404, "task not found")
+        if task.status != TaskStatus.READY:
+            raise HTTPException(409, "aggregate task is not ready")
+        child = await session.scalar(
+            select(Task)
+            .where(Task.parent_task_id == task.id, Task.status != TaskStatus.DONE)
+            .order_by(Task.subtask_position)
+            .limit(1)
+            .with_for_update()
+        )
+        if child is None:
+            raise HTTPException(409, "aggregate task has no unfinished subtasks")
+        if child.status != TaskStatus.READY:
+            raise HTTPException(409, f"{child.id} is not ready")
+        child.stage = TaskStage.QUEUED
+        child.version += 1
+        task.status, task.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
+        task.version += 1
+        session.add(Event(task=task, type="subtasks.resumed", payload={"child": child.id}))
+        await session.commit()
+        return await _task_view(session, task)
 
     @api.post("/tasks/{task_id}/approve")
     async def approve_plan(
@@ -2296,6 +2433,7 @@ async def _task_view(
         )
         or 0
     )
+    await session.refresh(task, attribute_names=["updated_at"])
     view = {
         "id": task.id,
         "project_id": task.project_id,
@@ -2304,6 +2442,7 @@ async def _task_view(
         "prompt_path": task.prompt_path,
         "status": task.status.value,
         "stage": task.stage.value,
+        "updated_at": task.updated_at.isoformat(),
         "priority": task.priority,
         "version": task.version,
         "approved_plan_revision": task.approved_plan_revision,

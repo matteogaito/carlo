@@ -39,6 +39,10 @@ from .provider import AgentProfile, AgentResult, CodingAgentProvider, ContextLim
 
 IMPLEMENTATION_LOCK = 1_128_352_847
 MAX_INTERRUPTS = 3
+
+
+class TaskStopRequested(BaseException):
+    """Raised inside the Pi stream handler when the task was stopped mid-run."""
 TaskRunner = Callable[[str], Awaitable[str]]
 
 
@@ -81,12 +85,16 @@ class Orchestrator:
                     await self._interrupt(task_id, error)
                     await self._finish(task_id, "failed")
                     return task_id
+                except TaskStopRequested:
+                    return task_id
                 except Exception as error:
                     interruptions = await self._interrupt(task_id, error)
                     if interruptions >= MAX_INTERRUPTS:
                         await self._finish(task_id, "failed")
                         return task_id
                     raise
+                if not await self._still_running(task_id):
+                    return task_id
                 await self._finish(task_id, outcome)
                 return task_id
             finally:
@@ -151,6 +159,11 @@ class Orchestrator:
             session.add(Event(task=task, type="execution.started", payload={}))
             await session.commit()
             return task.id
+
+    async def _still_running(self, task_id: str) -> bool:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            return task is not None and task.status == TaskStatus.IN_PROGRESS
 
     @staticmethod
     async def _eligible(session: AsyncSession, task: Task) -> bool:
@@ -393,6 +406,7 @@ class ImplementationPipeline:
                 instruction,
                 str(worktree.path),
                 f"{task_id}-implementation-{number}",
+                on_event=self._pi_step_handler(task_id),
             )
             await self._record_provider_result(task_id, attempt_id, number, result)
             deviation = major_deviation(result.output)
@@ -540,6 +554,45 @@ class ImplementationPipeline:
             )
             await session.commit()
             return attempt.id
+
+    def _pi_step_handler(self, task_id: str):
+        """Stream Pi step events into the events table for live UI visibility."""
+
+        async def on_event(event: dict) -> None:
+            kind = event.get("type")
+            summary: str | None = None
+            if isinstance(event.get("output"), str) and event["output"].strip():
+                summary = event["output"].strip()
+            message = event.get("message")
+            if isinstance(message, dict):
+                if message.get("stopReason") == "error" and isinstance(
+                    message.get("errorMessage"), str
+                ):
+                    summary = message["errorMessage"]
+                elif isinstance(message.get("content"), list):
+                    for part in message["content"]:
+                        if not isinstance(part, dict):
+                            continue
+                        text = part.get("text") or part.get("reasoning")
+                        if isinstance(text, str) and text.strip():
+                            summary = text.strip()
+                            break
+            if summary is None and kind != "agent_end":
+                return
+            async with self.session_factory() as session:
+                task = await session.get(Task, task_id)
+                if task is None or task.status != TaskStatus.IN_PROGRESS:
+                    raise TaskStopRequested()
+                session.add(
+                    Event(
+                        task_id=task_id,
+                        type="pi.step",
+                        payload={"kind": kind, "summary": (summary or "").replace("\x00", "")},
+                    )
+                )
+                await session.commit()
+
+        return on_event
 
     async def _validate(
         self,

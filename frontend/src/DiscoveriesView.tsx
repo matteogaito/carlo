@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 
 import type { Api, Discovery, Event, Project } from './api'
@@ -15,6 +15,8 @@ export function DiscoveriesView({ api, projects, event, setError }: {
   const [contextOpen, setContextOpen] = useState(false)
   const [stream, setStream] = useState('')
   const [activity, setActivity] = useState('')
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [uploading, setUploading] = useState(false)
 
   const refresh = useCallback(async () => {
     const discoveries = await api.listDiscoveries()
@@ -74,6 +76,15 @@ export function DiscoveriesView({ api, projects, event, setError }: {
     } catch (error) { setError(String(error)) }
   }
 
+  async function uploadScreenshot(file: File) {
+    if (!selected) return
+    try {
+      setUploading(true)
+      setSelected(await api.uploadDiscoveryScreenshot(selected.id, file))
+      await refresh()
+    } catch (error) { setError(String(error)) } finally { setUploading(false) }
+  }
+
   const state = selected?.state
   const pendingProposals = state?.task_proposals.filter((proposal) => !proposal.created_task_id) || []
   const allProposalsReady = pendingProposals.length > 0 && pendingProposals.every(proposalReady)
@@ -96,15 +107,18 @@ export function DiscoveriesView({ api, projects, event, setError }: {
       </header>
       <div className="message-stream">
         {selected.messages?.map((message) => message.role === 'tool' ?
-          <details className="tool-message" key={message.id}><summary>{String(message.metadata.tool || 'Command output')}</summary><pre>{message.content}</pre></details> :
+          <details className="tool-message" key={message.id}><summary>{String(message.metadata?.tool || 'Command output')}</summary><pre>{message.content}</pre></details> :
           <article className={`chat-message ${message.role}`} key={message.id}>
             <span>{message.role === 'user' ? 'You' : 'CARLO'}</span>
             <Markdown>{message.content}</Markdown>
+            {typeof message.metadata?.image_name === 'string' && <img className="chat-screenshot" src={`/api/discoveries/${selected.id}/screenshots/${encodeURIComponent(message.metadata.image_name)}`} alt="screenshot allegato" />}
           </article>)}
         {stream && <article className="chat-message assistant streaming"><span>CARLO</span><Markdown>{stream}</Markdown></article>}
         {selected.current_turn?.status === 'QUEUED' || selected.current_turn?.status === 'RUNNING' ? <div className="thinking" aria-live="polite"><i />{activity || 'Pi is exploring the repository…'} <button onClick={() => void api.stopDiscovery(selected.id).then(setSelected)}>Stop</button></div> : null}
       </div>
       {selected.status === 'OPEN' ? <form className="chat-composer" onSubmit={send}>
+        <input ref={fileRef} type="file" accept="image/*" className="composer-file" aria-label="Allega screenshot" onChange={(event) => { const f = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (f) void uploadScreenshot(f) }} />
+        <button type="button" className="attach" onClick={() => fileRef.current?.click()} disabled={uploading} aria-label="Allega screenshot">{uploading ? '…' : '📎'}</button>
         <label><span>Message</span><textarea aria-label="Message" name="message" rows={2} placeholder="Continue the Discovery…" required /></label>
         <button type="submit">Send</button>
       </form> : <p className="closed-note">This Discovery is closed and read-only.</p>}
