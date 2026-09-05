@@ -228,7 +228,7 @@ class PiProvider:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
         package_paths, external_skills, resource_revisions = self._resource_snapshot()
-        command = [
+        base_command = [
             self.executable,
             *self._package_arguments(runtime_packages, package_paths),
             "--mode",
@@ -240,56 +240,82 @@ class PiProvider:
             "--session-dir",
             str(self.session_dir),
         ]
-        command.extend(self._profile_arguments(profile, model, external_skills))
-        command.append(instruction)
+        base_command.extend(self._profile_arguments(profile, model, external_skills))
         if self.debug:
             self._write_debug_replay(
-                session_id, cwd, command, instruction, runtime_environment
+                session_id,
+                cwd,
+                [*base_command, instruction],
+                instruction,
+                runtime_environment,
             )
 
-        async with pi_process_lock(self.lock_path, exclusive=False):
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                limit=PI_JSON_EVENT_LIMIT,
-                env={**os.environ, **runtime_environment},
-            )
-            self._processes[session_id] = process
-            stderr_task = asyncio.create_task(process.stderr.read())
-            events: list[dict[str, Any]] = []
-            try:
-                while True:
-                    try:
-                        line = await process.stdout.readline()
-                    except ValueError as error:
-                        raise ProviderError(
-                            "Pi emitted a JSON event larger than 4 MiB"
-                        ) from error
-                    if not line:
-                        break
-                    try:
-                        event = json.loads(line)
-                    except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                        raise ProviderError("Pi returned malformed JSON events") from error
-                    if not isinstance(event, dict):
-                        raise ProviderError("Pi returned a non-object JSON event")
-                    events.append(event)
-                    if on_event:
-                        await on_event(event)
-                await process.wait()
-            except BaseException:
-                if process.returncode is None:
-                    process.terminate()
+        events: list[dict[str, Any]] = []
+        prompts = (
+            instruction,
+            "Continue from the compacted session and finish the current task.",
+        )
+        for retry, prompt in enumerate(prompts):
+            async with pi_process_lock(self.lock_path, exclusive=False):
+                process = await asyncio.create_subprocess_exec(
+                    *base_command,
+                    prompt,
+                    cwd=cwd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    limit=PI_JSON_EVENT_LIMIT,
+                    env={**os.environ, **runtime_environment},
+                )
+                self._processes[session_id] = process
+                stderr_task = asyncio.create_task(process.stderr.read())
+                attempt_events: list[dict[str, Any]] = []
+                try:
+                    while True:
+                        try:
+                            line = await process.stdout.readline()
+                        except ValueError as error:
+                            raise ProviderError(
+                                "Pi emitted a JSON event larger than 4 MiB"
+                            ) from error
+                        if not line:
+                            break
+                        try:
+                            event = json.loads(line)
+                        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                            raise ProviderError("Pi returned malformed JSON events") from error
+                        if not isinstance(event, dict):
+                            raise ProviderError("Pi returned a non-object JSON event")
+                        attempt_events.append(event)
+                        if on_event:
+                            await on_event(event)
                     await process.wait()
-                raise
-            finally:
-                self._processes.pop(session_id, None)
-                stderr = await stderr_task
+                except BaseException:
+                    if process.returncode is None:
+                        process.terminate()
+                        await process.wait()
+                    raise
+                finally:
+                    self._processes.pop(session_id, None)
+                    stderr = await stderr_task
 
-        if process.returncode:
-            raise ProviderError(stderr.decode(errors="replace").strip())
+            if process.returncode:
+                raise ProviderError(stderr.decode(errors="replace").strip())
+            events.extend(attempt_events)
+            try:
+                output = _final_output(tuple(attempt_events))
+            except ContextLimitError:
+                if retry:
+                    raise
+                event = {
+                    "type": "context_compaction_retry",
+                    "output": "Resuming compacted Pi session",
+                }
+                events.append(event)
+                if on_event:
+                    await on_event(event)
+                continue
+            break
+
         event_tuple = tuple(events)
         loaded_packages = {
             package.identity: package.version
@@ -298,7 +324,7 @@ class PiProvider:
         }
         return AgentResult(
             session_id=session_id,
-            output=_final_output(event_tuple),
+            output=output,
             events=event_tuple,
             exit_code=process.returncode or 0,
             used_skills=_used_skills(instruction, event_tuple),

@@ -6,7 +6,14 @@ from typing import Any
 import pytest
 
 from carlo.pi_runtime import PiRuntimeSnapshotBuilder
-from carlo.provider import AgentProfile, PiProvider, ProviderError, ResolvedModel, ResolvedPiPackage
+from carlo.provider import (
+    AgentProfile,
+    ContextLimitError,
+    PiProvider,
+    ProviderError,
+    ResolvedModel,
+    ResolvedPiPackage,
+)
 
 
 def _resolved_model() -> ResolvedModel:
@@ -28,6 +35,67 @@ def _resolved_model() -> ResolvedModel:
         reserve_tokens=16_384,
         keep_recent_tokens=13_107,
     )
+
+
+def _context_retry_provider(tmp_path: Path, *, always_fail: bool = False) -> tuple[PiProvider, Path]:
+    executable = tmp_path / "fake-pi"
+    calls = tmp_path / "calls.jsonl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        f"calls = pathlib.Path({str(calls)!r})\n"
+        "with calls.open('a') as stream: stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "attempt = len(calls.read_text().splitlines())\n"
+        f"if attempt == 1 or {always_fail!r}:\n"
+        " print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        "'content': [], 'stopReason': 'error', 'errorMessage': "
+        "'Prompt too long: context window exceeded'}}))\n"
+        "else:\n"
+        " print(json.dumps({'type': 'final', 'output': 'done'}))\n"
+    )
+    executable.chmod(0o755)
+    return PiProvider(str(executable), tmp_path / "sessions"), calls
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_resumes_once_after_context_compaction(tmp_path: Path) -> None:
+    provider, calls_path = _context_retry_provider(tmp_path)
+    seen: list[str] = []
+
+    async def collect(event: dict[str, Any]) -> None:
+        seen.append(str(event["type"]))
+
+    result = await provider.run(
+        AgentProfile("implementation", None, None, (), ()),
+        "Implement everything",
+        str(tmp_path),
+        "CAR-1-implementation-1",
+        collect,
+    )
+
+    assert result.output == "done"
+    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    assert len(calls) == 2
+    assert "Implement everything" in calls[0]
+    assert "Continue from the compacted session and finish the current task." in calls[1]
+    assert "Implement everything" not in calls[1]
+    assert all("CAR-1-implementation-1" in call for call in calls)
+    assert "context_compaction_retry" in seen
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_retries_context_compaction_only_once(tmp_path: Path) -> None:
+    provider, calls_path = _context_retry_provider(tmp_path, always_fail=True)
+
+    with pytest.raises(ContextLimitError):
+        await provider.run(
+            AgentProfile("implementation", None, None, (), ()),
+            "Implement",
+            str(tmp_path),
+            "CAR-2-implementation-1",
+        )
+
+    assert len(calls_path.read_text().splitlines()) == 2
 
 
 @pytest.mark.asyncio
