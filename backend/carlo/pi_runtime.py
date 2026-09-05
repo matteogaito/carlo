@@ -11,7 +11,7 @@ _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_.-]{1,200}\Z")
 
 
 def runtime_context_window(context_window: int, max_tokens: int) -> int:
-    return max(max_tokens + 1, int(context_window * 0.9))
+    return max(max_tokens + 1, int(context_window * 0.75))
 
 
 @dataclass(frozen=True, slots=True)
