@@ -2301,6 +2301,17 @@ def _planning_instruction(task: Task, *, fresh_rework: bool = False) -> str:
 async def _replan_instruction(
     session: AsyncSession, task: Task, children: list[Task]
 ) -> str:
+    approved_plan = (
+        await session.scalar(
+            select(PlanRevision).where(
+                PlanRevision.task_id == task.id,
+                PlanRevision.revision == task.approved_plan_revision,
+            )
+        )
+        if task.approved_plan_revision
+        else None
+    )
+    current_plan = approved_plan.plan_markdown[:8000] if approved_plan else "Unavailable"
     lines: list[str] = []
     for child in children:
         attempts = int(
@@ -2332,6 +2343,7 @@ async def _replan_instruction(
             f"{context_limits}\n  goal: {child.goal}"
         )
     return (
+        f"Current approved plan:\n{current_plan}\n\n"
         "Replace the current subtask partition using this execution evidence:\n"
         + "\n".join(lines)
         + "\nEach replacement task must be an independently verifiable outcome that "

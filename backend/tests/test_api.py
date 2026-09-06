@@ -1,6 +1,7 @@
 import asyncio
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,7 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
             goal="Build the app",
             status=TaskStatus.IN_PROGRESS,
             stage=TaskStage.IMPLEMENTING,
+            approved_plan_revision=1,
         )
         child = Task(
             id="PHOTO-2",
@@ -99,7 +101,18 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
             parent=parent,
             subtask_position=0,
         )
-        session.add_all([parent, child])
+        session.add_all([
+            parent,
+            child,
+            PlanRevision(
+                task=parent,
+                revision=1,
+                brief_markdown="# Brief",
+                plan_markdown="# Current approved plan\nBuild one oversized core task.",
+                metadata_json={},
+                approved_at=datetime.now(UTC),
+            ),
+        ])
         await session.flush()
         session.add_all(
             [
@@ -160,6 +173,7 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
 
     instruction = provider.calls[0][1]
     assert "PHOTO-2" in instruction
+    assert "Build one oversized core task." in instruction
     assert "Oversized core" in instruction
     assert "attempts: 1" in instruction
     assert "validation failures: 2" in instruction
