@@ -113,6 +113,7 @@ export function App({ api = httpApi }: { api?: Api }) {
   const active = useMemo(() => tasks.find((task) => task.status === 'IN_PROGRESS'), [tasks])
   const visibleTasks = useMemo(() => tasks.filter((task) =>
     (selectedProjectId === null || task.project_id === selectedProjectId)
+    && !task.superseded_at
     && (task.status !== 'DONE' || Date.parse(task.updated_at) >= Date.now() - DONE_RETENTION_MS)
   ), [selectedProjectId, tasks])
   const boardTasks = useMemo(() => visibleTasks.filter((task) =>
@@ -246,6 +247,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             task={selected}
             close={() => setSelected(null)}
             startPlanning={() => void act(() => api.startPlanning(selected.id))}
+            replan={() => void act(() => api.replanTask(selected.id))}
             rework={() => void act(() => api.reworkTask(selected.id))}
             stop={() => void act(() => api.stopTask(selected.id))}
             hold={() => void act(() => api.holdTask(selected.id))}
@@ -421,10 +423,11 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, rework, stop, hold, resume, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
+function TaskDetail({ task, close, startPlanning, replan, rework, stop, hold, resume, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
+  replan: () => void
   rework: () => void
   stop: () => void
   hold: () => void
@@ -491,7 +494,8 @@ function TaskDetail({ task, close, startPlanning, rework, stop, hold, resume, on
         <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
         <nav className="task-actions" aria-label="Task actions">
           {task.stage === 'created' && <button onClick={startPlanning}>Build Brief & Plan</button>}
-          {task.stage === 'awaiting_approval' && task.plan && <button onClick={approve}>Approve Plan → Ready</button>}
+          {task.stage === 'awaiting_approval' && task.plan && <button onClick={approve}>{task.plan.metadata.replan ? 'Approve replan → Replace subtasks' : 'Approve Plan → Ready'}</button>}
+          {task.replan_allowed && <button onClick={replan}>Replan subtasks</button>}
           {task.status === 'IN_PROGRESS' && task.stage === 'blocked' && Boolean(task.plan?.metadata.amendment) && <button onClick={approve}>Approve amendment</button>}
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && <button className="danger" onClick={stop}>Stop → Ready</button>}
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && !task.parent_task_id && <button onClick={hold}>Put in Not Ready</button>}

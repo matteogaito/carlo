@@ -75,6 +75,7 @@ const api: Api = {
   createProject: async () => { throw new Error('unused') },
   createTask: async () => { throw new Error('unused') },
   startPlanning: async () => task,
+  replanTask: async () => task,
   reworkTask: async () => task,
   stopTask: async () => task,
   holdTask: async () => task,
@@ -142,12 +143,14 @@ describe('CARLO board', () => {
     const apiChild = { ...task, id: 'CAR-2', title: 'Add API', parent_task_id: 'CAR-1', parent_title: 'Parent task', subtask_position: 0, subtask_count: 0 }
     const uiChild = { ...task, id: 'CAR-3', title: 'Add UI', status: 'READY' as const, parent_task_id: 'CAR-1', parent_title: 'Parent task', subtask_position: 1, subtask_count: 0 }
     const standalone = { ...task, id: 'CAR-4', title: 'Standalone task', status: 'TEST' as const, parent_task_id: null, subtask_count: 0 }
-    render(<App api={{ ...api, listProjects: async () => [project], listTasks: async () => [parent, apiChild, uiChild, standalone] }} />)
+    const superseded = { ...task, id: 'CAR-5', title: 'Old split', parent_task_id: 'CAR-1', parent_title: 'Parent task', subtask_position: 0, subtask_count: 0, superseded_at: '2026-09-06T08:00:00Z' }
+    render(<App api={{ ...api, listProjects: async () => [project], listTasks: async () => [parent, apiChild, uiChild, standalone, superseded] }} />)
 
     await screen.findByRole('button', { name: /CAR-2 Add API Parent task/ })
     expect(screen.getByRole('button', { name: /CAR-3 Add UI Parent task/ })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /CAR-1 Parent task/ })).toBeNull()
     expect(screen.getByRole('button', { name: /CAR-4 Standalone task/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /CAR-5 Old split/ })).toBeNull()
     expect(screen.getAllByText('Parent task')).toHaveLength(2)
 
     const toggle = screen.getByRole('button', { name: 'Execution tasks → Goals' })
@@ -157,7 +160,36 @@ describe('CARLO board', () => {
     expect(screen.queryByRole('button', { name: /CAR-2 Add API/ })).toBeNull()
     expect(screen.queryByRole('button', { name: /CAR-3 Add UI/ })).toBeNull()
     expect(screen.getByRole('button', { name: /CAR-4 Standalone task/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /CAR-5 Old split/ })).toBeNull()
     expect(screen.getByRole('button', { name: 'Goals → Execution tasks' })).toBeTruthy()
+  })
+
+  it('replans eligible aggregate tasks from the detail action bar', async () => {
+    const parent = { ...task, status: 'READY' as const, stage: 'queued', subtask_count: 2, replan_allowed: true }
+    const replanTask = vi.fn(async () => ({ ...parent, status: 'NOT_READY' as const, stage: 'planning', replan_allowed: false }))
+    render(<App api={{ ...api, listTasks: async () => [parent], getTask: async () => parent, replanTask }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Execution tasks → Goals' }))
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    await userEvent.click(screen.getByRole('button', { name: 'Replan subtasks' }))
+    expect(replanTask).toHaveBeenCalledWith('CAR-1')
+  })
+
+  it('labels replan approval as replacing subtasks', async () => {
+    const replanned: Task = {
+      ...task,
+      status: 'NOT_READY',
+      stage: 'awaiting_approval',
+      subtask_count: 2,
+      replan_allowed: false,
+      plan: { ...task.plan!, approved_at: null, metadata: { ...task.plan!.metadata, replan: true } },
+    }
+    render(<App api={{ ...api, listTasks: async () => [replanned], getTask: async () => replanned }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Execution tasks → Goals' }))
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    expect(screen.getByRole('button', { name: 'Approve replan → Replace subtasks' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Replan subtasks' })).toBeNull()
   })
 
   it('opens the aggregate parent from a child card detail', async () => {

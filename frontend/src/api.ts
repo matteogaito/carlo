@@ -72,6 +72,8 @@ export interface Task {
   parent_title?: string | null
   subtask_position?: number | null
   subtask_count?: number
+  superseded_at?: string | null
+  replan_allowed?: boolean
   available_model_id?: number | null
   used_skills?: string[]
   skill_revisions?: Record<string, string[]>
@@ -332,6 +334,7 @@ export interface Api {
   createProject(input: Pick<Project, 'name' | 'key' | 'repository_path'>): Promise<Project>
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'> & { prompt_filename?: string }): Promise<Task>
   startPlanning(id: string): Promise<Task>
+  replanTask(id: string): Promise<Task>
   reworkTask(id: string): Promise<Task>
   stopTask(id: string): Promise<Task>
   holdTask(id: string): Promise<Task>
@@ -420,6 +423,7 @@ export const httpApi: Api = {
   createProject: (input) => request('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
   startPlanning: (id) => request(`/api/tasks/${id}/plan`, { method: 'POST' }),
+  replanTask: (id) => request(`/api/tasks/${id}/replan`, { method: 'POST' }),
   reworkTask: (id) => request(`/api/tasks/${id}/rework`, { method: 'POST' }),
   stopTask: (id) => request(`/api/tasks/${id}/stop`, { method: 'POST' }),
   holdTask: (id) => request(`/api/tasks/${id}/hold`, { method: 'POST' }),
