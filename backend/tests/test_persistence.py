@@ -55,6 +55,7 @@ async def test_startup_returns_orphaned_rework_planning_to_failed() -> None:
     key = f"R{uuid4().hex[:6].upper()}"
     task_id = f"{key}-1"
     questioning_task_id = f"{key}-2"
+    replan_task_id = f"{key}-3"
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
         project = Project(
@@ -81,15 +82,35 @@ async def test_startup_returns_orphaned_rework_planning_to_failed() -> None:
             planning_session_id=f"{questioning_task_id}-plan-rework-1",
             planning_question={"text": "Which authentication provider?"},
         )
+        replanning = Task(
+            id=replan_task_id,
+            project=project,
+            sequence=3,
+            title="Aggregate",
+            goal="Split work",
+            status=TaskStatus.NOT_READY,
+            stage=TaskStage.PLANNING,
+            planning_session_id=f"{replan_task_id}-replan-1",
+        )
         session.add_all(
             [
                 task,
                 questioning,
+                replanning,
                 Event(task=task, type="task.rework.started", payload={"cycle": 1}),
                 Event(
                     task=questioning,
                     type="task.rework.started",
                     payload={"cycle": 1},
+                ),
+                Event(
+                    task=replanning,
+                    type="task.replan.started",
+                    payload={
+                        "cycle": 1,
+                        "previous_status": "IN_PROGRESS",
+                        "previous_stage": "implementing",
+                    },
                 ),
             ]
         )
@@ -118,6 +139,17 @@ async def test_startup_returns_orphaned_rework_planning_to_failed() -> None:
         assert questioning.planning_question == {
             "text": "Which authentication provider?"
         }
+        replanning = await session.get(Task, replan_task_id)
+        assert (replanning.status, replanning.stage) == (
+            TaskStatus.IN_PROGRESS,
+            TaskStage.IMPLEMENTING,
+        )
+        assert await session.scalar(
+            select(Event).where(
+                Event.task_id == replan_task_id,
+                Event.type == "task.replan.recovered_after_restart",
+            )
+        )
     await engine.dispose()
 
 

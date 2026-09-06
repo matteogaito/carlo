@@ -26,7 +26,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.responses import FileResponse
@@ -275,12 +275,20 @@ async def recover_interrupted_reworks(
                 select(Task).where(
                     Task.status == TaskStatus.NOT_READY,
                     Task.stage == TaskStage.PLANNING,
-                    Task.planning_session_id.like("%-plan-rework-%"),
+                    or_(
+                        Task.planning_session_id.like("%-plan-rework-%"),
+                        Task.planning_session_id.like("%-replan-%"),
+                    ),
                     Task.planning_question.is_(None),
                 )
             )
         ).all()
         for task in tasks:
+            if task.planning_session_id and "-replan-" in task.planning_session_id:
+                await _restore_replan(
+                    session, task, "task.replan.recovered_after_restart"
+                )
+                continue
             task.status = TaskStatus.FAILED
             task.stage = TaskStage.BLOCKED
             task.version += 1
@@ -293,6 +301,59 @@ async def recover_interrupted_reworks(
             )
         if tasks:
             await session.commit()
+
+
+async def _restore_replan(
+    session: AsyncSession,
+    task: Task,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    started = await session.scalar(
+        select(Event)
+        .where(Event.task_id == task.id, Event.type == "task.replan.started")
+        .order_by(Event.sequence.desc())
+        .limit(1)
+    )
+    try:
+        task.status = TaskStatus(started.payload["previous_status"])
+        task.stage = TaskStage(started.payload["previous_stage"])
+    except (AttributeError, KeyError, ValueError):
+        task.status, task.stage = TaskStatus.FAILED, TaskStage.BLOCKED
+    task.version += 1
+    session.add(Event(task=task, type=event_type, payload=payload or {}))
+
+
+async def _active_children(
+    session: AsyncSession, task_id: str, *, lock: bool = False
+) -> list[Task]:
+    statement = (
+        select(Task)
+        .where(Task.parent_task_id == task_id, Task.superseded_at.is_(None))
+        .order_by(Task.subtask_position)
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return list((await session.scalars(statement)).all())
+
+
+def _replan_allowed(task: Task, children: list[Task]) -> bool:
+    return bool(
+        task.parent_task_id is None
+        and children
+        and (task.status, task.stage)
+        in {
+            (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING),
+            (TaskStatus.IN_PROGRESS, TaskStage.BLOCKED),
+            (TaskStatus.FAILED, TaskStage.BLOCKED),
+            (TaskStatus.READY, TaskStage.QUEUED),
+        }
+        and all(
+            child.status
+            not in {TaskStatus.IN_PROGRESS, TaskStatus.TEST, TaskStatus.DONE}
+            for child in children
+        )
+    )
 
 
 def create_app(
@@ -1674,6 +1735,8 @@ def create_app(
             )
         ) or 1
         metadata = output.metadata.model_dump()
+        if task.planning_session_id and "-replan-" in task.planning_session_id:
+            metadata["replan"] = True
         runtime_evidence = model_runtime_evidence(provider_profile)
         metadata["planner_profile"] = {
             "name": profile.name,
@@ -1730,11 +1793,75 @@ def create_app(
         task.version += 1
         session.add(Event(task=task, type="planning.answer", payload={"question": question}))
         await session.commit()
-        return await continue_planning(
-            task,
-            session,
-            f"The user answered your planning question.\nQuestion: {question}\nAnswer: {payload.answer}\nContinue repository analysis. Ask one further high-impact question if necessary; otherwise return the complete plan JSON.",
+        try:
+            return await continue_planning(
+                task,
+                session,
+                f"The user answered your planning question.\nQuestion: {question}\nAnswer: {payload.answer}\nContinue repository analysis. Ask one further high-impact question if necessary; otherwise return the complete plan JSON.",
+            )
+        except HTTPException as error:
+            if task.planning_session_id and "-replan-" in task.planning_session_id:
+                await _restore_replan(
+                    session,
+                    task,
+                    "task.replan.failed",
+                    {"error": str(error.detail)},
+                )
+                await session.commit()
+            raise
+
+    @api.post("/tasks/{task_id}/replan")
+    async def replan_subtasks(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
         )
+        if task is None:
+            raise HTTPException(404, "task not found")
+        children = await _active_children(session, task.id, lock=True)
+        if not _replan_allowed(task, children):
+            raise HTTPException(409, "task cannot replan its current subtasks")
+        previous_status, previous_stage = task.status, task.stage
+        task.status, task.stage = transition(task.status, task.stage, "replan")
+        task.status, task.stage = transition(task.status, task.stage, "briefed")
+        cycle = int(
+            await session.scalar(
+                select(func.count(Event.sequence)).where(
+                    Event.task_id == task.id, Event.type == "task.replan.started"
+                )
+            )
+            or 0
+        ) + 1
+        task.planning_session_id = f"{task.id}-replan-{cycle}"
+        task.planning_cursor = None
+        task.planning_question = None
+        task.version += 1
+        session.add(
+            Event(
+                task=task,
+                type="task.replan.started",
+                payload={
+                    "cycle": cycle,
+                    "previous_status": previous_status.value,
+                    "previous_stage": previous_stage.value,
+                    "children": [child.id for child in children],
+                },
+            )
+        )
+        instruction = await _replan_instruction(session, task, children)
+        await session.commit()
+        try:
+            return await continue_planning(task, session, instruction)
+        except HTTPException as error:
+            await _restore_replan(
+                session,
+                task,
+                "task.replan.failed",
+                {"cycle": cycle, "error": str(error.detail)},
+            )
+            await session.commit()
+            raise
 
     @api.post("/tasks/{task_id}/rework")
     async def rework_task(
@@ -2134,6 +2261,49 @@ def _planning_instruction(task: Task, *, fresh_rework: bool = False) -> str:
     )
 
 
+async def _replan_instruction(
+    session: AsyncSession, task: Task, children: list[Task]
+) -> str:
+    lines: list[str] = []
+    for child in children:
+        attempts = int(
+            await session.scalar(
+                select(func.count(Attempt.id)).where(Attempt.task_id == child.id)
+            )
+            or 0
+        )
+        failures = int(
+            await session.scalar(
+                select(func.coalesce(func.sum(ValidationRun.failure_count), 0)).where(
+                    ValidationRun.task_id == child.id
+                )
+            )
+            or 0
+        )
+        context_limits = int(
+            await session.scalar(
+                select(func.count(Event.sequence)).where(
+                    Event.task_id == child.id,
+                    Event.type == "execution.context_limit",
+                )
+            )
+            or 0
+        )
+        lines.append(
+            f"- {child.id} | {child.title} | {child.status.value} | attempts: "
+            f"{attempts} | validation failures: {failures} | context-limit events: "
+            f"{context_limits}\n  goal: {child.goal}"
+        )
+    return (
+        "Replace the current subtask partition using this execution evidence:\n"
+        + "\n".join(lines)
+        + "\nEach replacement task must be an independently verifiable outcome that "
+        "fits one agent context. Do not create validation-only tasks. Keep tightly "
+        "coupled work together. Use the smallest useful number of tasks.\n"
+        + _planning_instruction(task)
+    )
+
+
 def _planning_activity(
     event: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
@@ -2420,12 +2590,8 @@ async def _task_view(
         parent_title = await session.scalar(
             select(Task.title).where(Task.id == task.parent_task_id)
         )
-    subtask_count = int(
-        await session.scalar(
-            select(func.count(Task.id)).where(Task.parent_task_id == task.id)
-        )
-        or 0
-    )
+    children = await _active_children(session, task.id)
+    subtask_count = len(children)
     await session.refresh(task, attribute_names=["updated_at"])
     view = {
         "id": task.id,
@@ -2448,6 +2614,10 @@ async def _task_view(
         "parent_title": parent_title,
         "subtask_position": task.subtask_position,
         "subtask_count": subtask_count,
+        "superseded_at": task.superseded_at.isoformat()
+        if task.superseded_at
+        else None,
+        "replan_allowed": _replan_allowed(task, children),
         "used_skills": [],
         "skill_revisions": {},
         "loaded_packages": {},

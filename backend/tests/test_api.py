@@ -13,7 +13,7 @@ from carlo.api import create_app
 from carlo.config import Settings
 from carlo.models import AgentProfile as AgentProfileRecord
 from carlo.domain import TaskStage, TaskStatus
-from carlo.models import Base, Event, PlanRevision, Project, Task, ValidationRun
+from carlo.models import Attempt, Base, Event, PlanRevision, Project, Task, ValidationRun
 from carlo.provider import AgentProfile, AgentResult, ProviderError
 from tests.fakes import FakeProvider, add_managed_profiles
 
@@ -35,6 +35,171 @@ def planning_output(plan: str = "# Plan\nRun the existing tests.") -> str:
             },
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_parent_replan_uses_child_failure_evidence_without_changing_children(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+                "user_sessions, project_memberships, users, events, validation_runs, "
+                "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    provider = FakeProvider(planning_output("# Plan\nUse smaller tasks."))
+    async with factory() as session:
+        await add_managed_profiles(session, "plan")
+        project = Project(
+            name="PhotoDigger", key="PHOTO", repository_path=str(repository)
+        )
+        parent = Task(
+            id="PHOTO-1",
+            project=project,
+            sequence=1,
+            title="PhotoDigger",
+            goal="Build the app",
+            status=TaskStatus.IN_PROGRESS,
+            stage=TaskStage.IMPLEMENTING,
+        )
+        child = Task(
+            id="PHOTO-2",
+            project=project,
+            sequence=2,
+            title="Oversized core",
+            goal="Build project, UI, bookmarks, and operation models",
+            status=TaskStatus.FAILED,
+            stage=TaskStage.BLOCKED,
+            parent=parent,
+            subtask_position=0,
+        )
+        session.add_all([parent, child])
+        await session.flush()
+        session.add_all(
+            [
+                Attempt(
+                    task_id=child.id,
+                    number=1,
+                    instruction="implement",
+                    outcome="failed",
+                ),
+                ValidationRun(
+                    task_id=child.id,
+                    command="xcodebuild test",
+                    exit_code=1,
+                    classification="FAILED",
+                    summary="2 failures",
+                    failure_count=2,
+                ),
+                Event(
+                    task=child,
+                    type="execution.context_limit",
+                    payload={"error": "Prompt too long"},
+                ),
+            ]
+        )
+        await session.commit()
+
+    app = create_app(factory, provider, Settings(app_origin="http://test"))
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        assert (await client.post("/api/tasks/PHOTO-2/replan")).status_code == 409
+        for status, stage in (
+            (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING),
+            (TaskStatus.TEST, TaskStage.VALIDATING),
+            (TaskStatus.DONE, TaskStage.COMPLETE),
+        ):
+            async with factory() as session:
+                child = await session.get(Task, "PHOTO-2")
+                child.status, child.stage = status, stage
+                await session.commit()
+            assert (await client.post("/api/tasks/PHOTO-1/replan")).status_code == 409
+        async with factory() as session:
+            child = await session.get(Task, "PHOTO-2")
+            child.status, child.stage = TaskStatus.FAILED, TaskStage.BLOCKED
+            await session.commit()
+        before = (await client.get("/api/tasks/PHOTO-1")).json()
+        assert before["replan_allowed"] is True
+        response = await client.post("/api/tasks/PHOTO-1/replan")
+        assert response.status_code == 200
+        replanned = response.json()
+        assert replanned["stage"] == "awaiting_approval"
+        assert replanned["plan"]["metadata"]["replan"] is True
+
+    instruction = provider.calls[0][1]
+    assert "PHOTO-2" in instruction
+    assert "Oversized core" in instruction
+    assert "attempts: 1" in instruction
+    assert "validation failures: 2" in instruction
+    assert "context-limit events: 1" in instruction
+    assert "fits one agent context" in instruction
+    assert "Do not create validation-only tasks" in instruction
+    async with factory() as session:
+        child = await session.get(Task, "PHOTO-2")
+        assert child.status == TaskStatus.FAILED
+        assert child.superseded_at is None
+        parent = Task(
+            id="PHOTO-3",
+            project_id=child.project_id,
+            sequence=3,
+            title="Second parent",
+            goal="Restore after failure",
+            status=TaskStatus.READY,
+            stage=TaskStage.QUEUED,
+        )
+        session.add_all(
+            [
+                parent,
+                Task(
+                    id="PHOTO-4",
+                    project_id=child.project_id,
+                    sequence=4,
+                    title="Queued child",
+                    goal="Queued child",
+                    status=TaskStatus.READY,
+                    stage=TaskStage.QUEUED,
+                    parent=parent,
+                    subtask_position=0,
+                ),
+            ]
+        )
+        await session.commit()
+    provider.output = "not JSON"
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        assert (await client.post("/api/tasks/PHOTO-3/replan")).status_code == 502
+    async with factory() as session:
+        parent = await session.get(Task, "PHOTO-3")
+        child = await session.get(Task, "PHOTO-4")
+        assert (parent.status, parent.stage) == (TaskStatus.READY, TaskStage.QUEUED)
+        assert child.superseded_at is None
+        assert await session.scalar(
+            select(func.count(Event.sequence)).where(
+                Event.task_id == parent.id, Event.type == "task.replan.failed"
+            )
+        ) == 1
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
