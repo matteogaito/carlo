@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select, text
@@ -192,6 +193,16 @@ async def test_status_command_is_private_reports_work_and_persists_offset(factor
                     goal="Do it",
                     status=TaskStatus.READY,
                     stage=TaskStage.QUEUED,
+                ),
+                Task(
+                    id="ECA-4",
+                    project_id=project.id,
+                    sequence=4,
+                    title="Superseded work",
+                    goal="Historical task",
+                    status=TaskStatus.READY,
+                    stage=TaskStage.QUEUED,
+                    superseded_at=datetime.now(UTC),
                 ),
                 ActionRun(
                     project_id=project.id,

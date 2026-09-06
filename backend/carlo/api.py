@@ -2027,6 +2027,9 @@ def create_app(
         if payload.revision != latest_revision:
             raise HTTPException(409, "only the latest plan revision can be approved")
         is_replan = plan.metadata_json.get("replan") is True
+        items = plan.metadata_json.get("implementation_tasks") or []
+        if is_replan and not items:
+            raise HTTPException(409, "replan must contain replacement subtasks")
         existing = await _active_children(session, task.id, lock=is_replan)
         if is_replan and (
             task.parent_task_id is not None
@@ -2051,7 +2054,6 @@ def create_app(
         task.approved_plan_revision = payload.revision
         task.version += 1
         plan.approved_at = datetime.now(UTC)
-        items = plan.metadata_json.get("implementation_tasks") or []
         children: list[Task] = []
         old_children: list[Task] = []
         if task.parent_task_id is None and items:

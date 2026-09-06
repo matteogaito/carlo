@@ -349,14 +349,20 @@ async def _status_message(
     async with factory() as session:
         implementation = await session.scalar(
             select(Task)
-            .where(Task.status == TaskStatus.IN_PROGRESS)
+            .where(
+                Task.status == TaskStatus.IN_PROGRESS,
+                Task.superseded_at.is_(None),
+            )
             .order_by(Task.updated_at.desc())
             .limit(1)
         )
         planning = (
             await session.scalars(
                 select(Task)
-                .where(Task.stage.in_((TaskStage.BRIEFING, TaskStage.PLANNING)))
+                .where(
+                    Task.stage.in_((TaskStage.BRIEFING, TaskStage.PLANNING)),
+                    Task.superseded_at.is_(None),
+                )
                 .order_by(Task.updated_at.desc())
                 .limit(3)
             )
@@ -371,7 +377,7 @@ async def _status_message(
             await session.scalar(
                 select(func.count())
                 .select_from(Task)
-                .where(Task.status == TaskStatus.READY)
+                .where(Task.status == TaskStatus.READY, Task.superseded_at.is_(None))
             )
             or 0
         )

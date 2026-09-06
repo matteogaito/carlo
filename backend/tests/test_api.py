@@ -258,6 +258,30 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
             ]
         )
         await session.commit()
+    provider.output = planning_output("# Plan\nNo replacement tasks.")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        empty_replan = (await client.post("/api/tasks/PHOTO-1/replan")).json()
+        rejected = await client.post(
+            "/api/tasks/PHOTO-1/approve",
+            json={
+                "revision": empty_replan["plan"]["revision"],
+                "version": empty_replan["version"],
+            },
+        )
+        assert rejected.status_code == 409
+    async with factory() as session:
+        assert await session.scalar(
+            select(func.count(Task.id)).where(
+                Task.parent_task_id == "PHOTO-1", Task.superseded_at.is_(None)
+            )
+        ) == 3
     provider.output = "not JSON"
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
