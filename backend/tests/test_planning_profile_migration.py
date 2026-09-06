@@ -20,14 +20,26 @@ from carlo.models import (
 
 
 async def test_unify_planning_profiles_preserves_legacy_references() -> None:
-    path = (
+    migration_path = (
         Path(__file__).parents[1]
         / "alembic/versions/b4c5d6e7f8a9_unify_planning_profiles.py"
     )
-    spec = importlib.util.spec_from_file_location("planning_profile_migration", path)
+    spec = importlib.util.spec_from_file_location(
+        "planning_profile_migration", migration_path
+    )
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
+    normalization_path = (
+        Path(__file__).parents[1]
+        / "alembic/versions/c5d6e7f8a9b0_normalize_plan_workflow_skill.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "plan_skill_normalization", normalization_path
+    )
+    assert spec and spec.loader
+    normalization = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(normalization)
     engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
@@ -35,7 +47,11 @@ async def test_unify_planning_profiles_preserves_legacy_references() -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async with factory() as session:
-        plan = AgentProfile(name="plan", provider="pi")
+        plan = AgentProfile(
+            name="plan",
+            provider="pi",
+            default_skills=["carlo-planning", "carlo-discovery", "frontend-design"],
+        )
         brief = AgentProfile(name="brief", provider="pi")
         discovery_profile = AgentProfile(name="discovery", provider="pi")
         package = PiPackage(source="test", identity="test-package")
@@ -80,15 +96,16 @@ async def test_unify_planning_profiles_preserves_legacy_references() -> None:
         )
         await session.commit()
 
-    def run(operation: str):
+    def run(module, operation: str):
         def invoke(connection):
-            migration.op = Operations(MigrationContext.configure(connection))
-            getattr(migration, operation)()
+            module.op = Operations(MigrationContext.configure(connection))
+            getattr(module, operation)()
 
         return invoke
 
     async with engine.begin() as connection:
-        await connection.run_sync(run("upgrade"))
+        await connection.run_sync(run(migration, "upgrade"))
+        await connection.run_sync(run(normalization, "upgrade"))
 
     async with factory() as session:
         profiles = {profile.name: profile for profile in await session.scalars(select(AgentProfile))}
@@ -98,6 +115,10 @@ async def test_unify_planning_profiles_preserves_legacy_references() -> None:
             select(Discovery).where(Discovery.provider_session_id == "migration-test")
         )
         assert set(profiles) == {"plan"}
+        assert profiles["plan"].default_skills == [
+            "carlo-planning",
+            "frontend-design",
+        ]
         assert {task.active_profile_id, attempt.profile_id, discovery.profile_id} == {
             profiles["plan"].id
         }
@@ -107,7 +128,7 @@ async def test_unify_planning_profiles_preserves_legacy_references() -> None:
         ]
 
     async with engine.begin() as connection:
-        await connection.run_sync(run("downgrade"))
+        await connection.run_sync(run(migration, "downgrade"))
 
     async with factory() as session:
         profiles = {profile.name: profile for profile in await session.scalars(select(AgentProfile))}
