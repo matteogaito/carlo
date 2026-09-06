@@ -122,10 +122,13 @@ class Orchestrator:
         async with self.session_factory() as session:
             active_tasks = (
                 await session.scalars(
-                select(Task)
-                .where(Task.status == TaskStatus.IN_PROGRESS)
-                .order_by(Task.created_at, Task.id)
-                .with_for_update(skip_locked=True)
+                    select(Task)
+                    .where(
+                        Task.status == TaskStatus.IN_PROGRESS,
+                        Task.superseded_at.is_(None),
+                    )
+                    .order_by(Task.created_at, Task.id)
+                    .with_for_update(skip_locked=True)
                 )
             ).all()
             active = None
@@ -141,10 +144,14 @@ class Orchestrator:
                 return active.id
             ready_tasks = (
                 await session.scalars(
-                select(Task)
-                .where(Task.status == TaskStatus.READY, Task.stage == TaskStage.QUEUED)
-                .order_by(Task.priority.desc(), Task.created_at, Task.id)
-                .with_for_update(skip_locked=True)
+                    select(Task)
+                    .where(
+                        Task.status == TaskStatus.READY,
+                        Task.stage == TaskStage.QUEUED,
+                        Task.superseded_at.is_(None),
+                    )
+                    .order_by(Task.priority.desc(), Task.created_at, Task.id)
+                    .with_for_update(skip_locked=True)
                 )
             ).all()
             task = None
@@ -163,19 +170,35 @@ class Orchestrator:
     async def _still_running(self, task_id: str) -> bool:
         async with self.session_factory() as session:
             task = await session.get(Task, task_id)
-            return task is not None and task.status == TaskStatus.IN_PROGRESS
+            return (
+                task is not None
+                and task.status == TaskStatus.IN_PROGRESS
+                and task.superseded_at is None
+            )
 
     @staticmethod
     async def _eligible(session: AsyncSession, task: Task) -> bool:
+        if task.superseded_at is not None:
+            return False
         if await session.scalar(
-            select(func.count(Task.id)).where(Task.parent_task_id == task.id)
+            select(func.count(Task.id)).where(
+                Task.parent_task_id == task.id,
+                Task.superseded_at.is_(None),
+            )
         ):
             return False
         if task.parent_task_id is None:
             return True
+        parent = await session.get(Task, task.parent_task_id)
+        if parent is None or (parent.status, parent.stage) != (
+            TaskStatus.IN_PROGRESS,
+            TaskStage.IMPLEMENTING,
+        ):
+            return False
         unfinished = await session.scalar(
             select(func.count(Task.id)).where(
                 Task.parent_task_id == task.parent_task_id,
+                Task.superseded_at.is_(None),
                 Task.subtask_position < task.subtask_position,
                 Task.status != TaskStatus.DONE,
             )
@@ -208,7 +231,7 @@ class Orchestrator:
 
     @staticmethod
     async def _sync_parent(session: AsyncSession, child: Task) -> None:
-        if child.parent_task_id is None:
+        if child.parent_task_id is None or child.superseded_at is not None:
             return
         parent = await session.scalar(
             select(Task).where(Task.id == child.parent_task_id).with_for_update()
@@ -219,7 +242,10 @@ class Orchestrator:
             (
                 await session.scalars(
                     select(Task)
-                    .where(Task.parent_task_id == parent.id)
+                    .where(
+                        Task.parent_task_id == parent.id,
+                        Task.superseded_at.is_(None),
+                    )
                     .order_by(Task.subtask_position)
                 )
             ).all()
@@ -331,6 +357,7 @@ class ImplementationPipeline:
                 predecessor = await session.scalar(
                     select(Task).where(
                         Task.parent_task_id == task.parent_task_id,
+                        Task.superseded_at.is_(None),
                         Task.subtask_position == task.subtask_position - 1,
                     )
                 )

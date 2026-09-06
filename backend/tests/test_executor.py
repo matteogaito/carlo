@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select, text
@@ -27,6 +28,7 @@ async def test_plan_subtasks_run_in_order_before_parent_completes() -> None:
         parent = Task(id="CAR-1", project=project, sequence=1, title="Parent", goal="Goal", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
         session.add_all([
             parent,
+            Task(id="CAR-4", project=project, sequence=4, title="Old", goal="Old", status=TaskStatus.READY, stage=TaskStage.QUEUED, parent=parent, subtask_position=0, superseded_at=datetime.now(UTC)),
             Task(id="CAR-2", project=project, sequence=2, title="First", goal="First", status=TaskStatus.READY, stage=TaskStage.QUEUED, parent=parent, subtask_position=0),
             Task(id="CAR-3", project=project, sequence=3, title="Second", goal="Second", status=TaskStatus.READY, stage=TaskStage.QUEUED, parent=parent, subtask_position=1),
         ])
@@ -45,6 +47,54 @@ async def test_plan_subtasks_run_in_order_before_parent_completes() -> None:
     async with factory() as session:
         assert (await session.get(Task, "CAR-1")).status == TaskStatus.DONE
     assert calls == ["CAR-2", "CAR-3"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_child_waits_while_parent_replan_is_unapproved() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/tmp/carlo-test")
+        parent = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="Parent",
+            goal="Goal",
+            status=TaskStatus.NOT_READY,
+            stage=TaskStage.AWAITING_APPROVAL,
+        )
+        session.add_all(
+            [
+                parent,
+                Task(
+                    id="CAR-2",
+                    project=project,
+                    sequence=2,
+                    title="Child",
+                    goal="Child",
+                    status=TaskStatus.READY,
+                    stage=TaskStage.QUEUED,
+                    parent=parent,
+                    subtask_position=0,
+                ),
+            ]
+        )
+        await session.commit()
+
+    async def runner(_: str) -> str:
+        raise AssertionError("child must remain frozen")
+
+    assert await Orchestrator(engine, factory, runner).run_next() is None
     await engine.dispose()
 
 

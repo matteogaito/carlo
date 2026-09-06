@@ -1981,7 +1981,11 @@ def create_app(
             raise HTTPException(409, "aggregate task is not ready")
         child = await session.scalar(
             select(Task)
-            .where(Task.parent_task_id == task.id, Task.status != TaskStatus.DONE)
+            .where(
+                Task.parent_task_id == task.id,
+                Task.superseded_at.is_(None),
+                Task.status != TaskStatus.DONE,
+            )
             .order_by(Task.subtask_position)
             .limit(1)
             .with_for_update()
@@ -2004,7 +2008,7 @@ def create_app(
         payload: Approval,
         session: AsyncSession = Depends(get_session),
     ) -> dict[str, Any]:
-        task = await _task_or_404(session, task_id)
+        task = await _task_or_404(session, task_id, lock=True)
         if task.version != payload.version:
             raise HTTPException(409, "task changed; refresh before approving")
         plan = await session.scalar(
@@ -2022,6 +2026,18 @@ def create_app(
         )
         if payload.revision != latest_revision:
             raise HTTPException(409, "only the latest plan revision can be approved")
+        is_replan = plan.metadata_json.get("replan") is True
+        existing = await _active_children(session, task.id, lock=is_replan)
+        if is_replan and (
+            task.parent_task_id is not None
+            or not existing
+            or any(
+                child.status
+                in {TaskStatus.IN_PROGRESS, TaskStatus.TEST, TaskStatus.DONE}
+                for child in existing
+            )
+        ):
+            raise HTTPException(409, "subtasks changed and cannot be replaced")
         try:
             action = (
                 "approve_amendment"
@@ -2037,17 +2053,15 @@ def create_app(
         plan.approved_at = datetime.now(UTC)
         items = plan.metadata_json.get("implementation_tasks") or []
         children: list[Task] = []
+        old_children: list[Task] = []
         if task.parent_task_id is None and items:
-            existing = (
-                await session.scalars(
-                    select(Task)
-                    .where(Task.parent_task_id == task.id)
-                    .order_by(Task.subtask_position)
-                )
-            ).all()
-            if existing:
+            if existing and not is_replan:
                 children = list(existing)
             else:
+                if is_replan:
+                    old_children = existing
+                    for child in old_children:
+                        child.superseded_at = plan.approved_at
                 project = await session.scalar(
                     select(Project)
                     .where(Project.id == task.project_id)
@@ -2075,6 +2089,7 @@ def create_app(
                     )
                     child_metadata = {
                         **plan.metadata_json,
+                        "replan": False,
                         "title": str(item["title"]),
                         "description": str(item["prompt"]),
                         "implementation_tasks": [item],
@@ -2099,16 +2114,29 @@ def create_app(
                     children.append(child)
                 task.status = TaskStatus.IN_PROGRESS
                 task.stage = TaskStage.IMPLEMENTING
-        session.add_all(
-            [
-                Event(task=task, type="plan.approved", payload={"revision": payload.revision}),
-                *(
-                    [Event(task=task, type="subtasks.created", payload={"children": [child.id for child in children]})]
-                    if children
-                    else []
-                ),
-            ]
+        session.add(
+            Event(task=task, type="plan.approved", payload={"revision": payload.revision})
         )
+        if old_children:
+            session.add(
+                Event(
+                    task=task,
+                    type="subtasks.replanned",
+                    payload={
+                        "revision": payload.revision,
+                        "old_children": [child.id for child in old_children],
+                        "new_children": [child.id for child in children],
+                    },
+                )
+            )
+        elif children:
+            session.add(
+                Event(
+                    task=task,
+                    type="subtasks.created",
+                    payload={"children": [child.id for child in children]},
+                )
+            )
         await session.commit()
         return await _task_view(session, task)
 
@@ -2147,8 +2175,15 @@ async def _is_git_repository(path: str) -> bool:
     return await process.wait() == 0
 
 
-async def _task_or_404(session: AsyncSession, task_id: str) -> Task:
-    task = await session.get(Task, task_id)
+async def _task_or_404(
+    session: AsyncSession, task_id: str, *, lock: bool = False
+) -> Task:
+    if lock:
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+    else:
+        task = await session.get(Task, task_id)
     if task is None:
         raise HTTPException(404, "task not found")
     return task

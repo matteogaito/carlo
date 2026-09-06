@@ -18,13 +18,17 @@ from carlo.provider import AgentProfile, AgentResult, ProviderError
 from tests.fakes import FakeProvider, add_managed_profiles
 
 
-def planning_output(plan: str = "# Plan\nRun the existing tests.") -> str:
+def planning_output(
+    plan: str = "# Plan\nRun the existing tests.",
+    implementation_tasks: list[dict[str, object]] | None = None,
+) -> str:
     return json.dumps(
         {
             "brief_markdown": "# Brief\nEvidence: README.md",
             "plan_markdown": plan,
             "metadata": {
                 "skills": ["testing"],
+                "implementation_tasks": implementation_tasks or [],
                 "validation_commands": ["pytest -q"],
                 "browser_validation": False,
                 "build_required": False,
@@ -56,11 +60,24 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
         )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
-    provider = FakeProvider(planning_output("# Plan\nUse smaller tasks."))
+    replacement_tasks = [
+        {
+            "title": f"Replacement {number}",
+            "prompt": f"Implement replacement {number}",
+            "intervention_points": [f"part-{number}"],
+        }
+        for number in range(1, 4)
+    ]
+    provider = FakeProvider(
+        planning_output("# Plan\nUse smaller tasks.", replacement_tasks)
+    )
     async with factory() as session:
         await add_managed_profiles(session, "plan")
         project = Project(
-            name="PhotoDigger", key="PHOTO", repository_path=str(repository)
+            name="PhotoDigger",
+            key="PHOTO",
+            repository_path=str(repository),
+            next_task_sequence=3,
         )
         parent = Task(
             id="PHOTO-1",
@@ -153,10 +170,72 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
         child = await session.get(Task, "PHOTO-2")
         assert child.status == TaskStatus.FAILED
         assert child.superseded_at is None
+        old_attempt_id = await session.scalar(
+            select(Attempt.id).where(Attempt.task_id == child.id)
+        )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        approved = await client.post(
+            "/api/tasks/PHOTO-1/approve",
+            json={
+                "revision": replanned["plan"]["revision"],
+                "version": replanned["version"],
+            },
+        )
+        assert approved.status_code == 200
+        assert approved.json()["subtask_count"] == 3
+
+    async with factory() as session:
+        old = await session.get(Task, "PHOTO-2")
+        active = list(
+            await session.scalars(
+                select(Task)
+                .where(
+                    Task.parent_task_id == "PHOTO-1",
+                    Task.superseded_at.is_(None),
+                )
+                .order_by(Task.subtask_position)
+            )
+        )
+        assert old.superseded_at is not None
+        assert [child.subtask_position for child in active] == [0, 1, 2]
+        assert all(child.id != old.id for child in active)
+        assert await session.get(Attempt, old_attempt_id)
+        event = await session.scalar(
+            select(Event).where(
+                Event.task_id == "PHOTO-1", Event.type == "subtasks.replanned"
+            )
+        )
+        assert event.payload["old_children"] == ["PHOTO-2"]
+        assert event.payload["new_children"] == [child.id for child in active]
+        aggregate = await session.get(Task, "PHOTO-1")
+        aggregate.status, aggregate.stage = TaskStatus.READY, TaskStage.QUEUED
+        await session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin-password"},
+        )
+        client.headers["Origin"] = "http://test"
+        assert (await client.post("/api/tasks/PHOTO-1/resume")).status_code == 200
+
+    async with factory() as session:
+        old = await session.get(Task, "PHOTO-2")
+        child = old
         parent = Task(
-            id="PHOTO-3",
+            id="PHOTO-6",
             project_id=child.project_id,
-            sequence=3,
+            sequence=6,
             title="Second parent",
             goal="Restore after failure",
             status=TaskStatus.READY,
@@ -166,9 +245,9 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
             [
                 parent,
                 Task(
-                    id="PHOTO-4",
+                    id="PHOTO-7",
                     project_id=child.project_id,
-                    sequence=4,
+                    sequence=7,
                     title="Queued child",
                     goal="Queued child",
                     status=TaskStatus.READY,
@@ -188,10 +267,10 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
             json={"username": "admin", "password": "admin-password"},
         )
         client.headers["Origin"] = "http://test"
-        assert (await client.post("/api/tasks/PHOTO-3/replan")).status_code == 502
+        assert (await client.post("/api/tasks/PHOTO-6/replan")).status_code == 502
     async with factory() as session:
-        parent = await session.get(Task, "PHOTO-3")
-        child = await session.get(Task, "PHOTO-4")
+        parent = await session.get(Task, "PHOTO-6")
+        child = await session.get(Task, "PHOTO-7")
         assert (parent.status, parent.stage) == (TaskStatus.READY, TaskStage.QUEUED)
         assert child.superseded_at is None
         assert await session.scalar(
