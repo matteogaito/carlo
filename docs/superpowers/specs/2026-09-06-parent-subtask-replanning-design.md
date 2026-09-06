@@ -102,7 +102,8 @@ error.
 Approval of a latest plan revision with `metadata.replan = true` performs one
 transaction:
 
-1. Lock the parent and active children and repeat the eligibility check.
+1. Lock the parent and active children and repeat the child-status safety check;
+   the parent itself must now be `NOT_READY/AWAITING_APPROVAL`.
 2. Set `superseded_at` on every active child.
 3. Create the replacement children through the existing child materialization
    code, with fresh task IDs and positions starting at zero.
