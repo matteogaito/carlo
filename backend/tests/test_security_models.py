@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.models import (
@@ -42,6 +43,57 @@ async def test_task_children_are_persisted_in_plan_order() -> None:
         await session.refresh(parent, ["children"])
         assert [child.id for child in parent.children] == ["CAR-2", "CAR-3"]
         assert first.parent_task_id == "CAR-1"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_only_one_active_child_can_hold_a_parent_position() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/repo")
+        parent = Task(id="CAR-1", project=project, sequence=1, title="Parent", goal="Goal")
+        session.add_all(
+            [
+                parent,
+                Task(
+                    id="CAR-2",
+                    project=project,
+                    sequence=2,
+                    title="Old",
+                    goal="Old",
+                    parent=parent,
+                    subtask_position=0,
+                    superseded_at=datetime.now(UTC),
+                ),
+                Task(
+                    id="CAR-3",
+                    project=project,
+                    sequence=3,
+                    title="Current",
+                    goal="Current",
+                    parent=parent,
+                    subtask_position=0,
+                ),
+            ]
+        )
+        await session.commit()
+        session.add(
+            Task(
+                id="CAR-4",
+                project=project,
+                sequence=4,
+                title="Duplicate",
+                goal="Duplicate",
+                parent=parent,
+                subtask_position=0,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
     await engine.dispose()
 
 

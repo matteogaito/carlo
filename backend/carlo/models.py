@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -374,7 +375,13 @@ class Task(TimestampMixin, Base):
     __tablename__ = "tasks"
     __table_args__ = (
         UniqueConstraint("project_id", "sequence"),
-        UniqueConstraint("parent_task_id", "subtask_position"),
+        Index(
+            "uq_tasks_active_parent_position",
+            "parent_task_id",
+            "subtask_position",
+            unique=True,
+            postgresql_where=text("superseded_at IS NULL"),
+        ),
         CheckConstraint(
             "subtask_position IS NULL OR subtask_position >= 0",
             name="ck_tasks_subtask_position",
@@ -415,6 +422,7 @@ class Task(TimestampMixin, Base):
         ForeignKey("tasks.id", ondelete="CASCADE"), index=True
     )
     subtask_position: Mapped[int | None] = mapped_column(Integer)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     project: Mapped[Project] = relationship(back_populates="tasks", lazy="selectin")
     parent: Mapped["Task | None"] = relationship(

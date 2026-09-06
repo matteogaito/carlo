@@ -1,4 +1,5 @@
 import importlib.util
+from datetime import UTC, datetime
 from pathlib import Path
 
 from alembic.migration import MigrationContext
@@ -19,27 +20,26 @@ from carlo.models import (
 )
 
 
-async def test_unify_planning_profiles_preserves_legacy_references() -> None:
-    migration_path = (
-        Path(__file__).parents[1]
-        / "alembic/versions/b4c5d6e7f8a9_unify_planning_profiles.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "planning_profile_migration", migration_path
-    )
+def load_migration(filename: str):
+    path = Path(__file__).parents[1] / f"alembic/versions/{filename}.py"
+    spec = importlib.util.spec_from_file_location(filename, path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
-    normalization_path = (
-        Path(__file__).parents[1]
-        / "alembic/versions/c5d6e7f8a9b0_normalize_plan_workflow_skill.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "plan_skill_normalization", normalization_path
-    )
-    assert spec and spec.loader
-    normalization = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(normalization)
+    return migration
+
+
+def run_migration(module, operation: str):
+    def invoke(connection):
+        module.op = Operations(MigrationContext.configure(connection))
+        getattr(module, operation)()
+
+    return invoke
+
+
+async def test_unify_planning_profiles_preserves_legacy_references() -> None:
+    migration = load_migration("b4c5d6e7f8a9_unify_planning_profiles")
+    normalization = load_migration("c5d6e7f8a9b0_normalize_plan_workflow_skill")
     engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
@@ -96,16 +96,9 @@ async def test_unify_planning_profiles_preserves_legacy_references() -> None:
         )
         await session.commit()
 
-    def run(module, operation: str):
-        def invoke(connection):
-            module.op = Operations(MigrationContext.configure(connection))
-            getattr(module, operation)()
-
-        return invoke
-
     async with engine.begin() as connection:
-        await connection.run_sync(run(migration, "upgrade"))
-        await connection.run_sync(run(normalization, "upgrade"))
+        await connection.run_sync(run_migration(migration, "upgrade"))
+        await connection.run_sync(run_migration(normalization, "upgrade"))
 
     async with factory() as session:
         profiles = {profile.name: profile for profile in await session.scalars(select(AgentProfile))}
@@ -128,7 +121,7 @@ async def test_unify_planning_profiles_preserves_legacy_references() -> None:
         ]
 
     async with engine.begin() as connection:
-        await connection.run_sync(run(migration, "downgrade"))
+        await connection.run_sync(run_migration(migration, "downgrade"))
 
     async with factory() as session:
         profiles = {profile.name: profile for profile in await session.scalars(select(AgentProfile))}
@@ -139,6 +132,60 @@ async def test_unify_planning_profiles_preserves_legacy_references() -> None:
         assert {association.agent_profile_id for association in associations} == {
             profile.id for profile in profiles.values()
         }
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
+
+
+async def test_superseded_subtask_migration_preserves_existing_tasks() -> None:
+    migration = load_migration("d6e7f8a9b0c1_superseded_subtasks")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(name="Migration", key="MIG", repository_path="/tmp/migration")
+        parent = Task(id="MIG-1", project=project, sequence=1, title="Parent", goal="Parent")
+        session.add_all(
+            [
+                parent,
+                Task(
+                    id="MIG-2",
+                    project=project,
+                    sequence=2,
+                    title="Child",
+                    goal="Child",
+                    parent=parent,
+                    subtask_position=0,
+                ),
+            ]
+        )
+        await session.commit()
+
+    async with engine.begin() as connection:
+        await connection.run_sync(run_migration(migration, "downgrade"))
+        assert await connection.scalar(select(Task.id).where(Task.id == "MIG-2")) == "MIG-2"
+        await connection.run_sync(run_migration(migration, "upgrade"))
+
+    async with factory() as session:
+        old = await session.get(Task, "MIG-2")
+        parent = await session.get(Task, "MIG-1")
+        old.superseded_at = datetime.now(UTC)
+        session.add(
+            Task(
+                id="MIG-3",
+                project=parent.project,
+                sequence=3,
+                title="Replacement",
+                goal="Replacement",
+                parent=parent,
+                subtask_position=0,
+            )
+        )
+        await session.commit()
+        assert set(await session.scalars(select(Task.id))) == {"MIG-1", "MIG-2", "MIG-3"}
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
