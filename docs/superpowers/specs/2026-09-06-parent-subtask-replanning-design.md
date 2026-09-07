@@ -34,7 +34,11 @@ Replanning is available only when:
 
 - the selected Task is top-level and has active children;
 - no active child is `IN_PROGRESS`, `TEST`, or `DONE`;
-- the parent is not already briefing, planning, or awaiting approval.
+- the parent is not already briefing or planning.
+
+An aggregate parent awaiting approval may be replanned again. Its pending plan
+revision remains as unapproved history and the new revision becomes the only
+approvable proposal; active children are still unchanged until approval.
 
 Failed, blocked, not-ready, and queued children may be superseded. Rejecting a
 parent with completed children avoids ambiguous Git ancestry: CARLO does not

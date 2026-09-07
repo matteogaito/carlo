@@ -347,6 +347,7 @@ def _replan_allowed(task: Task, children: list[Task]) -> bool:
             (TaskStatus.IN_PROGRESS, TaskStage.BLOCKED),
             (TaskStatus.FAILED, TaskStage.BLOCKED),
             (TaskStatus.READY, TaskStage.QUEUED),
+            (TaskStatus.NOT_READY, TaskStage.AWAITING_APPROVAL),
         }
         and all(
             child.status

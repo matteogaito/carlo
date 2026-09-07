@@ -162,6 +162,20 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
         async with factory() as session:
             child = await session.get(Task, "PHOTO-2")
             child.status, child.stage = TaskStatus.FAILED, TaskStage.BLOCKED
+            parent = await session.get(Task, "PHOTO-1")
+            parent.status, parent.stage = (
+                TaskStatus.NOT_READY,
+                TaskStage.AWAITING_APPROVAL,
+            )
+            session.add(
+                PlanRevision(
+                    task=parent,
+                    revision=2,
+                    brief_markdown="# Pending brief",
+                    plan_markdown="# Pending plan",
+                    metadata_json={},
+                )
+            )
             await session.commit()
         before = (await client.get("/api/tasks/PHOTO-1")).json()
         assert before["replan_allowed"] is True
@@ -169,6 +183,7 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
         assert response.status_code == 200
         replanned = response.json()
         assert replanned["stage"] == "awaiting_approval"
+        assert replanned["plan"]["revision"] == 3
         assert replanned["plan"]["metadata"]["replan"] is True
 
     instruction = provider.calls[0][1]

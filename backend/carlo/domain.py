@@ -136,6 +136,10 @@ _TRANSITIONS = {
         TaskStatus.NOT_READY,
         TaskStage.BRIEFING,
     ),
+    (TaskStatus.NOT_READY, TaskStage.AWAITING_APPROVAL, "replan"): (
+        TaskStatus.NOT_READY,
+        TaskStage.BRIEFING,
+    ),
 }
 
 
