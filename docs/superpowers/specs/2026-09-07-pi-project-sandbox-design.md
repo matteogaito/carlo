@@ -2,47 +2,53 @@
 
 ## Goal
 
-Run every Pi session inside an operating-system sandbox comparable to the workspace-write isolation used by coding agents such as Codex and Claude Code. The project repository or task worktree is Pi's only writable user-data filesystem boundary. Pi must not inspect other projects or user files, modify Carlo's installation, or control macOS services.
+Enable the `pi-sandbox` Pi extension for every Carlo project. Pi may read and write project files only inside the repository or task worktree from which Carlo launches it. Network access remains unrestricted.
 
-## Scope
+## Package Management
 
-The policy applies centrally to every `PiProvider` launch, including planning, Discovery, implementation, retries, and persistent RPC conversations. Existing profile tool lists remain capability hints; they are not the security boundary.
+Carlo installs the unpinned package source `npm:pi-sandbox` through its existing `PiPackageManager` and marks it as a default package inherited by every agent profile. The existing weekly managed-package refresh keeps it updated. Carlo does not invoke `srt` directly; `pi-sandbox` manages its sandbox runtime internally.
 
-`sudo` is always forbidden. A future opt-in mechanism is explicitly out of scope.
+## Configuration
 
-## Sandbox Boundary
+Carlo already launches Pi with `cwd` set to the project repository or task worktree. In `pi-sandbox`, `.` therefore identifies the complete permitted project boundary.
 
-Carlo resolves the supplied working directory to a real, existing directory before launching Pi. That resolved directory is the project boundary.
+Carlo sets a session-specific `PI_CODING_AGENT_DIR`, so `PiRuntimeSnapshotBuilder` writes the same `sandbox.json` into every session snapshot rather than relying on `~/.pi/agent/sandbox.json`.
 
-The macOS process is launched through `/usr/bin/sandbox-exec` with a generated Seatbelt profile that:
+The generated configuration:
 
-- permits reading and writing beneath the resolved project boundary;
-- permits only explicitly enumerated read access needed to start Pi and load the selected system toolchain, managed skills, packages, and runtime configuration;
-- permits access only to the exact Carlo-owned runtime and session paths assigned to the current Pi session;
-- permits outbound network access required by the configured model provider;
-- permits child processes needed by project build and test commands;
-- denies `sudo` and `launchctl` execution;
-- denies signalling unrelated processes;
-- denies filesystem access to other projects and user-data paths.
+- sets `enabled` and `sandboxUserShell` to `true`;
+- sets a short permission timeout so unattended denied operations abort promptly;
+- sets `filesystem.allowRead` and `filesystem.allowWrite` to `["."]`;
+- denies reads from `/Users`, `/home`, and Carlo's worktree root, with `.` re-allowing only the current project;
+- hard-denies writes to `.pi/sandbox.json` so Pi cannot change its own policy;
+- sets `network.allowedDomains` to `["*"]` and `network.deniedDomains` to `[]`;
+- leaves Apple Events and browser-process launching disabled;
+- does not grant additional Unix-socket access.
 
-Unlike an interactive coding agent, Carlo cannot safely ask for elevation while Pi runs unattended. A denied operation therefore fails immediately; there is no approval or unsandboxed fallback path.
+Because `pi-sandbox` merges project-local `.pi/sandbox.json` settings and lets local scalar values override global values, Carlo rejects a project containing that file before starting Pi. This prevents repository content from disabling or widening the mandatory policy.
 
-Paths inserted into a Seatbelt profile are escaped as data after symlink resolution. Missing `sandbox-exec`, an invalid boundary, or sandbox startup failure is fatal: Carlo must not launch Pi without confinement.
+`sudo` remains disabled. Per-project elevation is deferred.
 
-## Data Flow
+## Enforcement
 
-`PiProvider.run` and `PiProvider.open_conversation` both build their existing Pi argument list, then pass it with the resolved working directory to one shared sandbox-command builder. Context-compaction retries reuse the same boundary and policy. Carlo remains outside the sandbox and retains responsibility for session lifecycle and termination.
+`pi-sandbox` intercepts Pi's `read`, `write`, and `edit` tools. It runs `bash` commands and their descendants under macOS Seatbelt or Linux bubblewrap. A denied operation fails without an unsandboxed retry.
 
-## Error Handling
-
-Sandbox-policy failures become `ProviderError` messages that identify the rejected boundary or unavailable sandbox without exposing model credentials. A denied operation appears to Pi as an ordinary permission failure and cannot trigger an unsandboxed retry.
+The worker fails closed if the extension, its required `rg` executable, the generated configuration, or the project boundary is unavailable.
 
 ## Verification
 
-Provider tests must prove both JSON and RPC launches use the sandbox wrapper. A macOS integration probe must prove that a sandboxed child can create and read a file inside its project, while attempts to read or write a sibling project, execute `sudo` or `launchctl`, and signal an unrelated process fail.
+Tests must prove that:
 
-Existing provider tests and the complete backend test suite must continue to pass. Tests on non-macOS hosts may skip only the Seatbelt integration probe; production launch must still fail closed when the configured sandbox executable is unavailable.
+- the unpinned package is installed, global, and refreshed by the existing maintenance flow;
+- every runtime snapshot contains the mandatory configuration;
+- both JSON and RPC sessions load the extension;
+- a project-local sandbox configuration is rejected;
+- Pi can read and write inside its current project;
+- Pi cannot read or write a sibling project or use `sudo`;
+- an outbound network request remains permitted.
+
+The complete backend suite must remain green. OS-level integration checks may skip only when the host platform lacks the sandbox primitive; production startup must still fail closed.
 
 ## Deferred Work
 
-Per-project permission to use `sudo`, container or VM isolation, and configurable sandbox exceptions are not included. They should be designed separately only if a concrete project cannot operate within this boundary.
+Network allowlists, per-project sandbox exceptions, `sudo` opt-in, browser automation, containers, and virtual machines are not included.
