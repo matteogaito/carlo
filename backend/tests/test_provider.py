@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -132,6 +133,7 @@ async def test_pi_provider_retries_context_compaction_only_once(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_pi_provider_resolves_project_boundary_in_successful_launch(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -140,10 +142,10 @@ async def test_pi_provider_resolves_project_boundary_in_successful_launch(
     executable = tmp_path / "fake-pi"
     executable.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, pathlib, sys\n"
+        "import json, sys\n"
         "print(json.dumps({'type': 'agent_start'}))\n"
         "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'read', 'args': {'path': 'README.md'}}))\n"
-        "print(json.dumps({'type': 'final', 'output': json.dumps({'brief_markdown': 'B', 'plan_markdown': 'P', 'metadata': {}}), 'argv': sys.argv[1:], 'cwd': str(pathlib.Path.cwd())}))\n"
+        "print(json.dumps({'type': 'final', 'output': json.dumps({'brief_markdown': 'B', 'plan_markdown': 'P', 'metadata': {}}), 'argv': sys.argv[1:]}))\n"
     )
     executable.chmod(0o755)
     sessions = tmp_path / "sessions"
@@ -163,6 +165,15 @@ async def test_pi_provider_resolves_project_boundary_in_successful_launch(
     async def collect(event: dict[str, Any]) -> None:
         seen.append(str(event["type"]))
 
+    original_create_subprocess_exec = asyncio.create_subprocess_exec
+    subprocess_cwds: list[str] = []
+
+    async def capture_subprocess_cwd(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        subprocess_cwds.append(kwargs["cwd"])
+        return await original_create_subprocess_exec(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_subprocess_cwd)
+
     result = await provider.run(
         profile, "Inspect the repo", str(project_link), "CAR-1-plan-1", collect
     )
@@ -170,7 +181,7 @@ async def test_pi_provider_resolves_project_boundary_in_successful_launch(
     assert json.loads(result.output)["plan_markdown"] == "P"
     assert seen == ["agent_start", "tool_execution_start", "final"]
     assert [event["type"] for event in result.events] == seen
-    assert result.events[-1]["cwd"] == str(project.resolve())
+    assert subprocess_cwds == [str(project.resolve())]
     argv = result.events[-1]["argv"]
     assert argv == [
         "--mode", "json", "--print", "--approve", "--session-id", "CAR-1-plan-1",
