@@ -48,6 +48,23 @@ def test_pi_runtime_snapshot_is_isolated_atomic_and_secret_free(tmp_path: Path) 
             "keepRecentTokens": 13_107,
         }
     }
+    sandbox = json.loads((snapshot.agent_dir / "sandbox.json").read_text())
+    assert sandbox == {
+        "enabled": True,
+        "sandboxUserShell": True,
+        "permissionPromptTimeoutSeconds": 1,
+        "allowBrowserProcess": False,
+        "network": {
+            "allowedDomains": ["*"],
+            "deniedDomains": [],
+        },
+        "filesystem": {
+            "denyRead": ["/Users", "/home", "/usr/local/var/carlo/worktrees"],
+            "allowRead": ["."],
+            "allowWrite": ["."],
+            "denyWrite": [".pi/sandbox.json"],
+        },
+    }
     assert "omlx-local" not in "".join(
         file.read_text() for file in snapshot.agent_dir.iterdir() if file.is_file()
     )

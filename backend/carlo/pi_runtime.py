@@ -125,6 +125,22 @@ class PiRuntimeSnapshotBuilder:
                 }
             },
         )
+        self._write_json(
+            agent_dir / "sandbox.json",
+            {
+                "enabled": True,
+                "sandboxUserShell": True,
+                "permissionPromptTimeoutSeconds": 1,
+                "allowBrowserProcess": False,
+                "network": {"allowedDomains": ["*"], "deniedDomains": []},
+                "filesystem": {
+                    "denyRead": ["/Users", "/home", "/usr/local/var/carlo/worktrees"],
+                    "allowRead": ["."],
+                    "allowWrite": ["."],
+                    "denyWrite": [".pi/sandbox.json"],
+                },
+            },
+        )
         self._write_json(agent_dir / "manifest.json", manifest)
         return PiRuntimeSnapshot(
             agent_dir=agent_dir,
