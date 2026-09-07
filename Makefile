@@ -40,7 +40,7 @@ test:
 	cd frontend && npm run build
 
 install-mac:
-	@CARLO_SOURCE_ROOT="$(CURDIR)" CARLO_UV_BIN="$$(command -v uv)" CARLO_NPM_BIN="$$(command -v npm)" CARLO_PSQL_BIN="$$(command -v psql)" ./scripts/install-mac.sh install
+	@CARLO_SOURCE_ROOT="$(CURDIR)" CARLO_UV_BIN="$$(command -v uv)" CARLO_NPM_BIN="$$(command -v npm)" CARLO_PSQL_BIN="$$(command -v psql)" ./scripts/install-mac-dispatch.sh
 
 status-mac:
 	@sudo launchctl print system/com.carlo.api

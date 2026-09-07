@@ -8,6 +8,8 @@ STATE_ROOT=/usr/local/var/carlo
 CONFIG_FILE="$SERVICE_HOME/.config/carlo/.env.production"
 API_PLIST=/Library/LaunchDaemons/com.carlo.api.plist
 WORKER_PLIST=/Library/LaunchDaemons/com.carlo.worker.plist
+TESTMGR_DAEMON=/Library/LaunchDaemons/com.apple.testmanagerd.local.plist
+XCB_SHIM="$SERVICE_HOME/.npm-global/bin/xcodebuild"
 SCRIPT_DIR="$(/usr/bin/dirname "$0")"
 
 die() {
@@ -21,9 +23,11 @@ die() {
 uninstall_daemons() {
     /bin/launchctl bootout system/com.carlo.api 2>/dev/null || true
     /bin/launchctl bootout system/com.carlo.worker 2>/dev/null || true
+    /bin/launchctl bootout system/com.apple.testmanagerd.local 2>/dev/null || true
     /bin/bash "$SCRIPT_DIR/wait-launchd-unloaded.sh" com.carlo.api
     /bin/bash "$SCRIPT_DIR/wait-launchd-unloaded.sh" com.carlo.worker
-    /bin/rm -f "$API_PLIST" "$WORKER_PLIST"
+    /bin/bash "$SCRIPT_DIR/wait-launchd-unloaded.sh" com.apple.testmanagerd.local
+    /bin/rm -f "$API_PLIST" "$WORKER_PLIST" "$TESTMGR_DAEMON"
 }
 
 if [[ "${1:-install}" == uninstall ]]; then
@@ -188,6 +192,55 @@ fi
 
 /usr/bin/sudo -u "$SERVICE_USER" -H "$INSTALL_ROOT/scripts/run-mac-service.sh" bootstrap-admin
 /usr/bin/sudo -u "$SERVICE_USER" -H "$INSTALL_ROOT/scripts/run-mac-service.sh" check
+
+install_testmanager_daemon() {
+    # `xcodebuild test` talks to com.apple.testmanagerd.control over XPC. The
+    # per-user agent Apple ships is limited to LoginWindow/Aqua sessions and
+    # the service account only has background/SSH sessions, so the control
+    # service never starts and headless validations fail with "connection to
+    # com.apple.testmanagerd.control ... No such process". A system-domain
+    # daemon works: it starts for every session type and, via launchd-injected
+    # Mach services (dict form; arrays are silently ignored), testmanagerd can
+    # bind the local names without bootstrap_register permissions.
+    /bin/cat >"$TESTMGR_DAEMON" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.apple.testmanagerd.local</string>
+<key>ProgramArguments</key><array><string>/usr/libexec/testmanagerd</string></array>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>ProcessType</key><string>Standard</string>
+<key>MachServices</key><dict>
+<key>com.apple.dt.xctestd.target</key><true/>
+<key>com.apple.testmanagerd</key><true/>
+<key>com.apple.testmanagerd.control</key><true/>
+</dict>
+</dict></plist>
+PLIST
+    /bin/chmod 644 "$TESTMGR_DAEMON"
+    /usr/sbin/chown root:wheel "$TESTMGR_DAEMON"
+    /usr/bin/plutil -lint "$TESTMGR_DAEMON" >/dev/null
+    /bin/launchctl bootout system/com.apple.testmanagerd.local 2>/dev/null || true
+    /bin/launchctl bootstrap system "$TESTMGR_DAEMON"
+    /bin/launchctl enable system/com.apple.testmanagerd.local
+    /bin/launchctl kickstart -k system/com.apple.testmanagerd.local
+}
+
+install_xcodebuild_shim() {
+    # `xcodebuild test` also launches the GUI test runner through
+    # LaunchServices, which requires an Aqua (GUI) login session. The service
+    # account never has one (RBS error 5 / OSLaunchdErrorDomain 125), so the
+    # shim relays test actions to the console user's session through the
+    # dispatcher (scripts/install-mac-dispatch.sh, reached via the one
+    # sudo-allowed command). Installed ahead of /usr/bin in the service
+    # account's PATH; pass-through for every non-test invocation.
+    /usr/bin/install -d -m 755 -o "$SERVICE_USER" -g "$service_group" "$SERVICE_HOME/.npm-global/bin"
+    /usr/bin/install -m 755 -o "$SERVICE_USER" -g "$service_group" "$SCRIPT_DIR/xcodebuild-shim.sh" "$XCB_SHIM"
+}
+
+install_testmanager_daemon
+install_xcodebuild_shim
 
 write_plist() {
     label="$1"
