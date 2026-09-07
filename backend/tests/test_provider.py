@@ -58,6 +58,37 @@ def _context_retry_provider(tmp_path: Path, *, always_fail: bool = False) -> tup
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("launch", ["run", "open_conversation"])
+async def test_pi_provider_rejects_project_local_sandbox_configuration(
+    tmp_path: Path, launch: str
+) -> None:
+    project = tmp_path / "project"
+    (project / ".pi").mkdir(parents=True)
+    (project / ".pi" / "sandbox.json").write_text("{}")
+    marker = tmp_path / "started"
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib\n"
+        f"pathlib.Path({str(marker)!r}).touch()\n"
+        "print('{\"type\": \"final\", \"output\": \"done\"}')\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+    profile = AgentProfile("plan", None, None, (), ())
+
+    with pytest.raises(
+        ProviderError, match="project-local Pi sandbox configuration is forbidden"
+    ):
+        if launch == "run":
+            await provider.run(profile, "Plan", str(project), "CAR-sandbox")
+        else:
+            await provider.open_conversation(profile, str(project), "CAR-sandbox")
+
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
 async def test_pi_provider_resumes_once_after_context_compaction(tmp_path: Path) -> None:
     provider, calls_path = _context_retry_provider(tmp_path)
     seen: list[str] = []
@@ -99,14 +130,20 @@ async def test_pi_provider_retries_context_compaction_only_once(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> None:
+async def test_pi_provider_resolves_project_boundary_in_successful_launch(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    project_link = tmp_path / "project-link"
+    project_link.symlink_to(project, target_is_directory=True)
     executable = tmp_path / "fake-pi"
     executable.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, sys\n"
+        "import json, pathlib, sys\n"
         "print(json.dumps({'type': 'agent_start'}))\n"
         "print(json.dumps({'type': 'tool_execution_start', 'toolName': 'read', 'args': {'path': 'README.md'}}))\n"
-        "print(json.dumps({'type': 'final', 'output': json.dumps({'brief_markdown': 'B', 'plan_markdown': 'P', 'metadata': {}}), 'argv': sys.argv[1:]}))\n"
+        "print(json.dumps({'type': 'final', 'output': json.dumps({'brief_markdown': 'B', 'plan_markdown': 'P', 'metadata': {}}), 'argv': sys.argv[1:], 'cwd': str(pathlib.Path.cwd())}))\n"
     )
     executable.chmod(0o755)
     sessions = tmp_path / "sessions"
@@ -127,12 +164,13 @@ async def test_pi_provider_uses_explicit_read_only_session(tmp_path: Path) -> No
         seen.append(str(event["type"]))
 
     result = await provider.run(
-        profile, "Inspect the repo", str(tmp_path), "CAR-1-plan-1", collect
+        profile, "Inspect the repo", str(project_link), "CAR-1-plan-1", collect
     )
 
     assert json.loads(result.output)["plan_markdown"] == "P"
     assert seen == ["agent_start", "tool_execution_start", "final"]
     assert [event["type"] for event in result.events] == seen
+    assert result.events[-1]["cwd"] == str(project.resolve())
     argv = result.events[-1]["argv"]
     assert argv == [
         "--mode", "json", "--print", "--approve", "--session-id", "CAR-1-plan-1",

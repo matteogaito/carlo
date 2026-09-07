@@ -171,6 +171,7 @@ class PiProvider:
         extensions: tuple[Path, ...] = (),
         environment: dict[str, str] | None = None,
     ) -> ConversationSession:
+        cwd = self._project_boundary(cwd)
         if self.status(session_id) == "running":
             raise ProviderError(f"session is already running: {session_id}")
         self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -225,6 +226,7 @@ class PiProvider:
         session_id: str,
         on_event: AgentEventHandler | None = None,
     ) -> AgentResult:
+        cwd = self._project_boundary(cwd)
         self.session_dir.mkdir(parents=True, exist_ok=True)
         model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
         package_paths, external_skills, resource_revisions = self._resource_snapshot()
@@ -338,6 +340,15 @@ class PiProvider:
             },
             loaded_packages=loaded_packages,
         )
+
+    @staticmethod
+    def _project_boundary(cwd: str) -> str:
+        project = Path(cwd).resolve(strict=True)
+        if not project.is_dir():
+            raise ProviderError("Pi project boundary must be a directory")
+        if (project / ".pi" / "sandbox.json").exists():
+            raise ProviderError("project-local Pi sandbox configuration is forbidden")
+        return str(project)
 
     async def stop(self, session_id: str) -> None:
         process = self._processes.get(session_id)
