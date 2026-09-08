@@ -190,3 +190,35 @@ async def test_superseded_subtask_migration_preserves_existing_tasks() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+
+
+async def test_pi_sandbox_migration_seeds_global_unpinned_package() -> None:
+    migration = load_migration("e7f8a9b0c1d2_enable_pi_sandbox")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(run_migration(migration, "upgrade"))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as session:
+        package = await session.scalar(
+            select(PiPackage).where(PiPackage.identity == "npm:pi-sandbox")
+        )
+        assert package is not None
+        assert package.source == "npm:pi-sandbox"
+        assert package.enabled is True
+        assert package.pinned is False
+        assert package.is_default is True
+
+    async with engine.begin() as connection:
+        await connection.run_sync(run_migration(migration, "downgrade"))
+
+    async with factory() as session:
+        assert await session.scalar(
+            select(PiPackage).where(PiPackage.identity == "npm:pi-sandbox")
+        ) is None
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+    await engine.dispose()

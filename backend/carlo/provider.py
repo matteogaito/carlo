@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -171,10 +172,12 @@ class PiProvider:
         extensions: tuple[Path, ...] = (),
         environment: dict[str, str] | None = None,
     ) -> ConversationSession:
+        cwd = self._project_boundary(cwd)
         if self.status(session_id) == "running":
             raise ProviderError(f"session is already running: {session_id}")
         self.session_dir.mkdir(parents=True, exist_ok=True)
         model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
+        self._require_sandbox_rg(runtime_packages)
         package_paths, external_skills, _ = self._resource_snapshot()
         command = [
             self.executable,
@@ -225,8 +228,10 @@ class PiProvider:
         session_id: str,
         on_event: AgentEventHandler | None = None,
     ) -> AgentResult:
+        cwd = self._project_boundary(cwd)
         self.session_dir.mkdir(parents=True, exist_ok=True)
         model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
+        self._require_sandbox_rg(runtime_packages)
         package_paths, external_skills, resource_revisions = self._resource_snapshot()
         base_command = [
             self.executable,
@@ -339,6 +344,15 @@ class PiProvider:
             loaded_packages=loaded_packages,
         )
 
+    @staticmethod
+    def _project_boundary(cwd: str) -> str:
+        project = Path(cwd).resolve(strict=True)
+        if not project.is_dir():
+            raise ProviderError("Pi project boundary must be a directory")
+        if (project / ".pi" / "sandbox.json").exists():
+            raise ProviderError("project-local Pi sandbox configuration is forbidden")
+        return str(project)
+
     async def stop(self, session_id: str) -> None:
         process = self._processes.get(session_id)
         if process and process.returncode is None:
@@ -367,6 +381,14 @@ class PiProvider:
             **snapshot.environment,
             "PI_CODING_AGENT_DIR": str(snapshot.agent_dir),
         }, snapshot.packages
+
+    @staticmethod
+    def _require_sandbox_rg(packages: tuple[ResolvedPiPackage | str, ...]) -> None:
+        if any(
+            isinstance(package, ResolvedPiPackage) and package.identity == "npm:pi-sandbox"
+            for package in packages
+        ) and shutil.which("rg") is None:
+            raise ProviderError("pi-sandbox requires rg on PATH")
 
     def _write_debug_replay(
         self,
@@ -419,8 +441,9 @@ class PiProvider:
             arguments.extend(("--model", selected_model))
         if profile.effort:
             arguments.extend(("--thinking", profile.effort))
-        if profile.tools:
-            arguments.extend(("--tools", ",".join(profile.tools)))
+        tools = tuple(tool for tool in profile.tools if tool not in {"grep", "find", "ls"})
+        if tools:
+            arguments.extend(("--tools", ",".join(tools)))
         for skill in profile.skills:
             path = Path(skill)
             bundled = self.skill_root / skill

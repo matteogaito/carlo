@@ -48,6 +48,30 @@ def test_pi_runtime_snapshot_is_isolated_atomic_and_secret_free(tmp_path: Path) 
             "keepRecentTokens": 13_107,
         }
     }
+    sandbox = json.loads((snapshot.agent_dir / "sandbox.json").read_text())
+    assert sandbox == {
+        "enabled": True,
+        "sandboxUserShell": True,
+        "permissionPromptTimeoutSeconds": 1,
+        "allowBrowserProcess": False,
+        "network": {
+            "allowedDomains": ["*"],
+            "deniedDomains": [],
+        },
+        "filesystem": {
+            "denyRead": [
+                "/Users",
+                "/home",
+                "/tmp",
+                "/private/tmp",
+                "/Volumes",
+                "/usr/local/var/carlo",
+            ],
+            "allowRead": ["."],
+            "allowWrite": ["."],
+            "denyWrite": [".pi/sandbox.json"],
+        },
+    }
     assert "omlx-local" not in "".join(
         file.read_text() for file in snapshot.agent_dir.iterdir() if file.is_file()
     )
@@ -55,15 +79,35 @@ def test_pi_runtime_snapshot_is_isolated_atomic_and_secret_free(tmp_path: Path) 
     assert snapshot.manifest["context_window"] == 65_536
     assert "api_key" not in snapshot.manifest
 
-    package_root = tmp_path / "new-package"
-    package_root.mkdir()
-    package = provider.ResolvedPiPackage(
-        9, "npm:new", "npm:new", "2.0.0", str(package_root), {"skills": ["new"]}
+    frozen_root = tmp_path / "frozen-package"
+    sandbox_root = tmp_path / "sandbox-package"
+    frozen_root.mkdir()
+    sandbox_root.mkdir()
+    frozen = provider.ResolvedPiPackage(
+        9, "npm:frozen", "npm:frozen", "2.0.0", str(frozen_root), {"skills": ["frozen"]}
     )
-    resumed = runtime.PiRuntimeSnapshotBuilder(tmp_path / "runtime").materialize(
-        "DIMMELA-1-implementation-1", resolved, (package,)
+    current_sandbox = provider.ResolvedPiPackage(
+        10, "npm:pi-sandbox", "npm:pi-sandbox", "1.0.0", str(sandbox_root), {}
     )
-    assert resumed.packages == ()
+    resumed_runtime = runtime.PiRuntimeSnapshotBuilder(tmp_path / "resumed-runtime")
+    resumed_runtime.materialize(
+        "DIMMELA-1-implementation-1", resolved, (frozen,)
+    )
+    resumed = resumed_runtime.materialize(
+        "DIMMELA-1-implementation-1", resolved, (current_sandbox,)
+    )
+    assert resumed.packages == (frozen, current_sandbox)
+
+    updated_sandbox = provider.ResolvedPiPackage(
+        11, "npm:pi-sandbox", "npm:pi-sandbox", "2.0.0", str(sandbox_root), {}
+    )
+    resumed = resumed_runtime.materialize(
+        "DIMMELA-1-implementation-1", resolved, (updated_sandbox,)
+    )
+    assert resumed.packages == (frozen, updated_sandbox)
+    assert resumed_runtime.materialize(
+        "DIMMELA-1-implementation-1", resolved
+    ).packages == (frozen, updated_sandbox)
 
 
 def test_pi_runtime_cleanup_only_removes_its_temporary_files(tmp_path: Path) -> None:
