@@ -186,7 +186,7 @@ async def test_pi_provider_resolves_project_boundary_in_successful_launch(
     assert argv == [
         "--mode", "json", "--print", "--approve", "--session-id", "CAR-1-plan-1",
         "--session-dir", str(sessions), "--model", "openai/gpt-5",
-        "--thinking", "high", "--tools", "read,grep,find,ls",
+        "--thinking", "high", "--tools", "read",
         "--skill", str(skill_root / "carlo-planning"),
         "Inspect the repo",
     ]
@@ -384,6 +384,53 @@ async def test_pi_provider_loads_resolved_package_artifacts(tmp_path: Path) -> N
     assert result.loaded_packages == {"npm:pippo": "1.5.0", "git:tools": "a" * 40}
 
 
+def test_pi_provider_omits_unsandboxed_builtin_filesystem_tools(tmp_path: Path) -> None:
+    provider = PiProvider("pi", tmp_path / "sessions")
+
+    arguments = provider._profile_arguments(
+        AgentProfile("implementation", None, None, ("read", "bash", "grep", "find", "ls"), ())
+    )
+
+    assert arguments == ["--tools", "read,bash"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("launch", ["run", "open_conversation"])
+async def test_pi_provider_requires_rg_for_resolved_sandbox_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch: str
+) -> None:
+    package_root = tmp_path / "pi-sandbox"
+    package_root.mkdir()
+    marker = tmp_path / "started"
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/python3\n"
+        "import pathlib\n"
+        f"pathlib.Path({str(marker)!r}).touch()\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", "")
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+    profile = AgentProfile(
+        "implementation",
+        None,
+        None,
+        (),
+        (),
+        packages=(
+            ResolvedPiPackage(1, "npm:pi-sandbox", "npm:pi-sandbox", "1.0.0", str(package_root), {}),
+        ),
+    )
+
+    with pytest.raises(ProviderError, match="pi-sandbox requires rg on PATH"):
+        if launch == "run":
+            await provider.run(profile, "Implement", str(tmp_path), "CAR-rg")
+        else:
+            await provider.open_conversation(profile, str(tmp_path), "CAR-rg")
+
+    assert not marker.exists()
+
+
 @pytest.mark.asyncio
 async def test_pi_provider_rejects_selected_managed_skill_missing_from_snapshot(
     tmp_path: Path,
@@ -549,7 +596,7 @@ async def test_pi_provider_streams_a_persisted_rpc_conversation(tmp_path: Path) 
     assert state.raw["argv"] == [
         "--mode", "rpc", "--approve", "--session-id", "discovery-42",
         "--session-dir", str(sessions), "--model", "openai/gpt-5.6-sol",
-        "--thinking", "high", "--tools", "read,bash,grep,find,ls",
+        "--thinking", "high", "--tools", "read,bash",
         "--skill", str(skill), "--extension", str(guard),
     ]
     entries, cursor = await session.get_entries()

@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -176,6 +177,7 @@ class PiProvider:
             raise ProviderError(f"session is already running: {session_id}")
         self.session_dir.mkdir(parents=True, exist_ok=True)
         model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
+        self._require_sandbox_rg(runtime_packages)
         package_paths, external_skills, _ = self._resource_snapshot()
         command = [
             self.executable,
@@ -229,6 +231,7 @@ class PiProvider:
         cwd = self._project_boundary(cwd)
         self.session_dir.mkdir(parents=True, exist_ok=True)
         model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
+        self._require_sandbox_rg(runtime_packages)
         package_paths, external_skills, resource_revisions = self._resource_snapshot()
         base_command = [
             self.executable,
@@ -379,6 +382,14 @@ class PiProvider:
             "PI_CODING_AGENT_DIR": str(snapshot.agent_dir),
         }, snapshot.packages
 
+    @staticmethod
+    def _require_sandbox_rg(packages: tuple[ResolvedPiPackage | str, ...]) -> None:
+        if any(
+            isinstance(package, ResolvedPiPackage) and package.identity == "npm:pi-sandbox"
+            for package in packages
+        ) and shutil.which("rg") is None:
+            raise ProviderError("pi-sandbox requires rg on PATH")
+
     def _write_debug_replay(
         self,
         session_id: str,
@@ -430,8 +441,9 @@ class PiProvider:
             arguments.extend(("--model", selected_model))
         if profile.effort:
             arguments.extend(("--thinking", profile.effort))
-        if profile.tools:
-            arguments.extend(("--tools", ",".join(profile.tools)))
+        tools = tuple(tool for tool in profile.tools if tool not in {"grep", "find", "ls"})
+        if tools:
+            arguments.extend(("--tools", ",".join(tools)))
         for skill in profile.skills:
             path = Path(skill)
             bundled = self.skill_root / skill

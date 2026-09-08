@@ -46,7 +46,7 @@ class PiRuntimeSnapshotBuilder:
         manifest_path = agent_dir / "manifest.json"
         if manifest_path.is_file():
             previous = json.loads(manifest_path.read_text())
-            packages = tuple(
+            previous_packages = tuple(
                 ResolvedPiPackage(
                     int(item["id"]),
                     str(item["identity"]),
@@ -57,6 +57,17 @@ class PiRuntimeSnapshotBuilder:
                 )
                 for item in previous.get("packages", [])
             )
+            current_sandbox = tuple(
+                package for package in packages if package.identity == "npm:pi-sandbox"
+            )
+            if current_sandbox:
+                packages = tuple(
+                    package
+                    for package in previous_packages
+                    if package.identity != "npm:pi-sandbox"
+                ) + current_sandbox
+            else:
+                packages = previous_packages
 
         manifest = {
             "model_provider_id": model.model_provider_id,
@@ -134,7 +145,14 @@ class PiRuntimeSnapshotBuilder:
                 "allowBrowserProcess": False,
                 "network": {"allowedDomains": ["*"], "deniedDomains": []},
                 "filesystem": {
-                    "denyRead": ["/Users", "/home", "/usr/local/var/carlo/worktrees"],
+                    "denyRead": [
+                        "/Users",
+                        "/home",
+                        "/tmp",
+                        "/private/tmp",
+                        "/Volumes",
+                        "/usr/local/var/carlo",
+                    ],
                     "allowRead": ["."],
                     "allowWrite": ["."],
                     "denyWrite": [".pi/sandbox.json"],
