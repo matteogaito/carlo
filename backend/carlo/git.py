@@ -11,7 +11,7 @@ class GitError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class Worktree:
+class Checkout:
     branch: str
     path: Path
 
@@ -20,11 +20,9 @@ class GitWorkspace:
     def __init__(
         self,
         repository: Path,
-        worktree_root: Path,
         integration_branch: str,
     ) -> None:
         self.repository = repository.resolve()
-        self.worktree_root = worktree_root.resolve()
         self.integration_branch = integration_branch
 
     async def prepare(
@@ -32,41 +30,56 @@ class GitWorkspace:
         task_id: str,
         title: str,
         *,
-        rework_cycle: int = 0,
         base_ref: str | None = None,
-    ) -> Worktree:
+    ) -> Checkout:
+        if not (self.repository / ".git").is_dir():
+            raise GitError("registered project is not a direct Git checkout")
         await self._git("rev-parse", "--git-dir", cwd=self.repository)
+        self._ensure_local_exclude()
         await self._ensure_integration_branch()
-        suffix = f"-rework-{rework_cycle}" if rework_cycle else ""
-        branch = f"{task_id}-{slug(title)}{suffix}"
-        path = (self.worktree_root / branch).resolve()
-        if path.parent != self.worktree_root:
-            raise GitError("invalid worktree path")
-        if path.exists():
-            current = await self._git("branch", "--show-current", cwd=path)
-            if current != branch:
-                raise GitError(f"worktree path already belongs to {current}")
-            return Worktree(branch, path)
+        branch = parent_branch_name(task_id, title)
+        current = await self._git("branch", "--show-current", cwd=self.repository)
+        if current == branch:
+            await self._require_checkpoint(base_ref)
+            return Checkout(branch, self.repository)
 
-        self.worktree_root.mkdir(parents=True, exist_ok=True)
+        if await self._git("status", "--porcelain", cwd=self.repository):
+            raise GitError("project checkout has uncommitted changes")
         branch_exists = (
             await self._git_status(
                 "show-ref", "--verify", f"refs/heads/{branch}", cwd=self.repository
             )
             == 0
         )
-        args = ("worktree", "add", str(path), branch)
-        if not branch_exists:
-            args = (
-                "worktree",
-                "add",
-                "-b",
+        if branch_exists:
+            await self._git("switch", branch, cwd=self.repository)
+        else:
+            await self._git(
+                "switch",
+                "-c",
                 branch,
-                str(path),
                 base_ref or self.integration_branch,
+                cwd=self.repository,
             )
-        await self._git(*args, cwd=self.repository)
-        return Worktree(branch, path)
+        await self._require_checkpoint(base_ref)
+        return Checkout(branch, self.repository)
+
+    def _ensure_local_exclude(self) -> None:
+        exclude = self.repository / ".git" / "info" / "exclude"
+        lines = exclude.read_text().splitlines() if exclude.exists() else []
+        if ".carlo/" not in lines:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text("\n".join([*lines, ".carlo/"]) + "\n")
+
+    async def _require_checkpoint(self, base_ref: str | None) -> None:
+        if base_ref is None:
+            return
+        if await self._git_status(
+            "merge-base", "--is-ancestor", base_ref, "HEAD", cwd=self.repository
+        ):
+            raise GitError(
+                "parent branch does not contain the previous subtask checkpoint"
+            )
 
     async def _ensure_integration_branch(self) -> None:
         integration_ref = f"refs/heads/{self.integration_branch}"
@@ -84,14 +97,14 @@ class GitWorkspace:
             )
         await self._git("branch", self.integration_branch, cwd=self.repository)
 
-    async def checkpoint(self, worktree: Worktree, message: str) -> str:
-        self._validate(worktree)
-        await self._git("add", "-A", cwd=worktree.path)
+    async def checkpoint(self, checkout: Checkout, message: str) -> str:
+        await self._validate(checkout)
+        await self._git("add", "-A", cwd=checkout.path)
         changed = await self._git_status(
-            "diff", "--cached", "--quiet", cwd=worktree.path
+            "diff", "--cached", "--quiet", cwd=checkout.path
         )
         if changed == 0:
-            return await self._git("rev-parse", "HEAD", cwd=worktree.path)
+            return await self._git("rev-parse", "HEAD", cwd=checkout.path)
         await self._git(
             "-c",
             "user.name=CARLO",
@@ -100,27 +113,31 @@ class GitWorkspace:
             "commit",
             "-m",
             f"checkpoint: {message}",
-            cwd=worktree.path,
+            cwd=checkout.path,
         )
-        return await self._git("rev-parse", "HEAD", cwd=worktree.path)
+        return await self._git("rev-parse", "HEAD", cwd=checkout.path)
 
-    async def diff_hash(self, worktree: Worktree) -> str:
-        self._validate(worktree)
-        await self._git("add", "-A", cwd=worktree.path)
-        diff = await self._git("diff", "--cached", "--binary", cwd=worktree.path)
+    async def diff_hash(self, checkout: Checkout) -> str:
+        await self._validate(checkout)
+        await self._git("add", "-A", cwd=checkout.path)
+        diff = await self._git("diff", "--cached", "--binary", cwd=checkout.path)
         return hashlib.sha256(diff.encode()).hexdigest()
 
-    async def restore(self, worktree: Worktree, checkpoint: str) -> None:
-        self._validate(worktree)
+    async def restore(self, checkout: Checkout, checkpoint: str) -> None:
+        await self._validate(checkout)
         if not re.fullmatch(r"[0-9a-fA-F]{7,64}", checkpoint):
             raise GitError("invalid checkpoint SHA")
-        await self._git("cat-file", "-e", f"{checkpoint}^{{commit}}", cwd=worktree.path)
-        await self._git("reset", "--hard", checkpoint, cwd=worktree.path)
+        await self._git("cat-file", "-e", f"{checkpoint}^{{commit}}", cwd=checkout.path)
+        await self._git("reset", "--hard", checkpoint, cwd=checkout.path)
 
-    def _validate(self, worktree: Worktree) -> None:
-        path = worktree.path.resolve()
-        if path.parent != self.worktree_root or not (path / ".git").is_file():
-            raise GitError("worktree is outside CARLO's managed root")
+    async def _validate(self, checkout: Checkout) -> None:
+        if checkout.path.resolve() != self.repository or not (
+            self.repository / ".git"
+        ).is_dir():
+            raise GitError("checkout is not the registered project")
+        current = await self._git("branch", "--show-current", cwd=self.repository)
+        if current != checkout.branch:
+            raise GitError("registered project is on the wrong branch")
 
     async def _git(
         self, *args: str, cwd: Path
@@ -150,8 +167,9 @@ class GitWorkspace:
         )
 
 
-def slug(value: str) -> str:
+def parent_branch_name(task_id: str, title: str) -> str:
     ascii_value = (
-        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+        unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
     )
-    return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")[:60] or "task"
+    description = re.sub(r"[^a-z0-9]+", "", ascii_value.lower())[:60] or "task"
+    return f"{task_id}_{description}"[:240]
