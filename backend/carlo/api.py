@@ -2020,8 +2020,6 @@ def create_app(
         if (
             task.parent_task_id is None
             or task.approved_plan_revision is None
-            or not task.branch_name
-            or not task.worktree_path
         ):
             raise HTTPException(409, "subtask has no reusable execution state")
         try:
@@ -2037,7 +2035,9 @@ def create_app(
         previous_worktree = task.worktree_path
         previous_checkpoint = task.checkpoint_sha
         fresh_checkout = (
-            Path(task.worktree_path).resolve()
+            not task.worktree_path
+            or not task.branch_name
+            or Path(task.worktree_path).resolve()
             != Path(task.project.repository_path).resolve()
             or task.branch_name != parent_branch_name(parent.id, parent.title)
         )

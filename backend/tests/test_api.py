@@ -848,6 +848,16 @@ async def test_failed_subtask_retry_resets_legacy_checkout_without_planning(
         )
         client.headers["Origin"] = "http://test"
         response = await client.post("/api/tasks/CAR-2/retry")
+        async with factory() as session:
+            failed_again = await session.get(Task, "CAR-2")
+            assert failed_again is not None
+            failed_again.status = TaskStatus.FAILED
+            failed_again.stage = TaskStage.BLOCKED
+            failed_again.branch_name = None
+            failed_again.worktree_path = None
+            failed_again.checkpoint_sha = None
+            await session.commit()
+        second_retry = await client.post("/api/tasks/CAR-2/retry")
 
     assert response.status_code == 200
     retried = response.json()
@@ -857,6 +867,7 @@ async def test_failed_subtask_retry_resets_legacy_checkout_without_planning(
     assert retried["branch_name"] is None
     assert retried["worktree_path"] is None
     assert retried["checkpoint_sha"] is None
+    assert second_retry.status_code == 200
     assert provider.calls == []
     async with factory() as session:
         parent = await session.get(Task, "CAR-1")
