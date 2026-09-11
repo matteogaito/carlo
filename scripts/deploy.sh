@@ -32,16 +32,17 @@ linux_worker_unit="$linux_unit_dir/carlo-worker.service"
 
 stop_services() {
     if [[ "$platform" == Darwin ]]; then
-        /bin/launchctl bootout "gui/$service_uid/com.carlo.service" 2>/dev/null || true
-        if [[ -x "$install_root/scripts/wait-launchd-unloaded.sh" ]]; then
-            "$install_root/scripts/wait-launchd-unloaded.sh" \
-                com.carlo.service "gui/$service_uid"
+        if [[ "${1:-all}" == all ]]; then
+            /bin/launchctl bootout "gui/$service_uid/com.carlo.service" 2>/dev/null || true
         fi
         /bin/launchctl bootout "gui/$service_uid/com.carlo.agent" 2>/dev/null || true
         /bin/launchctl bootout "gui/$service_uid/com.carlo.api" 2>/dev/null || true
         /bin/launchctl bootout "gui/$service_uid/com.carlo.worker" 2>/dev/null || true
     else
-        systemctl --user stop carlo.service carlo-api.service carlo-worker.service 2>/dev/null || true
+        if [[ "${1:-all}" == all ]]; then
+            systemctl --user stop carlo.service 2>/dev/null || true
+        fi
+        systemctl --user stop carlo-api.service carlo-worker.service 2>/dev/null || true
     fi
 }
 
@@ -188,7 +189,7 @@ UNIT
     /bin/chmod 644 "$unit"
 }
 
-stop_services
+stop_services legacy
 if [[ "$platform" == Darwin ]]; then
     /bin/mkdir -p "$mac_plist_dir"
     /bin/rm -f "$mac_agent_plist" "$mac_api_plist" "$mac_worker_plist"
@@ -206,7 +207,8 @@ else
     /bin/rm -f "$linux_api_unit" "$linux_worker_unit"
     write_linux_unit service "$linux_service_unit"
     systemctl --user daemon-reload
-    systemctl --user enable --now carlo.service
+    systemctl --user enable carlo.service
+    systemctl --user restart carlo.service
     echo "CARLO is running in the current systemd user session."
 fi
 

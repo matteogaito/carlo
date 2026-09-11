@@ -95,8 +95,9 @@ def test_launchd_bootstrap_retries_transient_failure(tmp_path: Path) -> None:
         "case \"$1\" in\n"
         "  bootstrap) calls=$(cat \"$CARLO_TEST_STATE\"); "
         "echo $((calls + 1)) > \"$CARLO_TEST_STATE\"; [ \"$calls\" -ge 1 ];;\n"
-        "  print) exit 3;;\n"
-        "  kickstart) exit 0;;\n"
+        "  print) calls=$(cat \"$CARLO_TEST_STATE\"); "
+        "if [ \"$calls\" -eq 0 ]; then exit 3; else exit 0; fi;;\n"
+        "  kickstart) exit 37;;\n"
         "  *) exit 9;;\n"
         "esac\n"
     )
@@ -122,6 +123,41 @@ def test_launchd_bootstrap_retries_transient_failure(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert state.read_text().strip() == "2"
+
+
+def test_launchd_bootstrap_restarts_an_existing_service(tmp_path: Path) -> None:
+    marker = tmp_path / "kickstarted"
+    launchctl = tmp_path / "launchctl"
+    launchctl.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  print) exit 0;;\n"
+        "  bootstrap) exit 9;;\n"
+        "  kickstart) echo restarted > \"$CARLO_TEST_MARKER\";;\n"
+        "esac\n"
+    )
+    launchctl.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(ROOT / "scripts" / "launchd-bootstrap.sh"),
+            "gui/502",
+            str(tmp_path / "service.plist"),
+            "com.carlo.service",
+        ],
+        env={
+            **os.environ,
+            "CARLO_LAUNCHCTL_BIN": str(launchctl),
+            "CARLO_SLEEP_BIN": "/usr/bin/true",
+            "CARLO_TEST_MARKER": str(marker),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text().strip() == "restarted"
 
 
 def test_production_template_and_commands_are_complete() -> None:
