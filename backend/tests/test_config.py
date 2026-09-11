@@ -16,7 +16,7 @@ def test_worker_settings_are_loaded_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("CARLO_ACTION_CANCEL_GRACE_SECONDS", "7")
     monkeypatch.setenv("CARLO_NPM_EXECUTABLE", "/opt/homebrew/bin/npm")
     settings = Settings.from_env()
-    assert settings.worktree_root == "/tmp/carlo-worktrees"
+    assert not hasattr(settings, "worktree_root")
     assert settings.max_attempts == 9
     assert settings.action_cancel_grace_seconds == 7
     assert settings.npm_executable == "/opt/homebrew/bin/npm"

@@ -18,11 +18,12 @@ PostgreSQL owns lifecycle state; Git owns source changes and checkpoints.
 - focused planner questions for Tasks whose goal is not yet sufficiently clear;
 - explicit Plan and Plan Amendment approval;
 - one globally serialized implementation via PostgreSQL advisory lock;
-- dedicated branch/worktree and validation-linked checkpoint commits;
+- one parent-task branch checked out directly in the registered project, with
+  validation-linked checkpoint commits shared by its sequential subtasks;
 - progress-aware retries, repeated-loop detection, GPT-profile escalation;
 - restart recovery from persisted task, attempt, Git, and validation state;
-- failed-task Rework from the original request, with fresh Pi planning and a
-  clean numbered worktree while preserving prior evidence;
+- failed-task Rework from the original request, with fresh Pi planning on the
+  same parent branch while preserving prior evidence;
 - HTTP API, persisted WebSocket event replay, six-column React Kanban, Actions,
   and a streaming desktop/mobile Discovery chat;
 - installable PWA with standalone mode, explicit frontend updates, offline app
@@ -193,52 +194,52 @@ bar. Dynamic `/api` traffic, WebSockets, and Discovery chat are never served
 from the service-worker cache. When a new frontend is available CARLO shows an
 explicit **Update now** banner instead of refreshing during a conversation.
 
-### macOS boot service
+### User deployment
 
-On macOS the complete production setup can instead be installed as two system
-`LaunchDaemon` jobs. They run at boot as user `carlo`, even when nobody has
-logged in. The installer uses an existing `carlo` account with home
-`/Users/carlo`, or creates a hidden service account when it is absent:
+On macOS and Linux the complete production setup runs without root privileges
+in the current user's session. macOS uses one Aqua `LaunchAgent`; Linux uses
+one `systemd --user` service. `carlo-service.sh` supervises the API and worker
+processes together:
 
 ```bash
-sudo make install-mac
-make status-mac
-make logs-mac
+make deploy
+make status
+make logs
 ```
 
 Logging defaults to `LOG_LEVEL=INFO`. For diagnostics, set `LOG_LEVEL=DEBUG` in
-the protected production environment and rerun `sudo make install-mac`. API,
+the protected production environment and rerun `make deploy`. API,
 worker, orchestration, and provider logs then include debug messages. Pi
 launches also log their safe command line and write
 `instruction.md` plus an executable `replay.sh` under
-`/usr/local/var/carlo/artifacts/pi-runtime/<session-id>/`. Replay it as the
-service account:
+`~/.local/var/carlo/artifacts/pi-runtime/<session-id>/`. Replay it as the
+deployment user:
 
 ```bash
-sudo -u carlo -H /usr/local/var/carlo/artifacts/pi-runtime/<session-id>/replay.sh
+~/.local/var/carlo/artifacts/pi-runtime/<session-id>/replay.sh
 ```
 
 The replay never contains the provider secret. For a keyed provider, export
 `CARLO_PI_MODEL_API_KEY` in that shell first. Set `LOG_LEVEL=INFO` again after
 diagnosis; planning prompts are intentionally preserved in its runtime bundle.
 
-On first install, `.env.production` is copied to
-`/Users/carlo/.config/carlo/.env.production` with mode `600`. Later installs
-preserve that file; edit it there and rerun `sudo make install-mac`. The command
-installs dependencies, builds the UI, migrates PostgreSQL, bootstraps the admin,
-and installs/starts the API and worker daemons. With the default local database
-URL it also creates the PostgreSQL login `carlo`, assigns ownership of the
-dedicated `carlov3` database to it, and applies migrations as that account.
-Authenticated `localhost` and `127.0.0.1` URLs receive the same ownership
-repair; the API, worker, and migrations still run as `carlo`, never as root.
-If the encryption key is missing or still a placeholder, `install-mac`
-generates it once in that protected file. Existing real keys are never changed.
+On first deployment, `.env.production` is copied to
+`~/.config/carlo/.env.production` with mode `600`. Later deployments preserve
+that file. `make deploy` installs dependencies, builds the UI, migrates
+PostgreSQL, bootstraps the admin, and starts both services. The PostgreSQL role
+and database must already be accessible to the deployment user. If the
+encryption key is missing or still a placeholder, deployment generates it once
+in that protected file. Existing real keys are never changed.
 
 ```bash
-make uninstall-mac
+make undeploy
 ```
 
-Uninstalling stops and removes only the daemon definitions. Application files,
+On macOS the services start at graphical login. On Linux they start with the
+user's systemd session; unattended boot before login additionally requires
+systemd lingering, configured separately by the machine administrator.
+
+Undeploying stops and removes only the service definitions. Application files,
 configuration, PostgreSQL data, artifacts, and logs are preserved.
 
 ### Telegram
@@ -257,7 +258,7 @@ React PWA ──HTTP/WebSocket──> FastAPI ──SQLAlchemy──> PostgreSQL
                               │                      │
                               └── persisted events ──┘
 
-async worker ──global DB lock──> one task ──> Git worktree
+async worker ──global DB lock──> one task ──> registered project checkout
                                       ├─────> Pi provider + isolated model snapshot
                                       └─────> local validation
 
@@ -267,7 +268,7 @@ async worker ──Discovery queue──> Pi RPC sessions (max 3/project)
 ```
 
 WebSocket delivery is resumable by event sequence. On restart the worker first
-looks for an In Progress task, reconciles its stored worktree/checkpoint/stage,
+looks for an In Progress task, reconciles its stored checkout/checkpoint/stage,
 and resumes it before considering Ready tasks. A task blocked on a Plan Amendment
 freezes the implementation queue until the user approves it.
 

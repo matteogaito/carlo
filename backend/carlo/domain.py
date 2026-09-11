@@ -120,6 +120,10 @@ _TRANSITIONS = {
         TaskStatus.NOT_READY,
         TaskStage.BRIEFING,
     ),
+    (TaskStatus.FAILED, TaskStage.BLOCKED, "retry"): (
+        TaskStatus.READY,
+        TaskStage.QUEUED,
+    ),
     (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING, "replan"): (
         TaskStatus.NOT_READY,
         TaskStage.BRIEFING,

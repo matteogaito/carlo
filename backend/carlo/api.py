@@ -1928,6 +1928,61 @@ def create_app(
             await session.commit()
             raise
 
+    @api.post("/tasks/{task_id}/retry")
+    async def retry_subtask(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        if task is None:
+            raise HTTPException(404, "task not found")
+        if (
+            task.parent_task_id is None
+            or task.approved_plan_revision is None
+            or not task.branch_name
+            or not task.worktree_path
+        ):
+            raise HTTPException(409, "subtask has no reusable execution state")
+        try:
+            task.status, task.stage = transition(task.status, task.stage, "retry")
+        except InvalidTransition as error:
+            raise HTTPException(409, str(error)) from error
+        parent = await session.scalar(
+            select(Task).where(Task.id == task.parent_task_id).with_for_update()
+        )
+        if parent is None:
+            raise HTTPException(409, "subtask parent is missing")
+        previous_attempt = int(
+            await session.scalar(
+                select(func.coalesce(func.max(Attempt.number), 0)).where(
+                    Attempt.task_id == task.id
+                )
+            )
+            or 0
+        )
+        task.active_profile_id = None
+        task.version += 1
+        parent.status, parent.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
+        parent.version += 1
+        session.add(
+            Event(
+                task=task,
+                type="task.retry.started",
+                payload={
+                    "previous_attempt": previous_attempt,
+                    "branch": task.branch_name,
+                    "worktree": task.worktree_path,
+                    "checkpoint": task.checkpoint_sha,
+                },
+            )
+        )
+        session.add(
+            Event(task=parent, type="subtasks.resumed", payload={"child": task.id})
+        )
+        await session.commit()
+        return await _task_view(session, task)
+
     @api.post("/tasks/{task_id}/stop")
     async def stop_task(
         task_id: str, session: AsyncSession = Depends(get_session)

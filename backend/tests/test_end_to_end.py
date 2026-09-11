@@ -120,13 +120,11 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
         )
         assert approved.json()["status"] == "READY"
 
-        pipeline = ImplementationPipeline(
-            factory, provider, tmp_path / "worktrees", tmp_path / "artifacts"
-        )
+        pipeline = ImplementationPipeline(factory, provider, tmp_path / "artifacts")
         assert await Orchestrator(engine, factory, pipeline.run).run_next() == task["id"]
         detail = (await client.get(f'/api/tasks/{task["id"]}')).json()
         assert detail["status"] == "DONE"
-        assert detail["branch_name"] == "CAR-1-feature"
+        assert detail["branch_name"] == "CAR-1_feature"
         assert detail["checkpoint_sha"]
         assert detail["validations"][0]["classification"] == "VERIFIED"
         assert any(event["type"] == "execution.completed" for event in detail["events"])

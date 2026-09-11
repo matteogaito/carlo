@@ -31,7 +31,7 @@ from carlo.orchestrator import (
     TaskStopRequested,
     major_deviation,
 )
-from carlo.provider import AgentProfile, AgentResult
+from carlo.provider import AgentProfile, AgentResult, ContextLimitError
 from carlo.git import GitWorkspace
 from tests.fakes import add_managed_profiles
 
@@ -119,7 +119,131 @@ def test_implementation_instruction_preserves_structured_plan_tasks(
 
 
 @pytest.mark.asyncio
-async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -> None:
+@pytest.mark.parametrize("recovery_succeeds", [True, False])
+async def test_context_limit_rolls_over_to_a_focused_subtask_attempt(
+    tmp_path: Path, recovery_succeeds: bool,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (repository / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-m", "base"], check=True)
+    subprocess.run(["git", "-C", str(repository), "branch", "carlo-Dev"], check=True)
+
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    command = "python3 -c \"from pathlib import Path; assert Path('feature.txt').read_text() == 'done'\""
+    async with factory() as session:
+        profiles = await add_managed_profiles(session, "implementation", "escalation")
+        project = Project(
+            name="CARLO",
+            key="CAR",
+            repository_path=str(repository),
+            integration_branch="carlo-Dev",
+        )
+        task = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="Feature",
+            goal="Finish the focused subtask",
+            status="READY",
+            stage="QUEUED",
+            approved_plan_revision=1,
+        )
+        plan = PlanRevision(
+            task=task,
+            revision=1,
+            brief_markdown="Brief",
+            plan_markdown="FULL PLAN MUST NOT BE RESENT",
+            metadata_json={
+                "implementation_tasks": [{"prompt": "ALL PLAN TASKS"}],
+                "validation_commands": [command],
+            },
+        )
+        session.add_all([project, task, plan])
+        await session.commit()
+
+    class Provider:
+        def __init__(self) -> None:
+            self.instructions: list[str] = []
+            self.sessions: list[str] = []
+
+        async def run(
+            self,
+            profile: AgentProfile,
+            instruction: str,
+            cwd: str,
+            session_id: str,
+            on_event=None,
+        ) -> AgentResult:
+            self.instructions.append(instruction)
+            self.sessions.append(session_id)
+            if len(self.instructions) == 1:
+                Path(cwd, "feature.txt").write_text("partial")
+                raise ContextLimitError("Prompt too long")
+            if not recovery_succeeds:
+                raise ContextLimitError("Still too long")
+            assert Path(cwd, "feature.txt").read_text() == "partial"
+            Path(cwd, "feature.txt").write_text("done")
+            return AgentResult(session_id, "complete", (), 0)
+
+        async def stop(self, session_id: str) -> None:
+            return None
+
+        def status(self, session_id: str) -> str:
+            return "idle"
+
+    provider = Provider()
+    pipeline = ImplementationPipeline(
+        factory, provider, tmp_path / "artifacts", max_attempts=5
+    )
+
+    assert await Orchestrator(engine, factory, pipeline.run).run_next() == "CAR-1"
+
+    assert provider.sessions == ["CAR-1-implementation-1", "CAR-1-implementation-2"]
+    assert "FULL PLAN MUST NOT BE RESENT" in provider.instructions[0]
+    assert "Finish the focused subtask" in provider.instructions[1]
+    assert "FULL PLAN MUST NOT BE RESENT" not in provider.instructions[1]
+    assert "ALL PLAN TASKS" not in provider.instructions[1]
+    async with factory() as session:
+        task = await session.get(Task, "CAR-1")
+        attempts = (await session.scalars(select(Attempt).order_by(Attempt.number))).all()
+        context_events = (
+            await session.scalars(
+                select(Event).where(
+                    Event.task_id == "CAR-1", Event.type == "execution.context_limit"
+                )
+            )
+        ).all()
+        assert task is not None
+        assert task.status.value == ("DONE" if recovery_succeeds else "FAILED")
+        assert [attempt.outcome for attempt in attempts] == (
+            ["context_limit", "verified"]
+            if recovery_succeeds
+            else ["context_limit", "context_limit"]
+        )
+        assert attempts[0].checkpoint_sha
+        assert len(context_events) == (1 if recovery_succeeds else 2)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rework_execution_uses_the_parent_branch_in_project(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()
     subprocess.run(["git", "init", "-b", "main", str(repository)], check=True)
@@ -153,15 +277,26 @@ async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -
             repository_path=str(repository),
             integration_branch="carlo-Dev",
         )
-        task = Task(
+        parent = Task(
             id="CAR-1",
             project=project,
             sequence=1,
-            title="Feature",
+            title="Parent Feature",
+            goal="Complete the parent feature",
+            status="IN_PROGRESS",
+            stage="IMPLEMENTING",
+        )
+        task = Task(
+            id="CAR-2",
+            project=project,
+            sequence=2,
+            title="Child Feature",
             goal="Create feature.txt",
             status="READY",
             stage="QUEUED",
             approved_plan_revision=2,
+            parent=parent,
+            subtask_position=0,
         )
         plan = PlanRevision(
             task=task,
@@ -170,7 +305,7 @@ async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -
             plan_markdown="Plan",
             metadata_json={"skills": [], "validation_commands": ["test -f feature.txt"]},
         )
-        session.add_all([implementation, escalation, project, task, plan])
+        session.add_all([implementation, escalation, project, parent, task, plan])
         await session.flush()
         session.add_all(
             [
@@ -205,23 +340,137 @@ async def test_rework_execution_uses_a_clean_numbered_worktree(tmp_path: Path) -
             return "idle"
 
     pipeline = ImplementationPipeline(
-        factory,
-        Provider(),
-        tmp_path / "worktrees",
-        tmp_path / "artifacts",
-        max_attempts=1,
+        factory, Provider(), tmp_path / "artifacts", max_attempts=1
     )
     await Orchestrator(engine, factory, pipeline.run).run_next()
 
     async with factory() as session:
-        reworked = await session.get(Task, "CAR-1")
+        reworked = await session.get(Task, "CAR-2")
         assert reworked is not None
         assert reworked.status.value == "DONE"
-        assert reworked.branch_name == "CAR-1-feature-rework-1"
+        assert reworked.branch_name == "CAR-1_parentfeature"
+        assert reworked.worktree_path == str(repository.resolve())
         attempts = (
             await session.scalars(select(Attempt).order_by(Attempt.number))
         ).all()
         assert [attempt.number for attempt in attempts] == [1, 2, 3, 4]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_subtask_retry_reuses_worktree_with_focused_instruction(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (repository / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-m", "base"], check=True)
+    subprocess.run(["git", "-C", str(repository), "branch", "carlo-Dev"], check=True)
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    worktree = await workspace.prepare("CAR-2", "Child")
+    Path(worktree.path, "feature.txt").write_text("partial")
+    checkpoint = await workspace.checkpoint(worktree, "partial child")
+
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    command = "python3 -c \"from pathlib import Path; assert Path('feature.txt').read_text() == 'done'\""
+    async with factory() as session:
+        profiles = await add_managed_profiles(session, "implementation", "escalation")
+        implementation = profiles["implementation"]
+        project = Project(
+            name="CARLO",
+            key="CAR",
+            repository_path=str(repository),
+            integration_branch="carlo-Dev",
+        )
+        task = Task(
+            id="CAR-2",
+            project=project,
+            sequence=2,
+            title="Child",
+            goal="Finish only this child",
+            status="READY",
+            stage="QUEUED",
+            approved_plan_revision=1,
+            branch_name=worktree.branch,
+            worktree_path=str(worktree.path),
+            checkpoint_sha=checkpoint,
+        )
+        plan = PlanRevision(
+            task=task,
+            revision=1,
+            brief_markdown="Brief",
+            plan_markdown="FULL PLAN MUST NOT BE RESENT",
+            metadata_json={"validation_commands": [command]},
+        )
+        session.add_all([project, task, plan])
+        await session.flush()
+        session.add_all(
+            [
+                Attempt(
+                    task_id=task.id,
+                    number=3,
+                    profile_id=implementation.id,
+                    instruction="Previous attempt",
+                    outcome="validation_failed",
+                ),
+                Event(
+                    task=task,
+                    type="task.retry.started",
+                    payload={"previous_attempt": 3, "checkpoint": checkpoint},
+                ),
+            ]
+        )
+        await session.commit()
+
+    class Provider:
+        def __init__(self) -> None:
+            self.instruction = ""
+            self.cwd = ""
+            self.session_id = ""
+
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            self.instruction = instruction
+            self.cwd = cwd
+            self.session_id = session_id
+            assert Path(cwd, "feature.txt").read_text() == "partial"
+            Path(cwd, "feature.txt").write_text("done")
+            return AgentResult(session_id, "done", (), 0)
+
+        async def stop(self, session_id: str) -> None:
+            return None
+
+        def status(self, session_id: str) -> str:
+            return "idle"
+
+    provider = Provider()
+    pipeline = ImplementationPipeline(
+        factory, provider, tmp_path / "artifacts", max_attempts=1
+    )
+
+    assert await Orchestrator(engine, factory, pipeline.run).run_next() == "CAR-2"
+    assert provider.cwd == str(worktree.path)
+    assert provider.session_id == "CAR-2-implementation-4"
+    assert "Finish only this child" in provider.instruction
+    assert "FULL PLAN MUST NOT BE RESENT" not in provider.instruction
+    async with factory() as session:
+        retried = await session.get(Task, "CAR-2")
+        assert retried is not None and retried.status.value == "DONE"
     await engine.dispose()
 
 
@@ -329,18 +578,14 @@ async def test_stall_escalates_then_local_validation_completes(
 
     provider = Provider()
     pipeline = ImplementationPipeline(
-        factory,
-        provider,
-        tmp_path / "worktrees",
-        tmp_path / "artifacts",
-        max_attempts=5,
+        factory, provider, tmp_path / "artifacts", max_attempts=5
     )
     assert await Orchestrator(engine, factory, pipeline.run).run_next() == "CAR-1"
 
     async with factory() as session:
         task = await session.get(Task, "CAR-1")
         assert task.status.value == "DONE"
-        assert task.branch_name == "CAR-1-feature"
+        assert task.branch_name == "CAR-1_feature"
         assert task.checkpoint_sha
         assert await session.scalar(select(func.count(Attempt.id))) == 3
         assert await session.scalar(select(func.count(Escalation.id))) == 1
@@ -376,9 +621,9 @@ async def test_recovery_resumes_validation_without_rerunning_provider(
     subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
     subprocess.run(["git", "-C", str(repository), "commit", "-m", "base"], check=True)
     subprocess.run(["git", "-C", str(repository), "branch", "carlo-Dev"], check=True)
-    worktree = await GitWorkspace(
-        repository, tmp_path / "worktrees", "carlo-Dev"
-    ).prepare("CAR-1", "Recover")
+    worktree = await GitWorkspace(repository, "carlo-Dev").prepare(
+        "CAR-1", "Recover"
+    )
     (worktree.path / "feature.txt").write_text("ok")
 
     engine = create_async_engine("postgresql+psycopg:///carlo_test")
@@ -445,9 +690,7 @@ async def test_recovery_resumes_validation_without_rerunning_provider(
         def status(self, session_id: str) -> str:
             return "idle"
 
-    pipeline = ImplementationPipeline(
-        factory, Provider(), tmp_path / "worktrees", tmp_path / "artifacts"
-    )
+    pipeline = ImplementationPipeline(factory, Provider(), tmp_path / "artifacts")
     assert await pipeline.run("CAR-1") == "validated"
     async with factory() as session:
         task = await session.get(Task, "CAR-1")
@@ -473,10 +716,7 @@ async def test_stop_kills_running_provider_step() -> None:
         pass
 
     pipeline = ImplementationPipeline(
-        factory,
-        _NullProvider(),
-        Path("/tmp/carlo-test-wt"),
-        Path("/tmp/carlo-test-art"),
+        factory, _NullProvider(), Path("/tmp/carlo-test-art")
     )
 
     async with factory() as session:

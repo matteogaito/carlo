@@ -336,6 +336,7 @@ export interface Api {
   startPlanning(id: string): Promise<Task>
   replanTask(id: string): Promise<Task>
   reworkTask(id: string): Promise<Task>
+  retrySubtask(id: string): Promise<Task>
   stopTask(id: string): Promise<Task>
   holdTask(id: string): Promise<Task>
   resumeTask(id: string): Promise<Task>
@@ -425,6 +426,7 @@ export const httpApi: Api = {
   startPlanning: (id) => request(`/api/tasks/${id}/plan`, { method: 'POST' }),
   replanTask: (id) => request(`/api/tasks/${id}/replan`, { method: 'POST' }),
   reworkTask: (id) => request(`/api/tasks/${id}/rework`, { method: 'POST' }),
+  retrySubtask: (id) => request(`/api/tasks/${id}/retry`, { method: 'POST' }),
   stopTask: (id) => request(`/api/tasks/${id}/stop`, { method: 'POST' }),
   holdTask: (id) => request(`/api/tasks/${id}/hold`, { method: 'POST' }),
   resumeTask: (id) => request(`/api/tasks/${id}/resume`, { method: 'POST' }),

@@ -35,7 +35,7 @@ class GitWorkspace:
         if not (self.repository / ".git").is_dir():
             raise GitError("registered project is not a direct Git checkout")
         await self._git("rev-parse", "--git-dir", cwd=self.repository)
-        self._ensure_local_exclude()
+        ensure_local_exclude(self.repository)
         await self._ensure_integration_branch()
         branch = parent_branch_name(task_id, title)
         current = await self._git("branch", "--show-current", cwd=self.repository)
@@ -63,13 +63,6 @@ class GitWorkspace:
             )
         await self._require_checkpoint(base_ref)
         return Checkout(branch, self.repository)
-
-    def _ensure_local_exclude(self) -> None:
-        exclude = self.repository / ".git" / "info" / "exclude"
-        lines = exclude.read_text().splitlines() if exclude.exists() else []
-        if ".carlo/" not in lines:
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            exclude.write_text("\n".join([*lines, ".carlo/"]) + "\n")
 
     async def _require_checkpoint(self, base_ref: str | None) -> None:
         if base_ref is None:
@@ -173,3 +166,18 @@ def parent_branch_name(task_id: str, title: str) -> str:
     )
     description = re.sub(r"[^a-z0-9]+", "", ascii_value.lower())[:60] or "task"
     return f"{task_id}_{description}"[:240]
+
+
+def ensure_local_exclude(repository: Path) -> None:
+    exclude = repository / ".git" / "info" / "exclude"
+    lines = exclude.read_text().splitlines() if exclude.exists() else []
+    if ".carlo/" not in lines:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("\n".join([*lines, ".carlo/"]) + "\n")
+
+
+def slug(value: str) -> str:
+    ascii_value = (
+        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    )
+    return re.sub(r"[^a-z0-9]+", "-", ascii_value.lower()).strip("-")[:60] or "task"

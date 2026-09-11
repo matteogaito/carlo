@@ -153,7 +153,10 @@ class PiRuntimeSnapshotBuilder:
                         "/Volumes",
                         "/usr/local/var/carlo",
                     ],
-                    "allowRead": ["."],
+                    "allowRead": [
+                        ".",
+                        *(str(Path(package.artifact_path).resolve()) for package in packages),
+                    ],
                     "allowWrite": ["."],
                     "denyWrite": [".pi/sandbox.json"],
                 },

@@ -36,7 +36,7 @@ async def create_task(
     project.next_task_sequence += 1
     task_id = f"{project.key}-{sequence}"
     repository = Path(project.repository_path).resolve()
-    prompt_directory = repository / "prompts"
+    prompt_directory = repository / ".carlo" / "prompts"
     try:
         prompt_directory.mkdir(parents=True, exist_ok=True)
         if not prompt_directory.resolve().is_relative_to(repository):

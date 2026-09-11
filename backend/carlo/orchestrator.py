@@ -20,7 +20,7 @@ from .domain import (
     fingerprint,
     transition,
 )
-from .git import GitError, GitWorkspace, Worktree
+from .git import Checkout, GitError, GitWorkspace, parent_branch_name
 from .models import (
     AgentProfile as AgentProfileRecord,
     Attempt,
@@ -315,14 +315,12 @@ class ImplementationPipeline:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         provider: CodingAgentProvider,
-        worktree_root: Path,
         artifact_root: Path,
         max_attempts: int = 20,
         credential_cipher: CredentialCipher | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.provider = provider
-        self.worktree_root = worktree_root
         self.artifact_root = artifact_root
         self.max_attempts = max_attempts
         self.credential_cipher = credential_cipher
@@ -345,12 +343,18 @@ class ImplementationPipeline:
         await self._record_model_runtime(
             task_id, model_runtime_evidence(implementation_profile)
         )
-        workspace = GitWorkspace(
-            Path(task.project.repository_path),
-            self.worktree_root,
-            task.project.integration_branch,
+        repository = Path(task.project.repository_path).resolve()
+        workspace = GitWorkspace(repository, task.project.integration_branch)
+        branch_owner_id, branch_owner_title = task.id, task.title
+        if task.parent_task_id is not None:
+            async with self.session_factory() as session:
+                parent = await session.get(Task, task.parent_task_id)
+                if parent is None:
+                    raise GitError("parent task is missing")
+                branch_owner_id, branch_owner_title = parent.id, parent.title
+        _, previous_cycle_attempt, focused_retry = (
+            await self._rework_context(task_id)
         )
-        rework_cycle, previous_cycle_attempt = await self._rework_context(task_id)
         base_ref = None
         if task.parent_task_id is not None and task.subtask_position:
             async with self.session_factory() as session:
@@ -364,12 +368,15 @@ class ImplementationPipeline:
                 if predecessor is None or predecessor.checkpoint_sha is None:
                     raise GitError("previous subtask has no validated checkpoint")
                 base_ref = predecessor.checkpoint_sha
-        if task.worktree_path and task.branch_name:
-            worktree = Worktree(task.branch_name, Path(task.worktree_path))
-        else:
-            worktree = await workspace.prepare(
-                task.id, task.title, rework_cycle=rework_cycle, base_ref=base_ref
-            )
+        expected_branch = parent_branch_name(branch_owner_id, branch_owner_title)
+        if task.worktree_path and Path(task.worktree_path).resolve() != repository:
+            raise GitError("saved checkout is outside the registered project")
+        if task.branch_name and task.branch_name != expected_branch:
+            raise GitError("saved checkout does not use the parent task branch")
+        worktree = await workspace.prepare(
+            branch_owner_id, branch_owner_title, base_ref=base_ref
+        )
+        if task.worktree_path != str(worktree.path) or task.branch_name != worktree.branch:
             async with self.session_factory() as session:
                 current = await session.get(Task, task_id)
                 if current is None:
@@ -380,7 +387,7 @@ class ImplementationPipeline:
                 session.add(
                     Event(
                         task=current,
-                        type="git.worktree_prepared",
+                        type="git.checkout_prepared",
                         payload={"branch": worktree.branch, "path": str(worktree.path)},
                     )
                 )
@@ -423,18 +430,39 @@ class ImplementationPipeline:
         start = await self._next_attempt_number(task_id)
         attempts_used = max(0, start - 1 - previous_cycle_attempt)
         attempts_left = max(0, self.max_attempts - attempts_used)
+        recovery_checkpoint: str | None = None
         for number in range(start, start + attempts_left):
-            instruction = self._implementation_instruction(task, plan, strategy)
+            instruction = (
+                self._context_recovery_instruction(task, recovery_checkpoint)
+                if recovery_checkpoint
+                else self._focused_retry_instruction(task)
+                if focused_retry
+                else self._implementation_instruction(task, plan, strategy)
+            )
             attempt_id = await self._start_attempt(
                 task_id, implementation.id, number, instruction
             )
-            result = await self.provider.run(
-                implementation_profile,
-                instruction,
-                str(worktree.path),
-                f"{task_id}-implementation-{number}",
-                on_event=self._pi_step_handler(task_id),
-            )
+            try:
+                result = await self.provider.run(
+                    implementation_profile,
+                    instruction,
+                    str(worktree.path),
+                    f"{task_id}-implementation-{number}",
+                    on_event=self._pi_step_handler(task_id),
+                )
+            except ContextLimitError as error:
+                was_recovery = recovery_checkpoint is not None
+                recovery_checkpoint = await workspace.checkpoint(
+                    worktree, f"attempt {number} reached context limit"
+                )
+                await self._record_context_limit(
+                    task_id, attempt_id, number, recovery_checkpoint, error
+                )
+                if was_recovery:
+                    return "failed"
+                continue
+            recovery_checkpoint = None
+            focused_retry = False
             await self._record_provider_result(task_id, attempt_id, number, result)
             deviation = major_deviation(result.output)
             if deviation:
@@ -545,20 +573,24 @@ class ImplementationPipeline:
             )
             return int(maximum or 0) + 1
 
-    async def _rework_context(self, task_id: str) -> tuple[int, int]:
+    async def _rework_context(self, task_id: str) -> tuple[int, int, bool]:
         async with self.session_factory() as session:
             event = await session.scalar(
                 select(Event)
                 .where(
                     Event.task_id == task_id,
-                    Event.type == "task.rework.started",
+                    Event.type.in_(("task.rework.started", "task.retry.started")),
                 )
                 .order_by(Event.sequence.desc())
                 .limit(1)
             )
             if event is None:
-                return 0, 0
-            return int(event.payload["cycle"]), int(event.payload["previous_attempt"])
+                return 0, 0, False
+            return (
+                int(event.payload.get("cycle", 0)),
+                int(event.payload["previous_attempt"]),
+                event.type == "task.retry.started",
+            )
 
     async def _start_attempt(
         self, task_id: str, profile_id: int, number: int, instruction: str
@@ -625,7 +657,7 @@ class ImplementationPipeline:
         self,
         task: Task,
         plan: PlanRevision,
-        worktree: Worktree,
+        worktree: Checkout,
         attempt_id: int,
         attempt_number: int,
     ) -> ValidationBatch:
@@ -713,6 +745,36 @@ class ImplementationPipeline:
             }
             if checkpoint:
                 task.checkpoint_sha = checkpoint
+            await session.commit()
+
+    async def _record_context_limit(
+        self,
+        task_id: str,
+        attempt_id: int,
+        attempt_number: int,
+        checkpoint: str,
+        error: ContextLimitError,
+    ) -> None:
+        async with self.session_factory() as session:
+            task = await session.get(Task, task_id)
+            attempt = await session.get(Attempt, attempt_id)
+            if task is None or attempt is None:
+                raise RuntimeError("task or attempt disappeared")
+            attempt.outcome = "context_limit"
+            attempt.checkpoint_sha = checkpoint
+            task.checkpoint_sha = checkpoint
+            session.add(
+                Event(
+                    task=task,
+                    type="execution.context_limit",
+                    payload={
+                        "attempt": attempt_number,
+                        "checkpoint": checkpoint,
+                        "error": str(error)[:500],
+                        "recovery": "new_session",
+                    },
+                )
+            )
             await session.commit()
 
     async def _record_provider_result(
@@ -829,7 +891,7 @@ class ImplementationPipeline:
         task: Task,
         plan: PlanRevision,
         profile: AgentProfile,
-        worktree: Worktree,
+        worktree: Checkout,
         reason: str,
         history: list[AttemptSignal],
         batch: ValidationBatch,
@@ -886,6 +948,26 @@ class ImplementationPipeline:
             f"Implementation tasks:\n{json.dumps(implementation_tasks)}\n\n"
             f"Current strategy: {strategy}\n"
             "Work only inside this worktree. Run no undeclared deployment commands."
+        )
+
+    @staticmethod
+    def _context_recovery_instruction(task: Task, checkpoint: str) -> str:
+        return (
+            f"Continue only subtask {task.id}: {task.goal}\n\n"
+            "The previous session reached its context limit. Its work is saved in "
+            f"the current worktree at checkpoint {checkpoint}. Inspect the existing "
+            "files and recent Git history, then finish this subtask from that state. "
+            "Do not restart the broader plan. Run the repository's relevant tests."
+        )
+
+    @staticmethod
+    def _focused_retry_instruction(task: Task) -> str:
+        checkpoint = f" at checkpoint {task.checkpoint_sha}" if task.checkpoint_sha else ""
+        return (
+            f"Retry only subtask {task.id}: {task.goal}\n\n"
+            f"Continue from the existing worktree{checkpoint}. Inspect the current "
+            "files and recent Git history, fix the failed implementation, and run the "
+            "repository's relevant tests. Do not restart or request the broader plan."
         )
 
 

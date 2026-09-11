@@ -77,21 +77,12 @@ action execution. Project actions that need an isolated directory use
 CARLO adds `.carlo/` to the repository's local `.git/info/exclude`; it does not
 modify the project's committed `.gitignore`.
 
-## Existing task migration
+## Existing task state
 
-PHOTODIGGER-12 must retain its completed implementation. Migration will:
-
-1. verify the main PhotoDigger checkout has no unrelated local changes;
-2. exclude generated `.carlo` state locally;
-3. checkpoint the relevant source and test changes on the existing task branch
-   without committing generated build caches;
-4. unregister the old worktree only after the checkpoint exists;
-5. check out the shared parent branch in the registered project directory;
-6. update the task family's persisted execution path and branch; and
-7. resume PHOTODIGGER-12 through Retry without rerunning planning.
-
-If any safety check fails, migration stops with both the old worktree and its
-branch intact.
+This change modifies Carlo only. Deployment does not mutate registered project
+repositories or rewrite persisted execution state. A task that still points to
+a legacy external worktree blocks safely until that project is reconciled in a
+separate, explicitly authorized operation.
 
 ## Failure handling
 
@@ -108,6 +99,6 @@ branch intact.
 Tests cover deterministic parent branch naming, all subtasks sharing one
 branch, sequential checkpoint ancestry, standalone tasks, dirty-checkout
 refusal, Retry reuse, project-local sandbox access to `.git`, project-local
-action directories, legacy task migration safety, and the absence of new
+action directories, Carlo-owned prompt storage, and the absence of new
 implementation worktrees. The full backend, frontend, extension, migration,
 and production build checks must remain green.

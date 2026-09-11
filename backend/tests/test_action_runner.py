@@ -45,7 +45,8 @@ def make_repository(tmp_path: Path) -> Path:
     git(repository, "config", "user.name", "Test")
     git(repository, "config", "user.email", "test@example.invalid")
     (repository / "ok.py").write_text(
-        "import os, sys\nprint('out:' + os.environ['TOKEN'])\nprint('err-line', file=sys.stderr)\n"
+        "import os, sys\nprint('out:' + os.environ['TOKEN'])\n"
+        "print('cwd:' + os.getcwd())\nprint('err-line', file=sys.stderr)\n"
     )
     (repository / "fail.py").write_text("raise SystemExit(7)\n")
     (repository / "wait.py").write_text(
@@ -108,7 +109,7 @@ async def test_local_action_runs_at_commit_redacts_output_and_stops_on_failure(
     artifacts = tmp_path / "artifacts"
     commands = [f"{sys.executable} ok.py", f"{sys.executable} fail.py", f"{sys.executable} ok.py"]
     run_id = await add_run(factory, repository, artifacts, commands)
-    executor = ActionExecutor(factory, tmp_path / "worktrees", artifacts)
+    executor = ActionExecutor(factory, artifacts)
 
     assert await ActionOrchestrator(engine, factory, executor.run).run_next() == run_id
 
@@ -126,7 +127,9 @@ async def test_local_action_runs_at_commit_redacts_output_and_stops_on_failure(
     assert "out:***" in console
     assert "err-line" in console
     assert "super-secret" not in console
-    assert not (tmp_path / "worktrees" / "actions" / str(run_id)).exists()
+    workspace = repository / ".carlo" / "actions" / str(run_id)
+    assert f"cwd:{workspace}" in console
+    assert not workspace.exists()
     await engine.dispose()
 
 
@@ -181,7 +184,7 @@ async def test_running_action_can_be_cancelled_idempotently(tmp_path: Path) -> N
     repository = make_repository(tmp_path)
     artifacts = tmp_path / "artifacts"
     run_id = await add_run(factory, repository, artifacts, [f"{sys.executable} wait.py", f"{sys.executable} ok.py"])
-    executor = ActionExecutor(factory, tmp_path / "worktrees", artifacts, cancel_grace_seconds=0.05)
+    executor = ActionExecutor(factory, artifacts, cancel_grace_seconds=0.05)
     running = asyncio.create_task(ActionOrchestrator(engine, factory, executor.run).run_next())
 
     for _ in range(100):
@@ -219,7 +222,7 @@ async def test_executor_restart_reattaches_without_rerunning_command(tmp_path: P
         run.started_at = datetime.now(UTC)
         await session.commit()
 
-    first = ActionExecutor(factory, tmp_path / "worktrees", artifacts)
+    first = ActionExecutor(factory, artifacts)
     interrupted = asyncio.create_task(first.run(run_id))
     for _ in range(100):
         async with factory() as session:
@@ -233,7 +236,7 @@ async def test_executor_restart_reattaches_without_rerunning_command(tmp_path: P
     with pytest.raises(asyncio.CancelledError):
         await interrupted
 
-    restarted = ActionExecutor(factory, tmp_path / "worktrees", artifacts)
+    restarted = ActionExecutor(factory, artifacts)
     await restarted.run(run_id)
     async with factory() as session:
         run = await session.get(ActionRun, run_id)
@@ -301,7 +304,7 @@ async def test_ssh_action_fetches_exact_commit_and_collects_redacted_output(
         }
         await session.commit()
     remote = FakeRemote()
-    executor = ActionExecutor(factory, tmp_path / "worktrees", artifacts, ssh_transport=remote)
+    executor = ActionExecutor(factory, artifacts, ssh_transport=remote)
 
     assert await ActionOrchestrator(engine, factory, executor.run).run_next() == run_id
 

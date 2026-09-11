@@ -249,6 +249,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             startPlanning={() => void act(() => api.startPlanning(selected.id))}
             replan={() => void act(() => api.replanTask(selected.id))}
             rework={() => void act(() => api.reworkTask(selected.id))}
+            retry={() => void act(() => api.retrySubtask(selected.id))}
             stop={() => void act(() => api.stopTask(selected.id))}
             hold={() => void act(() => api.holdTask(selected.id))}
             resume={() => void act(() => api.resumeTask(selected.id))}
@@ -423,12 +424,13 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, replan, rework, stop, hold, resume, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
+function TaskDetail({ task, close, startPlanning, replan, rework, retry, stop, hold, resume, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
   replan: () => void
   rework: () => void
+  retry: () => void
   stop: () => void
   hold: () => void
   resume: () => void
@@ -500,7 +502,9 @@ function TaskDetail({ task, close, startPlanning, replan, rework, stop, hold, re
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && <button className="danger" onClick={stop}>Stop → Ready</button>}
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && !task.parent_task_id && <button onClick={hold}>Put in Not Ready</button>}
           {task.status === 'READY' && Boolean(task.subtask_count) && <button onClick={resume}>Resume execution</button>}
-          {task.status === 'FAILED' && <button onClick={rework}>Rework from original request</button>}
+          {task.status === 'FAILED' && task.parent_task_id && task.approved_plan_revision && task.branch_name && task.worktree_path
+            ? <button onClick={retry}>Retry subtask</button>
+            : task.status === 'FAILED' && <button onClick={rework}>Rework from original request</button>}
         </nav>
         {!['IN_PROGRESS', 'TEST', 'DONE'].includes(task.status) && <label className="task-model-select">Task model<select value={task.available_model_id || ''} onChange={(event) => setModel(Number(event.target.value) || null)}>
           <option value="">Use agent profile</option>

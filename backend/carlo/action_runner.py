@@ -13,6 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .actions import minimal_environment, parse_dotenv, redact
+from .git import ensure_local_exclude
 from .models import ActionRun, ActionStep, Event, Project, Runner
 from .ssh import SshError, SshTransport
 
@@ -137,13 +138,11 @@ class ActionExecutor:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        worktree_root: Path,
         artifact_root: Path,
         cancel_grace_seconds: float = 10,
         ssh_transport: SshTransport | None = None,
     ) -> None:
         self.session_factory = session_factory
-        self.worktree_root = worktree_root.resolve()
         self.artifact_root = artifact_root.resolve()
         self.cancel_grace_seconds = cancel_grace_seconds
         self.ssh_transport = ssh_transport
@@ -155,15 +154,18 @@ class ActionExecutor:
         if run.runner_name != "local":
             await self._run_remote(run, project)
             return
-        workspace = (self.worktree_root / "actions" / str(run.id)).resolve()
-        if not workspace.is_relative_to(self.worktree_root / "actions"):
+        repository = Path(project.repository_path).resolve()
+        workspace_root = repository / ".carlo" / "actions"
+        workspace = (workspace_root / str(run.id)).resolve()
+        if not workspace.is_relative_to(workspace_root):
             raise RuntimeError("invalid action worktree path")
         if not workspace.exists():
+            ensure_local_exclude(repository)
             await self._set_workspace(run.id, workspace)
             await _exec_checked(
                 "git",
                 "-C",
-                project.repository_path,
+                str(repository),
                 "worktree",
                 "add",
                 "--detach",
@@ -193,7 +195,7 @@ class ActionExecutor:
                 final_status = "failed"
                 final_exit = exit_code
         await self._finish(run.id, final_status, final_exit)
-        await self._cleanup(run.id, Path(project.repository_path), workspace)
+        await self._cleanup(run.id, repository, workspace)
 
     async def _context(self, run_id: int) -> tuple[ActionRun, Project]:
         async with self.session_factory() as session:

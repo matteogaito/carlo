@@ -31,6 +31,7 @@ async def test_shared_task_creation_allocates_identity_and_prompt(tmp_path: Path
         assert [first.id, second.id] == [f"{key}-1", f"{key}-2"]
         assert first.status.value == "NOT_READY"
         assert first.stage.value == "created"
+        assert Path(first.prompt_path).parts[:2] == (".carlo", "prompts")
         assert (repository / first.prompt_path).read_text() == "First prompt"
         assert (repository / second.prompt_path).read_text() == "Second prompt"
         events = (

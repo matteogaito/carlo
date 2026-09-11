@@ -77,6 +77,7 @@ const api: Api = {
   startPlanning: async () => task,
   replanTask: async () => task,
   reworkTask: async () => task,
+  retrySubtask: async () => task,
   stopTask: async () => task,
   holdTask: async () => task,
   resumeTask: async () => task,
@@ -448,6 +449,35 @@ describe('CARLO board', () => {
     expect(rework.compareDocumentPosition(goal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     await userEvent.click(rework)
     expect(reworkTask).toHaveBeenCalledWith('CAR-1')
+  })
+
+  it('retries a failed subtask without planning', async () => {
+    const failed = {
+      ...task,
+      id: 'CAR-2',
+      status: 'FAILED' as const,
+      stage: 'blocked',
+      parent_task_id: 'CAR-1',
+      approved_plan_revision: 1,
+      branch_name: 'CAR-2-login',
+      worktree_path: '/tmp/CAR-2-login',
+    }
+    const retrySubtask = vi.fn(async () => ({
+      ...failed,
+      status: 'READY' as const,
+      stage: 'queued',
+    }))
+    render(<App api={{
+      ...api,
+      listTasks: async () => [failed],
+      getTask: async () => failed,
+      retrySubtask,
+    } as Api} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-2.*Login flow/i }))
+    await userEvent.click(screen.getByRole('button', { name: 'Retry subtask' }))
+    expect(retrySubtask).toHaveBeenCalledWith('CAR-2')
+    expect(screen.queryByRole('button', { name: 'Rework from original request' })).toBeNull()
   })
 
   it('groups repository actions, confirms a run and opens its console history', async () => {

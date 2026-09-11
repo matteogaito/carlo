@@ -65,7 +65,6 @@ async def run() -> None:
     pipeline = ImplementationPipeline(
         factory,
         provider,
-        Path(settings.worktree_root),
         Path(settings.artifact_root),
         settings.max_attempts,
         cipher,
@@ -73,7 +72,6 @@ async def run() -> None:
     orchestrator = Orchestrator(engine, factory, pipeline.run)
     action_executor = ActionExecutor(
         factory,
-        Path(settings.worktree_root),
         Path(settings.artifact_root),
         settings.action_cancel_grace_seconds,
         SshTransport(

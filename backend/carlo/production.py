@@ -8,7 +8,6 @@ def validate_production_settings(settings: Settings) -> None:
     fields = {
         "CARLO_APP_ORIGIN": settings.app_origin,
         "CARLO_ARTIFACT_ROOT": settings.artifact_root,
-        "CARLO_WORKTREE_ROOT": settings.worktree_root,
         "CARLO_FRONTEND_DIST": settings.frontend_dist,
     }
     for name, value in fields.items():
@@ -18,7 +17,7 @@ def validate_production_settings(settings: Settings) -> None:
     origin = urlparse(settings.app_origin)
     if origin.scheme not in {"http", "https"} or not origin.netloc:
         raise ValueError("CARLO_APP_ORIGIN must be an absolute HTTP(S) origin")
-    for name in ("artifact_root", "worktree_root", "frontend_dist"):
+    for name in ("artifact_root", "frontend_dist"):
         if not Path(getattr(settings, name)).is_absolute():
             raise ValueError(f"CARLO_{name.upper()} must be an absolute path")
     if not (Path(settings.frontend_dist) / "index.html").is_file():
