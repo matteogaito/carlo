@@ -174,6 +174,7 @@ def test_production_template_and_commands_are_complete() -> None:
         "CARLO_TELEGRAM_CHAT_ID",
         "CARLO_TELEGRAM_LEVEL",
         "CARLO_CREDENTIAL_ENCRYPTION_KEY",
+        "CARLO_DIAGNOSTICS_TOKEN",
     }
     configured = {
         line.split("=", 1)[0]
@@ -223,7 +224,9 @@ def test_deploy_is_cross_platform_and_unprivileged() -> None:
     assert "~/.local" not in runner
     assert 'CARLO_STATE_ROOT' in runner
     assert "ensure_encryption_key" in deploy
-    assert "openssl rand -base64 32" in deploy
+    assert "ensure_secret CARLO_CREDENTIAL_ENCRYPTION_KEY -base64" in deploy
+    assert "ensure_diagnostics_token" in deploy
+    assert "ensure_secret CARLO_DIAGNOSTICS_TOKEN -hex" in deploy
 
 
 def test_carlo_service_stops_sibling_when_one_process_exits(tmp_path: Path) -> None:
@@ -372,11 +375,21 @@ def test_production_validation_rejects_placeholders_and_missing_build(
                 frontend_dist=str(dist),
             )
         )
+    with pytest.raises(ValueError, match="CARLO_DIAGNOSTICS_TOKEN"):
+        validate_production_settings(
+            Settings(
+                app_origin="http://100.64.0.10:8000",
+                artifact_root=str(tmp_path / "artifacts"),
+                frontend_dist=str(dist),
+                credential_encryption_key=base64.b64encode(b"k" * 32).decode(),
+            )
+        )
     validate_production_settings(
         Settings(
             app_origin="http://100.64.0.10:8000",
             artifact_root=str(tmp_path / "artifacts"),
             frontend_dist=str(dist),
             credential_encryption_key=base64.b64encode(b"k" * 32).decode(),
+            diagnostics_token="diagnostic-secret",
         )
     )

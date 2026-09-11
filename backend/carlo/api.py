@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import os
 import re
@@ -413,6 +414,19 @@ def create_app(
             raise HTTPException(403, "invalid request origin")
         return user
 
+    async def require_diagnostics_token(request: Request) -> None:
+        if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
+            raise HTTPException(403, "diagnostics are only available on localhost")
+        authorization = request.headers.get("authorization", "")
+        expected = settings.diagnostics_token
+        if (
+            not expected
+            or "CHANGE_ME" in expected
+            or not authorization.startswith("Bearer ")
+            or not hmac.compare_digest(authorization[7:], expected)
+        ):
+            raise HTTPException(401, "invalid diagnostics token")
+
     @app.post("/api/auth/login")
     async def login_user(
         payload: LoginPayload, request: Request, response: Response
@@ -458,6 +472,71 @@ def create_app(
         return response
 
     api = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
+    diagnostics = APIRouter(
+        prefix="/api/diagnostics", dependencies=[Depends(require_diagnostics_token)]
+    )
+
+    @diagnostics.get("/tasks/{task_id}/events")
+    async def diagnostic_task_events(
+        task_id: str,
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=200, ge=1, le=1000),
+        session: AsyncSession = Depends(get_session),
+    ) -> list[dict[str, Any]]:
+        await _task_or_404(session, task_id)
+        events = (
+            await session.scalars(
+                select(Event)
+                .where(Event.task_id == task_id, Event.sequence > after)
+                .order_by(Event.sequence)
+                .limit(limit)
+            )
+        ).all()
+        return [_event_view(event) for event in events]
+
+    @diagnostics.get("/tasks/{task_id}/logs")
+    async def diagnostic_task_logs(
+        task_id: str,
+        tail: int = Query(default=16000, ge=1, le=1_000_000),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, list[dict[str, Any]]]:
+        await _task_or_404(session, task_id)
+        attempts = (
+            await session.scalars(
+                select(Attempt)
+                .where(Attempt.task_id == task_id)
+                .order_by(Attempt.number.desc())
+            )
+        ).all()
+        validations = (
+            await session.scalars(
+                select(ValidationRun)
+                .where(ValidationRun.task_id == task_id)
+                .order_by(ValidationRun.created_at.desc())
+            )
+        ).all()
+        root = Path(settings.artifact_root).resolve()
+        return {
+            "attempts": [
+                {
+                    "number": attempt.number,
+                    "outcome": attempt.outcome,
+                    "artifact_path": attempt.artifact_path,
+                    "content": _artifact_tail(attempt.artifact_path, root, tail),
+                }
+                for attempt in attempts
+            ],
+            "validations": [
+                {
+                    "command": validation.command,
+                    "exit_code": validation.exit_code,
+                    "classification": validation.classification,
+                    "artifact_path": validation.artifact_path,
+                    "content": _artifact_tail(validation.artifact_path, root, tail),
+                }
+                for validation in validations
+            ],
+        }
 
     @api.post("/projects", status_code=status.HTTP_201_CREATED)
     async def create_project(
@@ -2199,6 +2278,7 @@ def create_app(
         return await _task_view(session, task)
 
     app.include_router(api)
+    app.include_router(diagnostics)
 
     dist = Path(settings.frontend_dist).resolve()
     assets = dist / "assets"
@@ -2850,6 +2930,18 @@ def _event_view(event: Event) -> dict[str, Any]:
         "payload": event.payload,
         "created_at": event.created_at.isoformat(),
     }
+
+
+def _artifact_tail(path_value: str | None, root: Path, limit: int) -> str | None:
+    if not path_value:
+        return None
+    path = Path(path_value).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return None
+    with path.open("rb") as artifact:
+        artifact.seek(0, 2)
+        artifact.seek(max(artifact.tell() - limit, 0))
+        return artifact.read().decode(errors="replace")
 
 
 async def _discovery_view(

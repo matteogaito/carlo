@@ -72,6 +72,7 @@ class Settings:
     telegram_chat_id: str = "CHANGE_ME"
     telegram_level: str = "all"
     credential_encryption_key: str = ""
+    diagnostics_token: str = ""
     log_level: str = "INFO"
 
     @classmethod
@@ -108,5 +109,6 @@ class Settings:
             telegram_chat_id=os.getenv("CARLO_TELEGRAM_CHAT_ID", "CHANGE_ME"),
             telegram_level=telegram_level,
             credential_encryption_key=_credential_key(),
+            diagnostics_token=os.getenv("CARLO_DIAGNOSTICS_TOKEN", ""),
             log_level=_log_level(),
         )

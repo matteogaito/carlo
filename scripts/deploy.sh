@@ -97,31 +97,42 @@ else
     /bin/chmod 600 "$config_file"
 fi
 
-ensure_encryption_key() {
-    current_key="$(sed -n 's/^CARLO_CREDENTIAL_ENCRYPTION_KEY=//p' "$config_file" | tail -n 1)"
-    if [[ -n "$current_key" && "$current_key" != *CHANGE_ME* ]]; then
+ensure_secret() {
+    name="$1"
+    format="$2"
+    current="$(sed -n "s/^${name}=//p" "$config_file" | tail -n 1)"
+    if [[ -n "$current" && "$current" != *CHANGE_ME* ]]; then
         return
     fi
-    generated_key="$(openssl rand -base64 32)"
-    [[ -n "$generated_key" ]] || die "could not generate credential encryption key"
+    generated="$(openssl rand "$format" 32)"
+    [[ -n "$generated" ]] || die "could not generate $name"
     temporary_config="$(mktemp "$config_file.tmp.XXXXXX")"
-    awk -v replacement="$generated_key" '
+    awk -v name="$name" -v replacement="$generated" '
         BEGIN { found = 0 }
-        /^CARLO_CREDENTIAL_ENCRYPTION_KEY=/ {
-            if (!found) print "CARLO_CREDENTIAL_ENCRYPTION_KEY=" replacement
+        $0 ~ "^" name "=" {
+            if (!found) print name "=" replacement
             found = 1
             next
         }
         { print }
         END {
-            if (!found) print "CARLO_CREDENTIAL_ENCRYPTION_KEY=" replacement
+            if (!found) print name "=" replacement
         }
     ' "$config_file" >"$temporary_config"
     /bin/chmod 600 "$temporary_config"
     /bin/mv "$temporary_config" "$config_file"
 }
 
+ensure_encryption_key() {
+    ensure_secret CARLO_CREDENTIAL_ENCRYPTION_KEY -base64
+}
+
+ensure_diagnostics_token() {
+    ensure_secret CARLO_DIAGNOSTICS_TOKEN -hex
+}
+
 ensure_encryption_key
+ensure_diagnostics_token
 
 /usr/bin/rsync -a \
     --exclude .git --exclude .worktrees --exclude .env --exclude .env.production \

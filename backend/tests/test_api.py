@@ -335,6 +335,120 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
 
 
 @pytest.mark.asyncio
+async def test_task_diagnostics_use_local_token_and_only_read_artifacts_in_root(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    attempt_log = artifact_root / "provider.json"
+    attempt_log.write_text("attempt-output")
+    outside_log = tmp_path / "outside.log"
+    outside_log.write_text("must-not-leak")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+                "user_sessions, project_memberships, users, events, validation_runs, "
+                "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        project = Project(
+            name="PhotoDigger",
+            key="PHOTO",
+            repository_path=str(tmp_path),
+        )
+        task = Task(
+            id="PHOTO-12",
+            project=project,
+            sequence=12,
+            title="Import photos",
+            goal="Import photos",
+        )
+        session.add_all(
+            [
+                task,
+                Event(task=task, type="execution.started", payload={}),
+                Event(task=task, type="execution.failed", payload={"error": "boom"}),
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                Attempt(
+                    task_id=task.id,
+                    number=1,
+                    instruction="implement",
+                    outcome="failed",
+                    artifact_path=str(attempt_log),
+                ),
+                ValidationRun(
+                    task_id=task.id,
+                    command="make test",
+                    classification="FAILED",
+                    summary="failed",
+                    artifact_path=str(outside_log),
+                ),
+            ]
+        )
+        await session.commit()
+        first_sequence = await session.scalar(
+            select(func.min(Event.sequence)).where(Event.task_id == task.id)
+        )
+
+    app = create_app(
+        factory,
+        FakeProvider("{}"),
+        Settings(
+            app_origin="http://test",
+            artifact_root=str(artifact_root),
+            diagnostics_token="diagnostic-secret",
+        ),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        assert (
+            await client.get("/api/diagnostics/tasks/PHOTO-12/events")
+        ).status_code == 401
+        assert (
+            await client.get(
+                "/api/diagnostics/tasks/PHOTO-12/events",
+                headers={"Authorization": "Bearer wrong"},
+            )
+        ).status_code == 401
+        headers = {"Authorization": "Bearer diagnostic-secret"}
+        events = (
+            await client.get(
+                f"/api/diagnostics/tasks/PHOTO-12/events?after={first_sequence}",
+                headers=headers,
+            )
+        ).json()
+        assert [event["type"] for event in events] == ["execution.failed"]
+        logs = (
+            await client.get(
+                "/api/diagnostics/tasks/PHOTO-12/logs?tail=6", headers=headers
+            )
+        ).json()
+        assert logs["attempts"][0]["content"] == "output"
+        assert logs["validations"][0]["content"] is None
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("192.0.2.1", 123)),
+        base_url="http://test",
+        headers={"Authorization": "Bearer diagnostic-secret"},
+    ) as client:
+        assert (
+            await client.get("/api/diagnostics/tasks/PHOTO-12/events")
+        ).status_code == 403
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()

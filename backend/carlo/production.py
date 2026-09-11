@@ -24,6 +24,8 @@ def validate_production_settings(settings: Settings) -> None:
         raise ValueError("frontend build is missing; run make build")
     if not settings.credential_encryption_key or "CHANGE_ME" in settings.credential_encryption_key:
         raise ValueError("CARLO_CREDENTIAL_ENCRYPTION_KEY is not configured")
+    if not settings.diagnostics_token or "CHANGE_ME" in settings.diagnostics_token:
+        raise ValueError("CARLO_DIAGNOSTICS_TOKEN is not configured")
 
 
 def main() -> None:
