@@ -48,6 +48,7 @@ from .model_providers import (
     resolve_agent_profile,
 )
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
+from .git import parent_branch_name
 from .models import AgentProfile as AgentProfileRecord
 from .maintenance import record_startup
 from .models import (
@@ -2032,6 +2033,14 @@ def create_app(
         )
         if parent is None:
             raise HTTPException(409, "subtask parent is missing")
+        previous_branch = task.branch_name
+        previous_worktree = task.worktree_path
+        previous_checkpoint = task.checkpoint_sha
+        fresh_checkout = (
+            Path(task.worktree_path).resolve()
+            != Path(task.project.repository_path).resolve()
+            or task.branch_name != parent_branch_name(parent.id, parent.title)
+        )
         previous_attempt = int(
             await session.scalar(
                 select(func.coalesce(func.max(Attempt.number), 0)).where(
@@ -2041,6 +2050,10 @@ def create_app(
             or 0
         )
         task.active_profile_id = None
+        if fresh_checkout:
+            task.branch_name = None
+            task.worktree_path = None
+            task.checkpoint_sha = None
         task.version += 1
         parent.status, parent.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
         parent.version += 1
@@ -2053,6 +2066,10 @@ def create_app(
                     "branch": task.branch_name,
                     "worktree": task.worktree_path,
                     "checkpoint": task.checkpoint_sha,
+                    "fresh_checkout": fresh_checkout,
+                    "previous_branch": previous_branch,
+                    "previous_worktree": previous_worktree,
+                    "previous_checkpoint": previous_checkpoint,
                 },
             )
         )

@@ -589,7 +589,8 @@ class ImplementationPipeline:
             return (
                 int(event.payload.get("cycle", 0)),
                 int(event.payload["previous_attempt"]),
-                event.type == "task.retry.started",
+                event.type == "task.retry.started"
+                and not event.payload.get("fresh_checkout", False),
             )
 
     async def _start_attempt(

@@ -243,7 +243,9 @@ async def test_context_limit_rolls_over_to_a_focused_subtask_attempt(
 
 
 @pytest.mark.asyncio
-async def test_rework_execution_uses_the_parent_branch_in_project(tmp_path: Path) -> None:
+async def test_fresh_checkout_retry_uses_the_parent_branch_and_full_plan(
+    tmp_path: Path,
+) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()
     subprocess.run(["git", "init", "-b", "main", str(repository)], check=True)
@@ -321,8 +323,8 @@ async def test_rework_execution_uses_the_parent_branch_in_project(tmp_path: Path
                 ],
                 Event(
                     task=task,
-                    type="task.rework.started",
-                    payload={"cycle": 1, "previous_attempt": 3},
+                    type="task.retry.started",
+                    payload={"previous_attempt": 3, "fresh_checkout": True},
                 ),
             ]
         )
@@ -330,6 +332,7 @@ async def test_rework_execution_uses_the_parent_branch_in_project(tmp_path: Path
 
     class Provider:
         async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            assert "Approved plan:\nPlan" in instruction
             Path(cwd, "feature.txt").write_text("fresh\n")
             return AgentResult(session_id, "done", (), 0)
 

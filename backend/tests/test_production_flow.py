@@ -229,6 +229,38 @@ def test_deploy_is_cross_platform_and_unprivileged() -> None:
     assert "ensure_secret CARLO_DIAGNOSTICS_TOKEN -hex" in deploy
 
 
+def test_diagnostics_client_only_calls_the_local_task_api(tmp_path: Path) -> None:
+    marker = tmp_path / "curl-arguments"
+    curl = tmp_path / "curl"
+    curl.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CARLO_TEST_MARKER\"\nprintf '[]'\n")
+    curl.chmod(0o755)
+    config = tmp_path / ".env.production"
+    config.write_text("CARLO_DIAGNOSTICS_TOKEN=secret\nCARLO_PORT=10808\n")
+    script = ROOT / "scripts" / "task-diagnostics.sh"
+    env = os.environ | {
+        "CARLO_DIAGNOSTICS_CONFIG": str(config),
+        "CARLO_CURL_BIN": str(curl),
+        "CARLO_TEST_MARKER": str(marker),
+    }
+
+    result = subprocess.run(
+        [script, "events", "PHOTODIGGER-12", "9"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = marker.read_text().splitlines()
+    assert arguments[-1] == (
+        "http://127.0.0.1:10808/api/diagnostics/tasks/PHOTODIGGER-12/"
+        "events?after=9&limit=1000"
+    )
+    assert subprocess.run(
+        [script, "events", "../invalid"], env=env, capture_output=True
+    ).returncode != 0
+
+
 def test_carlo_service_stops_sibling_when_one_process_exits(tmp_path: Path) -> None:
     install_root = tmp_path / "install"
     scripts = install_root / "scripts"

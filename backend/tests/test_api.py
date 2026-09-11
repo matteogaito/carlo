@@ -771,7 +771,7 @@ async def test_failed_task_rework_replans_original_goal_and_preserves_history(
 
 
 @pytest.mark.asyncio
-async def test_failed_subtask_retry_keeps_its_execution_state_without_planning(
+async def test_failed_subtask_retry_resets_legacy_checkout_without_planning(
     tmp_path: Path,
 ) -> None:
     engine = create_async_engine("postgresql+psycopg:///carlo_test")
@@ -854,9 +854,9 @@ async def test_failed_subtask_retry_keeps_its_execution_state_without_planning(
     assert retried["status"] == "READY"
     assert retried["stage"] == "queued"
     assert retried["approved_plan_revision"] == 1
-    assert retried["branch_name"] == "CAR-2-child"
-    assert retried["worktree_path"] == "/tmp/CAR-2-child"
-    assert retried["checkpoint_sha"] == "abc1234"
+    assert retried["branch_name"] is None
+    assert retried["worktree_path"] is None
+    assert retried["checkpoint_sha"] is None
     assert provider.calls == []
     async with factory() as session:
         parent = await session.get(Task, "CAR-1")
@@ -867,6 +867,8 @@ async def test_failed_subtask_retry_keeps_its_execution_state_without_planning(
         )
         assert event is not None
         assert event.payload["previous_attempt"] == 4
+        assert event.payload["fresh_checkout"] is True
+        assert event.payload["previous_worktree"] == "/tmp/CAR-2-child"
         assert parent is not None
         assert (parent.status, parent.stage) == (
             TaskStatus.IN_PROGRESS,
