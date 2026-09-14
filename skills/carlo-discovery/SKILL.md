@@ -50,9 +50,12 @@ Each proposal contains:
   assumptions, relevant files and symbols;
 - `plan_markdown`: ordered, technical implementation strategy with invariants,
   error handling, validation and stopping conditions;
-- `metadata`: `packages`, standalone `skills`, concise ordered `implementation_phases`, verified
+- `metadata`: the same contract as CARLO planning, including ordered
+  `implementation_tasks` with a self-contained `title`, `prompt`, and concrete
+  `intervention_points` for every context-bounded subtask; plus `packages`,
+  standalone `skills`, concise ordered `implementation_phases`, verified
   `validation_commands`, the four validation/deployment booleans, `risk_flags`,
-  and `affected_areas`, using the same contract as CARLO planning.
+  and `affected_areas`.
 
 Only emit a proposal after high-impact questions are resolved. The plan should
 shift costly decisions upstream without brittle line-by-line pseudocode. The

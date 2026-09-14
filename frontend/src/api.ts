@@ -325,7 +325,7 @@ export interface Api {
   listDiscoveries(projectId?: number): Promise<Discovery[]>
   getDiscovery(id: number): Promise<Discovery>
   createDiscovery(input: { project_id: number; title: string; message: string }): Promise<Discovery>
-  sendDiscoveryMessage(id: number, content: string): Promise<Discovery>
+  sendDiscoveryMessage(id: number, content: string, files?: File[]): Promise<Discovery>
   uploadDiscoveryScreenshot(id: number, file: File): Promise<Discovery>
   stopDiscovery(id: number): Promise<Discovery>
   closeDiscovery(id: number): Promise<Discovery>
@@ -405,7 +405,19 @@ export const httpApi: Api = {
   listDiscoveries: (projectId) => request(`/api/discoveries${projectId ? `?project_id=${projectId}` : ''}`),
   getDiscovery: (id) => request(`/api/discoveries/${id}`),
   createDiscovery: (input) => request('/api/discoveries', { method: 'POST', body: JSON.stringify(input) }),
-  sendDiscoveryMessage: (id, content) => request(`/api/discoveries/${id}/messages`, { method: 'POST', body: JSON.stringify({ content }) }),
+  sendDiscoveryMessage: async (id, content, files = []) => {
+    if (!files.length) return request(`/api/discoveries/${id}/messages`, { method: 'POST', body: JSON.stringify({ content }) })
+    const body = new FormData()
+    body.append('content', content)
+    files.forEach((file) => body.append('files', file))
+    const response = await fetch(`/api/discoveries/${id}/messages/attachments`, { method: 'POST', body, credentials: 'same-origin' })
+    if (!response.ok) {
+      if (response.status === 401) throw new AuthenticationRequired()
+      const detail = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(detail.detail || `Upload failed (${response.status})`)
+    }
+    return response.json() as Promise<Discovery>
+  },
   uploadDiscoveryScreenshot: async (id, file) => {
     const body = new FormData()
     body.append('file', file)

@@ -17,6 +17,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Form,
     HTTPException,
     Request,
     Response,
@@ -337,6 +338,93 @@ async def _active_children(
     if lock:
         statement = statement.with_for_update()
     return list((await session.scalars(statement)).all())
+
+
+async def _materialize_plan_subtasks(
+    session: AsyncSession,
+    task: Task,
+    plan: PlanRevision,
+    items: list[dict[str, Any]],
+) -> list[Task]:
+    project = await session.scalar(
+        select(Project).where(Project.id == task.project_id).with_for_update()
+    )
+    if project is None:
+        raise HTTPException(404, "project not found")
+    children: list[Task] = []
+    for position, item in enumerate(items):
+        sequence = project.next_task_sequence
+        project.next_task_sequence += 1
+        child = Task(
+            id=f"{project.key}-{sequence}",
+            project=project,
+            sequence=sequence,
+            title=str(item["title"]),
+            goal=str(item["prompt"]),
+            priority=task.priority,
+            created_source="plan",
+            status=TaskStatus.READY,
+            stage=TaskStage.QUEUED,
+            approved_plan_revision=1,
+            available_model_id=task.available_model_id,
+            parent=task,
+            subtask_position=position,
+        )
+        child_metadata = {
+            **plan.metadata_json,
+            "replan": False,
+            "title": str(item["title"]),
+            "description": str(item["prompt"]),
+            "implementation_tasks": [item],
+            "implementation_phases": [str(item["title"])],
+        }
+        session.add_all(
+            [
+                child,
+                PlanRevision(
+                    task=child,
+                    revision=1,
+                    brief_markdown=plan.brief_markdown,
+                    plan_markdown=str(item["prompt"]),
+                    metadata_json=child_metadata,
+                    approved_at=plan.approved_at,
+                ),
+                Event(task=child, type="task.created", payload={"source": "plan"}),
+                Event(task=child, type="plan.approved", payload={"revision": 1}),
+            ]
+        )
+        children.append(child)
+    task.status = TaskStatus.IN_PROGRESS
+    task.stage = TaskStage.IMPLEMENTING
+    return children
+
+
+def _proposal_implementation_tasks(
+    proposal: dict[str, Any], metadata: dict[str, Any]
+) -> list[dict[str, Any]]:
+    items = metadata.get("implementation_tasks")
+    if items:
+        return items
+    phases = metadata.get("implementation_phases")
+    if not isinstance(phases, list) or not phases:
+        return []
+    intervention_points = metadata.get("affected_areas")
+    if not isinstance(intervention_points, list):
+        intervention_points = []
+    context = str(proposal.get("megaprompt") or "").strip()
+    plan = str(proposal.get("plan_markdown") or "").strip()
+    return [
+        {
+            "title": str(phase),
+            "prompt": (
+                f"{context}\n\nApproved plan:\n{plan}\n\n"
+                f"Implement only this phase: {phase}. Preserve completed earlier phases, "
+                "do not start later phases, and run the relevant declared validations."
+            ),
+            "intervention_points": intervention_points,
+        }
+        for phase in phases
+    ]
 
 
 def _replan_allowed(task: Task, children: list[Task]) -> bool:
@@ -1486,6 +1574,95 @@ def create_app(
         await session.commit()
         return await _discovery_view(session, discovery)
 
+    @api.post(
+        "/discoveries/{discovery_id}/messages/attachments",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def send_discovery_message_with_attachments(
+        discovery_id: int,
+        content: str = Form(default="", max_length=1024 * 1024),
+        files: list[UploadFile] = File(...),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, Any]:
+        discovery = await _discovery_or_404(session, discovery_id, lock=True)
+        if discovery.status != "OPEN":
+            raise HTTPException(409, "discovery is closed")
+        if not files or len(files) > 10:
+            raise HTTPException(422, "attach between 1 and 10 files")
+
+        allowed = {
+            ".json", ".yaml", ".yml", ".png", ".jpg", ".jpeg",
+            ".gif", ".webp", ".heic", ".heif",
+        }
+        folder = (
+            Path(settings.artifact_root).resolve()
+            / "discoveries"
+            / str(discovery.id)
+            / "attachments"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        saved: list[Path] = []
+        attachments: list[dict[str, str]] = []
+        try:
+            for upload in files:
+                name = re.sub(
+                    r"[^A-Za-z0-9._-]", "_", Path(upload.filename or "file").name
+                ) or "file"
+                suffix = Path(name).suffix.lower()
+                if suffix not in allowed:
+                    raise HTTPException(422, f"unsupported attachment type: {suffix or name}")
+                path = folder / f"{uuid4().hex}-{name}"
+                saved.append(path)
+                size = 0
+                with path.open("xb") as output:
+                    while chunk := await upload.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > 20 * 1024 * 1024:
+                            raise HTTPException(422, f"attachment too large: {name}")
+                        output.write(chunk)
+                if not size:
+                    raise HTTPException(422, f"empty attachment: {name}")
+                attachments.append(
+                    {
+                        "name": name,
+                        "stored_name": path.name,
+                        "path": str(path),
+                        "content_type": upload.content_type or "application/octet-stream",
+                        "kind": "image" if suffix not in {".json", ".yaml", ".yml"} else "file",
+                    }
+                )
+        except Exception:
+            for path in [*saved, *folder.glob("*.tmp")]:
+                path.unlink(missing_ok=True)
+            raise
+
+        message_content = content.strip() or "Allegati: " + ", ".join(
+            item["name"] for item in attachments
+        )
+        sequence = await _next_discovery_sequence(session, discovery.id)
+        message = DiscoveryMessage(
+            discovery=discovery,
+            sequence=sequence,
+            role="user",
+            content=message_content,
+            metadata_json={"attachments": attachments},
+        )
+        session.add(message)
+        await session.flush()
+        discovery.last_active_at = datetime.now(UTC)
+        session.add_all(
+            [
+                DiscoveryTurn(discovery=discovery, input_message=message),
+                Event(
+                    discovery=discovery,
+                    type="discovery.message.queued",
+                    payload={"attachments": len(attachments)},
+                ),
+            ]
+        )
+        await session.commit()
+        return await _discovery_view(session, discovery)
+
     @api.post("/discoveries/{discovery_id}/screenshots", status_code=status.HTTP_202_ACCEPTED)
     async def upload_discovery_screenshot(
         discovery_id: int,
@@ -1542,6 +1719,22 @@ def create_app(
             raise HTTPException(404, "screenshot not found")
         return FileResponse(resolved)
 
+    @api.get("/discoveries/{discovery_id}/attachments/{file_name}")
+    async def get_discovery_attachment(
+        discovery_id: int, file_name: str, session: AsyncSession = Depends(get_session)
+    ) -> Response:
+        discovery = await _discovery_or_404(session, discovery_id)
+        base = (
+            Path(settings.artifact_root).resolve()
+            / "discoveries"
+            / str(discovery.id)
+            / "attachments"
+        )
+        resolved = (base / file_name).resolve()
+        if not resolved.is_relative_to(base) or not resolved.is_file():
+            raise HTTPException(404, "attachment not found")
+        return FileResponse(resolved, headers={"X-Content-Type-Options": "nosniff"})
+
     @api.post("/discoveries/{discovery_id}/stop")
     async def stop_discovery(
         discovery_id: int, session: AsyncSession = Depends(get_session)
@@ -1583,15 +1776,20 @@ def create_app(
         planned: list[PlanPayload] = []
         for proposal in pending:
             try:
-                planned.append(
-                    PlanPayload.model_validate(
-                        {
-                            "brief_markdown": proposal.get("brief_markdown"),
-                            "plan_markdown": proposal.get("plan_markdown"),
-                            "metadata": proposal.get("metadata"),
-                        }
-                    )
+                metadata = dict(proposal.get("metadata") or {})
+                metadata["implementation_tasks"] = _proposal_implementation_tasks(
+                    proposal, metadata
                 )
+                approved_plan = PlanPayload.model_validate(
+                    {
+                        "brief_markdown": proposal.get("brief_markdown"),
+                        "plan_markdown": proposal.get("plan_markdown"),
+                        "metadata": metadata,
+                    }
+                )
+                if not approved_plan.metadata.implementation_tasks:
+                    raise ValueError("implementation_tasks must not be empty")
+                planned.append(approved_plan)
             except ValueError as error:
                 raise HTTPException(
                     409,
@@ -1618,19 +1816,33 @@ def create_app(
             task.approved_plan_revision = 1
             task.version += 1
             now = datetime.now(UTC)
+            plan = PlanRevision(
+                task=task,
+                revision=1,
+                brief_markdown=approved_plan.brief_markdown,
+                plan_markdown=approved_plan.plan_markdown,
+                metadata_json=approved_plan.metadata.model_dump(),
+                approved_at=now,
+            )
             session.add_all(
                 [
-                    PlanRevision(
-                        task=task,
-                        revision=1,
-                        brief_markdown=approved_plan.brief_markdown,
-                        plan_markdown=approved_plan.plan_markdown,
-                        metadata_json=approved_plan.metadata.model_dump(),
-                        approved_at=now,
-                    ),
+                    plan,
                     Event(task=task, type="planning.completed", payload={"revision": 1}),
                     Event(task=task, type="plan.approved", payload={"revision": 1}),
                 ]
+            )
+            children = await _materialize_plan_subtasks(
+                session,
+                task,
+                plan,
+                approved_plan.metadata.model_dump()["implementation_tasks"],
+            )
+            session.add(
+                Event(
+                    task=task,
+                    type="subtasks.created",
+                    payload={"children": [child.id for child in children]},
+                )
             )
             proposal["created_task_id"] = task.id
             created.append(task)
@@ -2216,58 +2428,7 @@ def create_app(
                     old_children = existing
                     for child in old_children:
                         child.superseded_at = plan.approved_at
-                project = await session.scalar(
-                    select(Project)
-                    .where(Project.id == task.project_id)
-                    .with_for_update()
-                )
-                if project is None:
-                    raise HTTPException(404, "project not found")
-                for position, item in enumerate(items):
-                    sequence = project.next_task_sequence
-                    project.next_task_sequence += 1
-                    child = Task(
-                        id=f"{project.key}-{sequence}",
-                        project=project,
-                        sequence=sequence,
-                        title=str(item["title"]),
-                        goal=str(item["prompt"]),
-                        priority=task.priority,
-                        created_source="plan",
-                        status=TaskStatus.READY,
-                        stage=TaskStage.QUEUED,
-                        approved_plan_revision=1,
-                        available_model_id=task.available_model_id,
-                        parent=task,
-                        subtask_position=position,
-                    )
-                    child_metadata = {
-                        **plan.metadata_json,
-                        "replan": False,
-                        "title": str(item["title"]),
-                        "description": str(item["prompt"]),
-                        "implementation_tasks": [item],
-                        "implementation_phases": [str(item["title"])],
-                    }
-                    child_plan = PlanRevision(
-                        task=child,
-                        revision=1,
-                        brief_markdown=plan.brief_markdown,
-                        plan_markdown=str(item["prompt"]),
-                        metadata_json=child_metadata,
-                        approved_at=plan.approved_at,
-                    )
-                    session.add_all(
-                        [
-                            child,
-                            child_plan,
-                            Event(task=child, type="task.created", payload={"source": "plan"}),
-                            Event(task=child, type="plan.approved", payload={"revision": 1}),
-                        ]
-                    )
-                    children.append(child)
-                task.status = TaskStatus.IN_PROGRESS
-                task.stage = TaskStage.IMPLEMENTING
+                children = await _materialize_plan_subtasks(session, task, plan, items)
         session.add(
             Event(task=task, type="plan.approved", payload={"revision": payload.revision})
         )

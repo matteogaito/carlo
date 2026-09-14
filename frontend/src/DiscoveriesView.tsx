@@ -16,7 +16,8 @@ export function DiscoveriesView({ api, projects, event, setError }: {
   const [stream, setStream] = useState('')
   const [activity, setActivity] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
-  const [uploading, setUploading] = useState(false)
+  const [attachments, setAttachments] = useState<File[]>([])
+  const [sending, setSending] = useState(false)
 
   const refresh = useCallback(async () => {
     const discoveries = await api.listDiscoveries()
@@ -48,6 +49,7 @@ export function DiscoveriesView({ api, projects, event, setError }: {
     try {
       setStream('')
       setActivity('')
+      setAttachments([])
       setSelected(await api.getDiscovery(discovery.id))
     } catch (error) { setError(String(error)) }
   }
@@ -68,21 +70,31 @@ export function DiscoveriesView({ api, projects, event, setError }: {
     if (!selected) return
     const form = event.currentTarget
     const content = String(new FormData(form).get('message')).trim()
-    if (!content) return
+    if (!content && !attachments.length) return
     try {
-      setSelected(await api.sendDiscoveryMessage(selected.id, content))
+      setSending(true)
+      setSelected(await (attachments.length
+        ? api.sendDiscoveryMessage(selected.id, content, attachments)
+        : api.sendDiscoveryMessage(selected.id, content)))
       form.reset()
+      setAttachments([])
       await refresh()
-    } catch (error) { setError(String(error)) }
+    } catch (error) { setError(String(error)) } finally { setSending(false) }
   }
 
-  async function uploadScreenshot(file: File) {
-    if (!selected) return
-    try {
-      setUploading(true)
-      setSelected(await api.uploadDiscoveryScreenshot(selected.id, file))
-      await refresh()
-    } catch (error) { setError(String(error)) } finally { setUploading(false) }
+  function attach(files: FileList | null) {
+    const incoming = Array.from(files || [])
+    if (attachments.length + incoming.length > 10) {
+      setError('Puoi allegare al massimo 10 file.')
+      return
+    }
+    const allowed = /\.(json|ya?ml|png|jpe?g|gif|webp|heic|heif)$/i
+    const invalid = incoming.find((file) => !allowed.test(file.name) || file.size > 20 * 1024 * 1024)
+    if (invalid) {
+      setError(`${invalid.name}: formato non supportato o file oltre 20 MB.`)
+      return
+    }
+    setAttachments((current) => [...current, ...incoming])
   }
 
   const state = selected?.state
@@ -112,15 +124,30 @@ export function DiscoveriesView({ api, projects, event, setError }: {
             <span>{message.role === 'user' ? 'You' : 'CARLO'}</span>
             <Markdown>{message.content}</Markdown>
             {typeof message.metadata?.image_name === 'string' && <img className="chat-screenshot" src={`/api/discoveries/${selected.id}/screenshots/${encodeURIComponent(message.metadata.image_name)}`} alt="screenshot allegato" />}
+            {messageAttachments(message.metadata).map((attachment) => attachment.kind === 'image'
+              ? <img key={attachment.stored_name} className="chat-screenshot" src={`/api/discoveries/${selected.id}/attachments/${encodeURIComponent(attachment.stored_name)}`} alt={attachment.name} />
+              : <a key={attachment.stored_name} className="chat-attachment" href={`/api/discoveries/${selected.id}/attachments/${encodeURIComponent(attachment.stored_name)}`} download={attachment.name}>📄 {attachment.name}</a>)}
           </article>)}
         {stream && <article className="chat-message assistant streaming"><span>CARLO</span><Markdown>{stream}</Markdown></article>}
         {selected.current_turn?.status === 'QUEUED' || selected.current_turn?.status === 'RUNNING' ? <div className="thinking" aria-live="polite"><i />{activity || 'Pi is exploring the repository…'} <button onClick={() => void api.stopDiscovery(selected.id).then(setSelected)}>Stop</button></div> : null}
+        {!!pendingProposals.length && <section className="discovery-actions" aria-label="Ready task actions">
+          <span>READY TO BUILD</span>
+          <h3>{pendingProposals.length === 1 ? '1 task is ready' : `${pendingProposals.length} tasks are ready`}</h3>
+          {pendingProposals.map((proposal) => <div key={proposal.id}>
+            <strong>{proposal.title}</strong>
+            <button disabled={!proposalReady(proposal)} onClick={() => void api.createDiscoveryTasks(selected.id, [proposal.id]).then(refresh).catch((error) => setError(String(error)))}>Create task</button>
+          </div>)}
+          <button className="create-all" disabled={!allProposalsReady} onClick={() => void api.createDiscoveryTasks(selected.id).then(refresh).catch((error) => setError(String(error)))}>Create all Ready tasks</button>
+        </section>}
       </div>
       {selected.status === 'OPEN' ? <form className="chat-composer" onSubmit={send}>
-        <input ref={fileRef} type="file" accept="image/*" className="composer-file" aria-label="Allega screenshot" onChange={(event) => { const f = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (f) void uploadScreenshot(f) }} />
-        <button type="button" className="attach" onClick={() => fileRef.current?.click()} disabled={uploading} aria-label="Allega screenshot">{uploading ? '…' : '📎'}</button>
-        <label><span>Message</span><textarea aria-label="Message" name="message" rows={2} placeholder="Continue the Discovery…" required /></label>
-        <button type="submit">Send</button>
+        <input ref={fileRef} type="file" multiple accept=".json,.yaml,.yml,image/png,image/jpeg,image/gif,image/webp,image/heic,image/heif" className="composer-file" aria-label="Allega file" onChange={(event) => { attach(event.currentTarget.files); event.currentTarget.value = '' }} />
+        <button type="button" className="attach" onClick={() => fileRef.current?.click()} disabled={sending} aria-label="Scegli allegati">📎</button>
+        <div className="composer-input">
+          {!!attachments.length && <div className="composer-attachments">{attachments.map((file, index) => <DraftAttachment file={file} key={`${file.name}-${file.lastModified}-${index}`} onRemove={() => setAttachments((current) => current.filter((_, item) => item !== index))} />)}</div>}
+          <label><span>Message</span><textarea aria-label="Message" name="message" rows={2} placeholder="Continue the Discovery…" /></label>
+        </div>
+        <button type="submit" disabled={sending}>{sending ? '…' : 'Send'}</button>
       </form> : <p className="closed-note">This Discovery is closed and read-only.</p>}
     </section> : <section className="discovery-welcome"><span>DISCOVERY</span><h2>Understand the project together.</h2><p>Explore code, run diagnostics, capture decisions, then create only the Tasks that are actually needed.</p><button onClick={() => setCreating(true)} disabled={!projects.length}>Start a Discovery</button></section>}
 
@@ -151,7 +178,39 @@ export function DiscoveriesView({ api, projects, event, setError }: {
 }
 
 function proposalReady(proposal: Discovery['state']['task_proposals'][number]): boolean {
-  return Boolean(proposal.brief_markdown?.trim() && proposal.plan_markdown?.trim() && proposal.metadata)
+  const metadata = proposal.metadata
+  return Boolean(
+    proposal.brief_markdown?.trim()
+    && proposal.plan_markdown?.trim()
+    && (metadata?.implementation_tasks?.length || metadata?.implementation_phases?.length),
+  )
+}
+
+type MessageAttachment = { name: string; stored_name: string; kind: 'image' | 'file' }
+
+function DraftAttachment({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const image = file.type.startsWith('image/')
+  const [preview, setPreview] = useState('')
+  useEffect(() => {
+    if (!image) return
+    const url = URL.createObjectURL(file)
+    setPreview(url)
+    return () => URL.revokeObjectURL(url)
+  }, [file, image])
+  return <figure className={image ? 'composer-attachment image' : 'composer-attachment document'}>
+    {preview ? <img src={preview} alt={file.name} /> : <span className="file-mark">{'{ }'}</span>}
+    <figcaption>{file.name}</figcaption>
+    <button type="button" aria-label={`Rimuovi ${file.name}`} onClick={onRemove}>×</button>
+  </figure>
+}
+
+function messageAttachments(metadata: Record<string, unknown>): MessageAttachment[] {
+  if (!Array.isArray(metadata.attachments)) return []
+  return metadata.attachments.filter((item): item is MessageAttachment => {
+    if (!item || typeof item !== 'object') return false
+    const value = item as Record<string, unknown>
+    return typeof value.name === 'string' && typeof value.stored_name === 'string' && (value.kind === 'image' || value.kind === 'file')
+  })
 }
 
 function Context({ title, values, code = false }: { title: string; values: string[]; code?: boolean }) {

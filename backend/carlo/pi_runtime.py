@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ class PiRuntimeSnapshotBuilder:
         session_id: str,
         model: ResolvedModel,
         packages: tuple[ResolvedPiPackage, ...] = (),
+        project: Path | None = None,
+        read_paths: tuple[Path, ...] = (),
     ) -> PiRuntimeSnapshot:
         if not _SAFE_SESSION_ID.fullmatch(session_id):
             raise ValueError("invalid Pi session ID")
@@ -93,6 +96,13 @@ class PiRuntimeSnapshotBuilder:
                 for package in packages
             ],
         }
+        input_modalities = list(model.input_modalities)
+        if (
+            model.base_url.rstrip("/") == "https://api.openai.com/v1"
+            and model.external_id.startswith(("gpt-4", "gpt-5"))
+            and "image" not in input_modalities
+        ):
+            input_modalities.append("image")
         self._write_json(
             agent_dir / "models.json",
             {
@@ -108,7 +118,7 @@ class PiRuntimeSnapshotBuilder:
                             {
                                 "id": model.external_id,
                                 "name": model.display_name,
-                                "input": list(model.input_modalities),
+                                "input": input_modalities,
                                 "reasoning": model.reasoning,
                                 "contextWindow": runtime_context_window(
                                     model.context_window, model.max_tokens
@@ -136,6 +146,9 @@ class PiRuntimeSnapshotBuilder:
                 }
             },
         )
+        project_path = str(project.resolve(strict=True)) if project else "."
+        gitconfig_paths = [str(Path.home() / ".gitconfig")] if project else []
+        temporary_paths = [str(Path(tempfile.gettempdir()).resolve())] if project else []
         self._write_json(
             agent_dir / "sandbox.json",
             {
@@ -154,10 +167,12 @@ class PiRuntimeSnapshotBuilder:
                         "/usr/local/var/carlo",
                     ],
                     "allowRead": [
-                        ".",
+                        project_path,
+                        *gitconfig_paths,
+                        *(str(path.resolve()) for path in read_paths),
                         *(str(Path(package.artifact_path).resolve()) for package in packages),
                     ],
-                    "allowWrite": ["."],
+                    "allowWrite": [project_path, *temporary_paths],
                     "denyWrite": [".pi/sandbox.json"],
                 },
             },

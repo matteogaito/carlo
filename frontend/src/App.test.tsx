@@ -21,7 +21,10 @@ import {
   type User,
 } from './api'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 const task: Task = {
   id: 'CAR-1',
@@ -810,7 +813,58 @@ describe('CARLO board', () => {
     expect(sendDiscoveryMessage).toHaveBeenCalledWith(7, 'What about errors?')
   })
 
-  it('previews a completed Discovery plan before creating its Ready task', async () => {
+  it('keeps Discovery attachments local until the message is sent', async () => {
+    const discovery: Discovery = {
+      id: 7, project_id: 1, title: 'CSV direction', status: 'OPEN',
+      state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [] },
+      final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
+    }
+    const sendDiscoveryMessage = vi.fn(async () => discovery)
+    render(<DiscoveriesView api={{
+      ...api,
+      listDiscoveries: async () => [discovery],
+      getDiscovery: async () => discovery,
+      sendDiscoveryMessage,
+    }} projects={[]} event={null} setError={() => undefined} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CSV direction/ }))
+    const input = screen.getByLabelText('Allega file')
+    const file = new File(['{"ok":true}'], 'sample.json', { type: 'application/json' })
+    await userEvent.upload(input, file)
+
+    expect(screen.getByText('sample.json')).toBeTruthy()
+    expect(sendDiscoveryMessage).not.toHaveBeenCalled()
+    await userEvent.type(screen.getByLabelText('Message'), 'Analizza questo')
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(sendDiscoveryMessage).toHaveBeenCalledWith(7, 'Analizza questo', [file])
+  })
+
+  it('shows an image attachment inside the message draft', async () => {
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:local-preview'),
+      revokeObjectURL: vi.fn(),
+    })
+    const discovery: Discovery = {
+      id: 7, project_id: 1, title: 'Image review', status: 'OPEN',
+      state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [] },
+      final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
+    }
+    render(<DiscoveriesView api={{
+      ...api,
+      listDiscoveries: async () => [discovery],
+      getDiscovery: async () => discovery,
+    }} projects={[]} event={null} setError={() => undefined} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Image review/ }))
+    const file = new File(['image'], 'preview.png', { type: 'image/png' })
+    await userEvent.upload(screen.getByLabelText('Allega file'), file)
+
+    const composer = screen.getByLabelText('Message').closest('form')!
+    const preview = within(composer).getByRole('img', { name: 'preview.png' })
+    expect(preview.getAttribute('src')).toBe('blob:local-preview')
+  })
+
+  it('shows completed Discovery proposals as task actions in the chat', async () => {
     const proposal = {
       id: 'csv', title: 'Add CSV import', megaprompt: 'Implement CSV import.', depends_on: [],
       brief_markdown: 'Reuse the **existing ingestion service**.',
@@ -826,10 +880,27 @@ describe('CARLO board', () => {
     render(<DiscoveriesView api={{ ...api, listDiscoveries: async () => [discovery], getDiscovery: async () => discovery, createDiscoveryTasks }} projects={[]} event={null} setError={() => undefined} />)
 
     await userEvent.click(await screen.findByRole('button', { name: /Plan CSV/ }))
-    await userEvent.click(screen.getByText('Add CSV import'))
-    expect(screen.getByText('existing ingestion service')).toBeTruthy()
-    expect(screen.getByText('Implement parsing and preserve the error envelope.')).toBeTruthy()
-    expect((screen.getByRole('button', { name: 'Create all Ready tasks' }) as HTMLButtonElement).disabled).toBe(false)
+    const chat = document.querySelector<HTMLElement>('.message-stream')!
+    expect(within(chat).getByText('Add CSV import')).toBeTruthy()
+    await userEvent.click(within(chat).getByRole('button', { name: 'Create all Ready tasks' }))
+    expect(createDiscoveryTasks).toHaveBeenCalledWith(9)
+  })
+
+  it('keeps Discovery task actions disabled until subtasks are planned', async () => {
+    const discovery: Discovery = {
+      id: 10, project_id: 1, title: 'Incomplete plan', status: 'OPEN',
+      state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [{
+        id: 'csv', title: 'Add CSV import', megaprompt: 'Implement CSV import.', depends_on: [],
+        brief_markdown: 'Reuse ingestion.', plan_markdown: 'Implement parsing.',
+        metadata: { skills: [], implementation_phases: [], validation_commands: ['pytest -q'], browser_validation: false, build_required: false, run_required: false, deployment_expected: false, risk_flags: [], affected_areas: ['src/ingest.py'] },
+      }] },
+      final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
+    }
+    render(<DiscoveriesView api={{ ...api, listDiscoveries: async () => [discovery], getDiscovery: async () => discovery }} projects={[]} event={null} setError={() => undefined} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Incomplete plan/ }))
+    const chat = document.querySelector<HTMLElement>('.message-stream')!
+    expect((within(chat).getByRole('button', { name: 'Create all Ready tasks' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('renders aggregated realtime Discovery deltas', async () => {

@@ -13,6 +13,8 @@ from typing import Any, Protocol
 from .maintenance import pi_process_lock
 
 PI_JSON_EVENT_LIMIT = 4 * 1024 * 1024
+PI_RPC_JSON_EVENT_LIMIT = 8 * 1024 * 1024
+PI_RPC_STDERR_LIMIT = 64 * 1024
 GIT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 logger = logging.getLogger("carlo.provider")
 
@@ -98,7 +100,9 @@ class ConversationState:
 class ConversationSession(Protocol):
     session_id: str
 
-    async def prompt(self, message: str) -> AsyncIterator[ConversationEvent]: ...
+    async def prompt(
+        self, message: str, *, images: tuple[dict[str, str], ...] = ()
+    ) -> AsyncIterator[ConversationEvent]: ...
 
     async def abort(self) -> None: ...
 
@@ -131,6 +135,7 @@ class CodingAgentProvider(Protocol):
         *,
         extensions: tuple[Path, ...] = (),
         environment: dict[str, str] | None = None,
+        sandbox_read_paths: tuple[Path, ...] = (),
     ) -> ConversationSession: ...
 
     async def stop(self, session_id: str) -> None: ...
@@ -171,12 +176,15 @@ class PiProvider:
         *,
         extensions: tuple[Path, ...] = (),
         environment: dict[str, str] | None = None,
+        sandbox_read_paths: tuple[Path, ...] = (),
     ) -> ConversationSession:
         cwd = self._project_boundary(cwd)
         if self.status(session_id) == "running":
             raise ProviderError(f"session is already running: {session_id}")
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
+        model, runtime_environment, runtime_packages = self._runtime(
+            profile, session_id, cwd, sandbox_read_paths
+        )
         self._require_sandbox_rg(runtime_packages)
         package_paths, external_skills, _ = self._resource_snapshot()
         command = [
@@ -207,6 +215,7 @@ class PiProvider:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=PI_RPC_JSON_EVENT_LIMIT,
                 env={
                     **os.environ,
                     **(environment or {}),
@@ -230,7 +239,9 @@ class PiProvider:
     ) -> AgentResult:
         cwd = self._project_boundary(cwd)
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        model, runtime_environment, runtime_packages = self._runtime(profile, session_id)
+        model, runtime_environment, runtime_packages = self._runtime(
+            profile, session_id, cwd
+        )
         self._require_sandbox_rg(runtime_packages)
         package_paths, external_skills, resource_revisions = self._resource_snapshot()
         base_command = [
@@ -364,7 +375,11 @@ class PiProvider:
         return "running" if process and process.returncode is None else "idle"
 
     def _runtime(
-        self, profile: AgentProfile, session_id: str
+        self,
+        profile: AgentProfile,
+        session_id: str,
+        cwd: str,
+        read_paths: tuple[Path, ...] = (),
     ) -> tuple[str | None, dict[str, str], tuple[ResolvedPiPackage | str, ...]]:
         if not profile.resolved_model or not self.runtime_builder:
             return profile.model, {}, profile.packages
@@ -376,6 +391,8 @@ class PiProvider:
                 for package in profile.packages
                 if isinstance(package, ResolvedPiPackage)
             ),
+            project=Path(cwd),
+            read_paths=read_paths,
         )
         return snapshot.model_pattern, {
             **snapshot.environment,
@@ -561,8 +578,10 @@ class PiRpcSession:
         self._reader_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
-    async def prompt(self, message: str) -> AsyncIterator[ConversationEvent]:
-        await self._command("prompt", message=message)
+    async def prompt(
+        self, message: str, *, images: tuple[dict[str, str], ...] = ()
+    ) -> AsyncIterator[ConversationEvent]:
+        await self._command("prompt", message=message, images=images or None)
         while True:
             event = await self._events.get()
             if isinstance(event, Exception):
@@ -653,6 +672,22 @@ class PiRpcSession:
                     continue
                 event_type = value.get("type")
                 if isinstance(event_type, str):
+                    if event_type == "extension_error":
+                        logger.warning(
+                            "Pi RPC extension session=%s: %s",
+                            self.session_id,
+                            value.get("error") or "unknown extension error",
+                        )
+                    elif (
+                        event_type == "extension_ui_request"
+                        and value.get("method") == "notify"
+                        and value.get("notifyType") in {"warning", "error"}
+                    ):
+                        logger.warning(
+                            "Pi RPC extension session=%s: %s",
+                            self.session_id,
+                            value.get("message") or "unknown extension warning",
+                        )
                     await self._events.put(ConversationEvent(event_type, value))
         except Exception as error:
             failure = error if isinstance(error, ProviderError) else ProviderError(str(error))
@@ -670,7 +705,11 @@ class PiRpcSession:
                 await self._events.put(failure)
 
     async def _read_stderr(self) -> None:
-        self._stderr = await self.stderr.read()
+        async for line in self.stderr:
+            self._stderr = (self._stderr + line)[-PI_RPC_STDERR_LIMIT:]
+            detail = line.decode(errors="replace").rstrip()
+            if detail:
+                logger.warning("Pi RPC stderr session=%s: %s", self.session_id, detail)
 
 
 def _final_output(events: tuple[dict[str, Any], ...]) -> str:

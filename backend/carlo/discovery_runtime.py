@@ -18,6 +18,8 @@ from .model_providers import (
 )
 from .provider import AgentProfile, CodingAgentProvider, ConversationEvent, ConversationSession
 
+EVENT_IDLE_TIMEOUT_SECONDS = 180
+
 
 @dataclass
 class _LiveSession:
@@ -106,7 +108,9 @@ class DiscoveryRuntime:
             project = discovery.project
             input_message = turn.input_message
             message = input_message.content
-            image_path = input_message.metadata_json.get("image_path") if input_message.metadata_json else None
+            metadata = input_message.metadata_json or {}
+            attachments = metadata.get("attachments") or []
+            attachment_folder = Path(discovery.memory_path).resolve().parent / "attachments"
             memory = _memory_markdown(discovery)
             pinned_model_id = discovery.state.get("model_runtime", {}).get(
                 "available_model_id"
@@ -155,6 +159,7 @@ class DiscoveryRuntime:
             project.repository_path,
             discovery.provider_session_id,
             project.validation_commands,
+            attachment_folder,
         )
         output: list[str] = []
         stream = ""
@@ -162,12 +167,26 @@ class DiscoveryRuntime:
         pending_tools: dict[str, dict[str, Any]] = {}
         tools: list[dict[str, Any]] = []
         try:
-            if image_path:
-                message = (
-                    f"{message}\n\nAllegato immagine. Leggilo con il tool read "
-                    f"prima di rispondere: `{image_path}`"
+            readable_attachments = list(attachments)
+            if metadata.get("image_path"):
+                readable_attachments.append(
+                    {
+                        "name": Path(str(metadata["image_path"])).name,
+                        "path": metadata["image_path"],
+                    }
                 )
-            async for event in live.session.prompt(f"{memory}\n\n# User message\n{message}"):
+            if readable_attachments:
+                paths = "\n".join(
+                    f"- `{item['path']}` ({item['name']})"
+                    for item in readable_attachments
+                )
+                message = (
+                    f"{message}\n\nAllegati. Leggili con il tool read prima di "
+                    f"rispondere:\n{paths}"
+                )
+            prompt = f"{memory}\n\n# User message\n{message}"
+            events = live.session.prompt(prompt)
+            async for event in _events_with_idle_timeout(events):
                 if await self._should_stop(turn_id, discovery_id):
                     await live.session.abort()
                     await self._interrupt(turn_id, discovery_id)
@@ -209,13 +228,35 @@ class DiscoveryRuntime:
                 await self._emit_delta(turn_id, discovery_id, stream)
             provider_state = await live.session.get_state()
             await self._complete(turn_id, discovery_id, "".join(output), state, provider_state.session_file, tools)
+        except TimeoutError:
+            try:
+                await asyncio.wait_for(live.session.abort(), 5)
+            except Exception:
+                pass
+            await self._discard_session(discovery_id, live)
+            await self._fail(
+                turn_id,
+                discovery_id,
+                f"Pi produced no activity for {EVENT_IDLE_TIMEOUT_SECONDS:g} seconds",
+            )
         except Exception as error:
             await self._fail(turn_id, discovery_id, str(error))
         finally:
             live.busy = False
             live.used_at = monotonic()
 
-    async def _acquire(self, discovery_id: int, project_id: int, profile: AgentProfile, cwd: str, session_id: str, validation_commands: list[str]) -> _LiveSession:
+    async def _discard_session(
+        self, discovery_id: int, live: _LiveSession
+    ) -> None:
+        async with self._pool_lock:
+            if self._sessions.get(discovery_id) is live:
+                del self._sessions[discovery_id]
+        try:
+            await live.session.close()
+        except Exception:
+            pass
+
+    async def _acquire(self, discovery_id: int, project_id: int, profile: AgentProfile, cwd: str, session_id: str, validation_commands: list[str], attachment_folder: Path) -> _LiveSession:
         while True:
             async with self._pool_lock:
                 existing = self._sessions.get(discovery_id)
@@ -234,6 +275,7 @@ class DiscoveryRuntime:
                                 validation_commands
                             )
                         },
+                        sandbox_read_paths=(attachment_folder,),
                     )
                     entry = _LiveSession(project_id, session, True, monotonic())
                     self._sessions[discovery_id] = entry
@@ -349,6 +391,17 @@ def _event_delta(event: ConversationEvent) -> str:
         return delta
     update = event.payload.get("assistantMessageEvent")
     return str(update.get("delta", "")) if isinstance(update, dict) and update.get("type") == "text_delta" else ""
+
+
+async def _events_with_idle_timeout(events):
+    iterator = aiter(events)
+    while True:
+        try:
+            yield await asyncio.wait_for(
+                anext(iterator), EVENT_IDLE_TIMEOUT_SECONDS
+            )
+        except StopAsyncIteration:
+            return
 
 
 def _event_state(event: ConversationEvent) -> dict[str, Any] | None:

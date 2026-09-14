@@ -293,6 +293,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .chat-message p { margin: 0 0 12px; }
 .chat-message pre, .tool-message pre { max-width: 100%; overflow-x: auto; padding: 14px; color: #eee; background: #171717; border-radius: 10px; font: 12px/1.55 ui-monospace, monospace; }
 .chat-message code { font-family: ui-monospace, monospace; }
+.discovery-actions { margin: 8px 0 26px; padding: 16px; border: 1px solid #b9c8c0; border-radius: 14px; background: #f5f9f6; }
+.discovery-actions > span { color: var(--pine); font: 750 9px ui-monospace, monospace; letter-spacing: .12em; }
+.discovery-actions h3 { margin: 5px 0 12px; }
+.discovery-actions > div { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 0; border-top: 1px solid #dce5df; }
+.discovery-actions > div strong { font-size: 13px; }
+.discovery-actions button { flex: 0 0 auto; border: 1px solid var(--ink); border-radius: 8px; padding: 7px 10px; background: white; }
+.discovery-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.discovery-actions .create-all { margin-top: 12px; color: white; background: var(--ink); }
 .tool-message { margin: 0 0 18px; border: 1px solid var(--line); border-radius: 10px; background: #fafaf8; }
 .tool-message summary { padding: 10px 13px; cursor: pointer; color: #666; font: 650 11px ui-monospace, monospace; }
 .tool-message pre { margin: 0; border-radius: 0 0 9px 9px; }
@@ -300,7 +308,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .thinking i { width: 8px; height: 8px; border-radius: 50%; background: var(--pine); animation: slow-pulse 1.8s infinite; }
 .thinking button { margin-left: auto; border: 0; color: var(--fault); background: transparent; }
 .chat-composer { display: flex; align-items: end; gap: 10px; margin: 0 max(18px, calc((100% - 800px) / 2)) 18px; padding: 10px; background: white; border: 1px solid #d2d2cf; border-radius: 18px; box-shadow: 0 8px 32px rgb(0 0 0 / .08); }
-.chat-composer label { flex: 1; }
+.chat-composer label { display: block; }
 .chat-composer label > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 .chat-composer textarea { width: 100%; resize: none; border: 0; outline: 0; padding: 8px; line-height: 1.45; }
 .chat-composer button { min-width: 72px; min-height: 44px; border: 0; border-radius: 12px; color: white; background: var(--ink); font-weight: 750; }
@@ -487,3 +495,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-file { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 .chat-composer .attach { min-width: 40px; font-size: 18px; }
 .chat-screenshot { display: block; max-width: 100%; max-height: 340px; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.composer-input { flex: 1; min-width: 0; }
+.composer-attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 8px 8px; }
+.composer-attachment { position: relative; width: 112px; height: 84px; margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
+.composer-attachment img { width: 100%; height: 100%; object-fit: cover; }
+.composer-attachment figcaption { position: absolute; inset: auto 0 0; overflow: hidden; padding: 14px 7px 5px; background: linear-gradient(transparent, rgb(0 0 0 / .72)); color: white; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.composer-attachment.document { display: flex; align-items: center; width: 180px; height: 54px; padding: 8px; gap: 8px; }
+.composer-attachment.document .file-mark { color: var(--pine); font-family: monospace; font-weight: 800; }
+.composer-attachment.document figcaption { position: static; min-width: 0; padding: 0; background: none; color: var(--ink); }
+.chat-composer .composer-attachment button { position: absolute; top: 4px; right: 4px; min-width: 20px; min-height: 20px; padding: 0; border: 1px solid rgb(255 255 255 / .65); border-radius: 50%; color: white; background: rgb(20 24 23 / .78); }
+.chat-attachment { display: inline-flex; align-items: center; gap: 6px; width: fit-content; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); font-size: 12px; }

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from uuid import uuid4
 from datetime import UTC, datetime
@@ -50,9 +51,11 @@ class Provider:
     def __init__(self):
         self.session = Session()
         self.profiles = []
+        self.open_kwargs = []
 
     async def open_conversation(self, profile, *args, **kwargs):
         self.profiles.append(profile)
+        self.open_kwargs.append(kwargs)
         return self.session
 
 
@@ -77,6 +80,35 @@ class CancellingProvider:
     async def open_conversation(self, *args, **kwargs): return self.session
 
 
+class StallingSession(Session):
+    def __init__(self):
+        self.closed = False
+
+    async def prompt(self, message, *, images=()):
+        await asyncio.Event().wait()
+        yield ConversationEvent("agent_end", {})
+
+    async def close(self):
+        self.closed = True
+
+
+class RecoveredSession(Session):
+    async def prompt(self, message, *, images=()):
+        yield ConversationEvent("message_update", {"delta": "Recovered."})
+        yield ConversationEvent("agent_end", {})
+
+
+class StallingProvider:
+    def __init__(self):
+        self.sessions = [StallingSession(), RecoveredSession()]
+        self.opened = 0
+
+    async def open_conversation(self, *args, **kwargs):
+        session = self.sessions[self.opened]
+        self.opened += 1
+        return session
+
+
 @pytest.mark.asyncio
 async def test_discovery_turn_persists_reply_state_and_memory(tmp_path: Path) -> None:
     engine = create_async_engine("postgresql+psycopg:///carlo_test")
@@ -91,8 +123,12 @@ async def test_discovery_turn_persists_reply_state_and_memory(tmp_path: Path) ->
         await session.commit()
         discovery_id = discovery.id
 
-    runtime = DiscoveryRuntime(factory, Provider(), Path("/guard.mjs"))
+    provider = Provider()
+    runtime = DiscoveryRuntime(factory, provider, Path("/guard.mjs"))
     assert await runtime.run_next() == discovery_id
+    assert provider.open_kwargs[0]["sandbox_read_paths"] == (
+        tmp_path / "attachments",
+    )
     async with factory() as session:
         discovery = await session.get(Discovery, discovery_id)
         assert discovery.turns[0].status == "COMPLETED"
@@ -114,6 +150,57 @@ async def test_discovery_turn_persists_reply_state_and_memory(tmp_path: Path) ->
             for event in events
         )
         assert "source" not in str([event.payload for event in events])
+    await runtime.close()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_discovery_fails_a_turn_that_stops_emitting_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "carlo.discovery_runtime.EVENT_IDLE_TIMEOUT_SECONDS", 0.01, raising=False
+    )
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    key = f"STALL{uuid4().hex[:6].upper()}"
+    async with factory() as session:
+        discovery = Discovery(
+            project=Project(name=key, key=key, repository_path=str(tmp_path)),
+            title="Stalled",
+            provider_session_id=f"discovery-{key}",
+            state={},
+            memory_path=str(tmp_path / "MEMORY.md"),
+        )
+        message = DiscoveryMessage(
+            discovery=discovery, sequence=1, role="user", content="Inspect"
+        )
+        retry = DiscoveryMessage(
+            discovery=discovery, sequence=2, role="user", content="Retry"
+        )
+        session.add_all(
+            [
+                DiscoveryTurn(discovery=discovery, input_message=message),
+                DiscoveryTurn(discovery=discovery, input_message=retry),
+            ]
+        )
+        await session.commit()
+        discovery_id = discovery.id
+
+    provider = StallingProvider()
+    runtime = DiscoveryRuntime(factory, provider, Path("/guard.mjs"))
+    await asyncio.wait_for(runtime.run_next(), 0.2)
+    await asyncio.wait_for(runtime.run_next(), 0.2)
+
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        assert discovery.turns[0].status == "FAILED"
+        assert "Pi produced no activity" in discovery.turns[0].error
+        assert discovery.turns[1].status == "COMPLETED"
+    assert provider.opened == 2
+    assert provider.sessions[0].closed is True
     await runtime.close()
     await engine.dispose()
 
@@ -240,9 +327,11 @@ async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path
 
 
 class ImageSession(Session):
-    async def prompt(self, message):
-        assert "Allegato immagine" in message
-        assert ".png" in message
+    async def prompt(self, message, *, images=()):
+        assert images == ()
+        assert "Allegati." in message
+        assert "shot.png" in message
+        assert "sample.json" in message
         assert "tool read" in message
         yield ConversationEvent("message_update", {"delta": "Screenshot analizzato."})
         yield ConversationEvent("agent_end", {})
@@ -263,7 +352,10 @@ async def test_discovery_message_passes_screenshot_path_to_pi(tmp_path: Path) ->
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     key = f"IMG{uuid4().hex[:6].upper()}"
-    image_path = str(tmp_path / "shot.png")
+    attachment_folder = tmp_path / "attachments"
+    attachment_folder.mkdir()
+    image_path = attachment_folder / "shot.png"
+    image_path.write_bytes(b"png")
     async with factory() as session:
         discovery = Discovery(
             project=Project(name=key, key=key, repository_path=str(tmp_path)),
@@ -277,7 +369,21 @@ async def test_discovery_message_passes_screenshot_path_to_pi(tmp_path: Path) ->
             sequence=1,
             role="user",
             content="Guarda questo",
-            metadata_json={"image_path": image_path},
+            metadata_json={
+                "attachments": [
+                    {
+                        "name": "shot.png",
+                        "path": str(image_path),
+                        "kind": "image",
+                        "content_type": "image/png",
+                    },
+                    {
+                        "name": "sample.json",
+                        "path": str(tmp_path / "attachments" / "sample.json"),
+                        "kind": "file",
+                    }
+                ],
+            },
         )
         session.add(DiscoveryTurn(discovery=discovery, input_message=message))
         await session.commit()

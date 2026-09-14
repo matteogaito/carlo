@@ -10,11 +10,13 @@ def send(value):
 
 
 session_id = sys.argv[sys.argv.index("--session-id") + 1]
+last_prompt = None
 for line in sys.stdin:
     command = json.loads(line)
     command_id = command.get("id")
     kind = command["type"]
     if kind == "prompt":
+        last_prompt = command
         send({"id": command_id, "type": "response", "command": kind, "success": True})
         send({"type": "agent_start"})
         send({"type": "message_update", "delta": "Repository "})
@@ -37,6 +39,7 @@ for line in sys.stdin:
                 "discoveryCommands": os.getenv("CARLO_DISCOVERY_COMMANDS"),
                 "agentDir": os.getenv("PI_CODING_AGENT_DIR"),
                 "hasModelKey": bool(os.getenv("CARLO_PI_MODEL_API_KEY")),
+                "lastPrompt": last_prompt,
             },
         })
     elif kind == "get_entries":

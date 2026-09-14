@@ -577,7 +577,10 @@ async def test_pi_provider_streams_a_persisted_rpc_conversation(tmp_path: Path) 
         extensions=(guard,),
         environment={"CARLO_DISCOVERY_COMMANDS": '["make verify"]'},
     )
-    events = [event async for event in session.prompt("Inspect auth")]
+    image = {"type": "image", "data": "cG5n", "mimeType": "image/png"}
+    events = [
+        event async for event in session.prompt("Inspect auth", images=(image,))
+    ]
     assert [event.type for event in events] == [
         "agent_start",
         "message_update",
@@ -593,6 +596,12 @@ async def test_pi_provider_streams_a_persisted_rpc_conversation(tmp_path: Path) 
     assert state.session_file == "/sessions/discovery-42.jsonl"
     assert state.context_percent == 12.5
     assert state.raw["discoveryCommands"] == '["make verify"]'
+    assert state.raw["lastPrompt"] == {
+        "id": "carlo-1",
+        "type": "prompt",
+        "message": "Inspect auth",
+        "images": [image],
+    }
     assert state.raw["argv"] == [
         "--mode", "rpc", "--approve", "--session-id", "discovery-42",
         "--session-dir", str(sessions), "--model", "openai/gpt-5.6-sol",
@@ -606,6 +615,102 @@ async def test_pi_provider_streams_a_persisted_rpc_conversation(tmp_path: Path) 
     await session.abort()
     await session.close()
     assert provider.status("discovery-42") == "idle"
+
+
+@pytest.mark.asyncio
+async def test_pi_rpc_accepts_resized_image_events_up_to_eight_mebibytes(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        " command = json.loads(line)\n"
+        " if command['type'] == 'prompt':\n"
+        "  print(json.dumps({'id': command['id'], 'type': 'response', "
+        "'command': 'prompt', 'success': True}), flush=True)\n"
+        "  print(json.dumps({'type': 'message_start', 'message': "
+        "{'role': 'user', 'content': command['images']}}), flush=True)\n"
+        "  print(json.dumps({'type': 'agent_end'}), flush=True)\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+    session = await provider.open_conversation(
+        AgentProfile("discovery", None, None, (), ()),
+        str(tmp_path),
+        "discovery-large-image",
+    )
+
+    events = [
+        event
+        async for event in session.prompt(
+            "Inspect",
+            images=({"type": "image", "data": "x" * (5 * 1024 * 1024), "mimeType": "image/png"},),
+        )
+    ]
+
+    assert [event.type for event in events] == ["message_start", "agent_end"]
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_pi_rpc_logs_stderr_while_session_is_running(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "print('sandbox denied image worker', file=sys.stderr, flush=True)\n"
+        "for _ in sys.stdin: pass\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+
+    with caplog.at_level(logging.WARNING, logger="carlo.provider"):
+        session = await provider.open_conversation(
+            AgentProfile("discovery", None, None, (), ()),
+            str(tmp_path),
+            "discovery-stderr",
+        )
+        for _ in range(50):
+            if "sandbox denied image worker" in caplog.text:
+                break
+            await asyncio.sleep(0.01)
+
+        assert "Pi RPC stderr session=discovery-stderr: sandbox denied image worker" in caplog.text
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_pi_rpc_logs_extension_errors_while_session_is_running(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "print(json.dumps({'type': 'extension_ui_request', 'method': 'notify', "
+        "'notifyType': 'error', 'message': 'sandbox initialization failed'}), flush=True)\n"
+        "for _ in sys.stdin: pass\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+
+    with caplog.at_level(logging.WARNING, logger="carlo.provider"):
+        session = await provider.open_conversation(
+            AgentProfile("discovery", None, None, (), ()),
+            str(tmp_path),
+            "discovery-extension-error",
+        )
+        for _ in range(50):
+            if "sandbox initialization failed" in caplog.text:
+                break
+            await asyncio.sleep(0.01)
+
+        assert "Pi RPC extension session=discovery-extension-error: sandbox initialization failed" in caplog.text
+        await session.close()
 
 
 @pytest.mark.asyncio
