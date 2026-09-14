@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from carlo.domain import (
     AttemptSignal,
+    TaskStage,
+    TaskStatus,
     ValidationSnapshot,
     assess_progress,
     detect_stall,
@@ -34,6 +36,43 @@ from carlo.orchestrator import (
 from carlo.provider import AgentProfile, AgentResult, ContextLimitError
 from carlo.git import GitWorkspace
 from tests.fakes import add_managed_profiles
+
+
+def git(path: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def repository_at(path: Path) -> Path:
+    path.mkdir()
+    git(path, "init", "-b", "main")
+    git(path, "config", "user.name", "Test")
+    git(path, "config", "user.email", "test@example.com")
+    (path / "README.md").write_text("base\n")
+    git(path, "add", "README.md")
+    git(path, "commit", "-m", "base")
+    git(path, "branch", "carlo-Dev")
+    return path
+
+
+async def empty_orchestration_store():
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text(
+                "TRUNCATE events, validation_runs, escalations, attempts, "
+                "plan_revisions, tasks, projects, agent_profiles "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
+    return engine, async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False
+    )
 
 
 def test_fewer_failures_is_progress() -> None:
@@ -135,6 +174,7 @@ async def test_context_limit_rolls_over_to_a_focused_subtask_attempt(
     subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
     subprocess.run(["git", "-C", str(repository), "commit", "-m", "base"], check=True)
     subprocess.run(["git", "-C", str(repository), "branch", "carlo-Dev"], check=True)
+    initial_integration = git(repository, "rev-parse", "carlo-Dev")
 
     engine = create_async_engine("postgresql+psycopg:///carlo_test")
     async with engine.begin() as connection:
@@ -238,7 +278,228 @@ async def test_context_limit_rolls_over_to_a_focused_subtask_attempt(
             else ["context_limit", "context_limit"]
         )
         assert attempts[0].checkpoint_sha
+        integration_tip = git(repository, "rev-parse", "carlo-Dev")
+        if recovery_succeeds:
+            assert integration_tip == task.checkpoint_sha
+        else:
+            assert task.checkpoint_sha
+            assert integration_tip == initial_integration
         assert len(context_events) == (1 if recovery_succeeds else 2)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_standalone_completion_promotes_integration_branch(
+    tmp_path: Path,
+) -> None:
+    repository = repository_at(tmp_path / "repo")
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    checkout = await workspace.prepare("CAR-1", "Feature")
+    (repository / "feature.txt").write_text("done\n")
+    checkpoint = await workspace.checkpoint(checkout, "validated")
+    engine, factory = await empty_orchestration_store()
+    async with factory() as session:
+        project = Project(
+            name="CARLO",
+            key="CAR",
+            repository_path=str(repository),
+            integration_branch="carlo-Dev",
+        )
+        task = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="Feature",
+            goal="Feature",
+            status=TaskStatus.IN_PROGRESS,
+            stage=TaskStage.VALIDATING,
+            branch_name=checkout.branch,
+            worktree_path=str(repository),
+            checkpoint_sha=checkpoint,
+        )
+        session.add_all([project, task])
+        await session.commit()
+
+    async def unused_runner(task_id: str) -> str:
+        raise AssertionError(task_id)
+
+    await Orchestrator(engine, factory, unused_runner)._finish("CAR-1", "validated")
+
+    async with factory() as session:
+        task = await session.get(Task, "CAR-1")
+        events = (
+            await session.scalars(select(Event).where(Event.task_id == "CAR-1"))
+        ).all()
+        assert task is not None
+        assert task.status == TaskStatus.DONE
+        assert git(repository, "rev-parse", "carlo-Dev") == checkpoint
+        assert git(repository, "branch", "--show-current") == "CAR-1_feature"
+        assert any(
+            event.type == "git.integration_promoted"
+            and event.payload
+            == {"integration_branch": "carlo-Dev", "checkpoint": checkpoint}
+            for event in events
+        )
+
+    next_checkout = await GitWorkspace(repository, "carlo-Dev").prepare(
+        "CAR-2", "Next Feature"
+    )
+    assert next_checkout.branch == "CAR-2_nextfeature"
+    assert git(repository, "merge-base", "--is-ancestor", checkpoint, "HEAD") == ""
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_last_subtask_promotes_parent_checkpoint(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    checkout = await workspace.prepare("CAR-1", "Parent Feature")
+    (repository / "first.txt").write_text("first\n")
+    first_checkpoint = await workspace.checkpoint(checkout, "first validated")
+    (repository / "second.txt").write_text("second\n")
+    second_checkpoint = await workspace.checkpoint(checkout, "second validated")
+    assert git(repository, "rev-parse", "carlo-Dev") != second_checkpoint
+
+    engine, factory = await empty_orchestration_store()
+    async with factory() as session:
+        project = Project(
+            name="CARLO",
+            key="CAR",
+            repository_path=str(repository),
+            integration_branch="carlo-Dev",
+        )
+        parent = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="Parent Feature",
+            goal="Parent",
+            status=TaskStatus.IN_PROGRESS,
+            stage=TaskStage.IMPLEMENTING,
+        )
+        first = Task(
+            id="CAR-2",
+            project=project,
+            parent_task_id="CAR-1",
+            subtask_position=0,
+            sequence=2,
+            title="First",
+            goal="First",
+            status=TaskStatus.DONE,
+            stage=TaskStage.COMPLETE,
+            branch_name=checkout.branch,
+            worktree_path=str(repository),
+            checkpoint_sha=first_checkpoint,
+        )
+        second = Task(
+            id="CAR-3",
+            project=project,
+            parent_task_id="CAR-1",
+            subtask_position=1,
+            sequence=3,
+            title="Second",
+            goal="Second",
+            status=TaskStatus.IN_PROGRESS,
+            stage=TaskStage.VALIDATING,
+            branch_name=checkout.branch,
+            worktree_path=str(repository),
+            checkpoint_sha=second_checkpoint,
+        )
+        session.add_all([project, parent, first, second])
+        await session.commit()
+
+    async def unused_runner(task_id: str) -> str:
+        raise AssertionError(task_id)
+
+    await Orchestrator(engine, factory, unused_runner)._finish("CAR-3", "validated")
+
+    async with factory() as session:
+        parent = await session.get(Task, "CAR-1")
+        first = await session.get(Task, "CAR-2")
+        second = await session.get(Task, "CAR-3")
+        promotions = (
+            await session.scalars(
+                select(Event).where(Event.type == "git.integration_promoted")
+            )
+        ).all()
+        assert parent is not None and parent.status == TaskStatus.DONE
+        assert first is not None and first.status == TaskStatus.DONE
+        assert second is not None and second.status == TaskStatus.DONE
+        assert parent.checkpoint_sha == second_checkpoint
+        assert git(repository, "rev-parse", "carlo-Dev") == second_checkpoint
+        assert [(event.task_id, event.payload) for event in promotions] == [
+            (
+                "CAR-1",
+                {
+                    "integration_branch": "carlo-Dev",
+                    "checkpoint": second_checkpoint,
+                },
+            )
+        ]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_diverged_integration_blocks_completion_without_looping(
+    tmp_path: Path,
+) -> None:
+    repository = repository_at(tmp_path / "repo")
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    checkout = await workspace.prepare("CAR-1", "Feature")
+    (repository / "feature.txt").write_text("done\n")
+    checkpoint = await workspace.checkpoint(checkout, "validated")
+    git(repository, "switch", "carlo-Dev")
+    (repository / "other.txt").write_text("other\n")
+    git(repository, "add", "other.txt")
+    git(repository, "commit", "-m", "diverged")
+    diverged_sha = git(repository, "rev-parse", "HEAD")
+    git(repository, "switch", checkout.branch)
+
+    engine, factory = await empty_orchestration_store()
+    async with factory() as session:
+        project = Project(
+            name="CARLO",
+            key="CAR",
+            repository_path=str(repository),
+            integration_branch="carlo-Dev",
+        )
+        task = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="Feature",
+            goal="Feature",
+            status=TaskStatus.IN_PROGRESS,
+            stage=TaskStage.VALIDATING,
+            branch_name=checkout.branch,
+            worktree_path=str(repository),
+            checkpoint_sha=checkpoint,
+        )
+        session.add_all([project, task])
+        await session.commit()
+
+    async def unused_runner(task_id: str) -> str:
+        raise AssertionError(task_id)
+
+    orchestrator = Orchestrator(engine, factory, unused_runner)
+    await orchestrator._finish("CAR-1", "validated")
+
+    async with factory() as session:
+        task = await session.get(Task, "CAR-1")
+        events = (
+            await session.scalars(select(Event).where(Event.task_id == "CAR-1"))
+        ).all()
+        assert task is not None
+        assert task.status == TaskStatus.IN_PROGRESS
+        assert task.stage == TaskStage.BLOCKED
+        assert git(repository, "rev-parse", "carlo-Dev") == diverged_sha
+        assert git(repository, "rev-parse", task.branch_name) == task.checkpoint_sha
+        assert any(
+            event.type == "git.integration_promotion_failed"
+            and "diverged" in event.payload["error"]
+            for event in events
+        )
+    assert await orchestrator.run_next() is None
     await engine.dispose()
 
 

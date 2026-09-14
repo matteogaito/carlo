@@ -211,6 +211,46 @@ class Orchestrator:
             if task is None:
                 raise RuntimeError(f"active task {task_id} disappeared")
             if outcome == "validated":
+                if task.branch_name is not None or task.worktree_path is not None:
+                    checkpoint = task.checkpoint_sha
+                    if checkpoint is None:
+                        raise GitError("validated task has no checkpoint")
+                    target = await self._promotion_target(session, task)
+                    if target is not None:
+                        workspace = GitWorkspace(
+                            Path(task.project.repository_path),
+                            task.project.integration_branch,
+                        )
+                        try:
+                            await workspace.promote(checkpoint)
+                        except GitError as error:
+                            task.status = TaskStatus.IN_PROGRESS
+                            task.stage = TaskStage.BLOCKED
+                            task.version += 1
+                            session.add(
+                                Event(
+                                    task=task,
+                                    type="git.integration_promotion_failed",
+                                    payload={
+                                        "integration_branch": task.project.integration_branch,
+                                        "error": str(error),
+                                    },
+                                )
+                            )
+                            await self._sync_parent(session, task)
+                            await session.commit()
+                            return
+                        target.checkpoint_sha = checkpoint
+                        session.add(
+                            Event(
+                                task=target,
+                                type="git.integration_promoted",
+                                payload={
+                                    "integration_branch": task.project.integration_branch,
+                                    "checkpoint": checkpoint,
+                                },
+                            )
+                        )
                 task.stage = TaskStage.VALIDATING
                 task.status, task.stage = transition(
                     task.status, task.stage, "validated"
@@ -228,6 +268,27 @@ class Orchestrator:
             session.add(Event(task=task, type=event_type, payload={"outcome": outcome}))
             await self._sync_parent(session, task)
             await session.commit()
+
+    @staticmethod
+    async def _promotion_target(
+        session: AsyncSession, task: Task
+    ) -> Task | None:
+        if task.parent_task_id is None:
+            return task
+        parent = await session.scalar(
+            select(Task).where(Task.id == task.parent_task_id).with_for_update()
+        )
+        if parent is None:
+            raise GitError("parent task is missing")
+        unfinished = await session.scalar(
+            select(func.count(Task.id)).where(
+                Task.parent_task_id == parent.id,
+                Task.superseded_at.is_(None),
+                Task.id != task.id,
+                Task.status != TaskStatus.DONE,
+            )
+        )
+        return parent if not unfinished else None
 
     @staticmethod
     async def _sync_parent(session: AsyncSession, child: Task) -> None:

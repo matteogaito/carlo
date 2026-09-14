@@ -126,3 +126,56 @@ async def test_prepare_reports_repository_without_commits(tmp_path: Path) -> Non
         await GitWorkspace(repository, "carlo-Dev").prepare(
             "CAR-5", "Missing branch"
         )
+
+
+@pytest.mark.asyncio
+async def test_promote_fast_forwards_integration_without_switching(
+    tmp_path: Path,
+) -> None:
+    repository = repository_at(tmp_path / "repo")
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    checkout = await workspace.prepare("CAR-1", "Feature")
+    (repository / "feature.txt").write_text("done\n")
+    checkpoint = await workspace.checkpoint(checkout, "validated")
+
+    promoted = await workspace.promote(checkpoint)
+
+    assert promoted == checkpoint
+    assert git(repository, "rev-parse", "carlo-Dev") == checkpoint
+    assert git(repository, "branch", "--show-current") == "CAR-1_feature"
+    assert git(repository, "rev-list", "--merges", "carlo-Dev") == ""
+
+
+@pytest.mark.asyncio
+async def test_promote_is_idempotent(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    checkout = await workspace.prepare("CAR-1", "Feature")
+    checkpoint = await workspace.checkpoint(checkout, "validated")
+
+    assert await workspace.promote(checkpoint) == checkpoint
+    assert await workspace.promote(checkpoint) == checkpoint
+
+
+@pytest.mark.asyncio
+async def test_promote_refuses_diverged_integration_branch(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    checkout = await workspace.prepare("CAR-1", "Feature")
+    (repository / "feature.txt").write_text("done\n")
+    checkpoint = await workspace.checkpoint(checkout, "validated")
+    git(repository, "switch", "carlo-Dev")
+    (repository / "other.txt").write_text("other\n")
+    git(repository, "add", "other.txt")
+    git(repository, "commit", "-m", "diverged")
+    diverged = git(repository, "rev-parse", "HEAD")
+    git(repository, "switch", "CAR-1_feature")
+
+    with pytest.raises(
+        GitError,
+        match="integration branch has diverged from the validated checkpoint",
+    ):
+        await workspace.promote(checkpoint)
+
+    assert git(repository, "rev-parse", "carlo-Dev") == diverged
+    assert git(repository, "branch", "--show-current") == "CAR-1_feature"

@@ -110,6 +110,40 @@ class GitWorkspace:
         )
         return await self._git("rev-parse", "HEAD", cwd=checkout.path)
 
+    async def promote(self, checkpoint: str) -> str:
+        if not (self.repository / ".git").is_dir():
+            raise GitError("registered project is not a direct Git checkout")
+        await self._git("rev-parse", "--git-dir", cwd=self.repository)
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", checkpoint):
+            raise GitError("invalid checkpoint SHA")
+        await self._git(
+            "cat-file", "-e", f"{checkpoint}^{{commit}}", cwd=self.repository
+        )
+        await self._ensure_integration_branch()
+        current = await self._git(
+            "rev-parse",
+            f"refs/heads/{self.integration_branch}",
+            cwd=self.repository,
+        )
+        if await self._git_status(
+            "merge-base",
+            "--is-ancestor",
+            current,
+            checkpoint,
+            cwd=self.repository,
+        ):
+            raise GitError(
+                "integration branch has diverged from the validated checkpoint"
+            )
+        await self._git(
+            "update-ref",
+            f"refs/heads/{self.integration_branch}",
+            checkpoint,
+            current,
+            cwd=self.repository,
+        )
+        return checkpoint
+
     async def diff_hash(self, checkout: Checkout) -> str:
         await self._validate(checkout)
         await self._git("add", "-A", cwd=checkout.path)
