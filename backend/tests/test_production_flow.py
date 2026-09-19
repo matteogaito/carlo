@@ -196,8 +196,11 @@ def test_deploy_is_cross_platform_and_unprivileged() -> None:
     deploy = (ROOT / "scripts" / "deploy.sh").read_text()
     runner = (ROOT / "scripts" / "carlo-service.sh").read_text()
 
-    for target in ("deploy:", "status:", "logs:", "undeploy:"):
+    for target in ("deploy:", "status:", "logs:", "stop:", "undeploy:"):
         assert target in makefile
+    assert "./scripts/deploy.sh stop" in makefile
+    assert "    stop)" in deploy
+    assert "        stop_services" in deploy
     assert "install-mac:" not in makefile
     assert "status-mac:" not in makefile
     assert "uninstall-mac:" not in makefile

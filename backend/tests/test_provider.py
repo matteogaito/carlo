@@ -116,6 +116,31 @@ async def test_pi_provider_resumes_once_after_context_compaction(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_compaction_resume_keeps_one_session_tool_budget(tmp_path: Path) -> None:
+    executable = tmp_path / "fake-pi"
+    counter = tmp_path / "runs"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "run = int(counter.read_text()) if counter.exists() else 0\n"
+        "counter.write_text(str(run + 1))\n"
+        "if run == 0:\n"
+        "  for _ in range(2): print(json.dumps({'type': 'tool_execution_start', 'toolName': 'read'}))\n"
+        "  print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', 'content': [], 'stopReason': 'error', 'errorMessage': 'Prompt too long: exceeds max context window'}}))\n"
+        "else:\n"
+        "  print(json.dumps({'type': 'final', 'output': os.environ['CARLO_MAX_TOOL_CALLS']}))\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+    result = await provider.run(
+        AgentProfile("implementation", None, None, (), ()), "Do it", str(tmp_path),
+        "CAR-1-implementation-1", max_tool_calls=3,
+    )
+    assert result.output == "1"
+
+
+@pytest.mark.asyncio
 async def test_pi_provider_retries_context_compaction_only_once(tmp_path: Path) -> None:
     provider, calls_path = _context_retry_provider(tmp_path, always_fail=True)
 
@@ -190,6 +215,44 @@ async def test_pi_provider_resolves_project_boundary_in_successful_launch(
         "--skill", str(skill_root / "carlo-planning"),
         "Inspect the repo",
     ]
+
+
+@pytest.mark.asyncio
+async def test_implementation_run_loads_preexecution_budget_guard(tmp_path: Path) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "print(json.dumps({'type': 'final', 'output': 'done', 'argv': sys.argv[1:], "
+        "'budget': os.environ.get('CARLO_MAX_TOOL_CALLS')}))\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+    result = await provider.run(
+        AgentProfile("implementation", None, None, (), ()), "Do it", str(tmp_path),
+        "CAR-1-implementation-1", max_tool_calls=2,
+    )
+    assert result.events[-1]["budget"] == "2"
+    assert "carlo-execution-guard.mjs" in " ".join(result.events[-1]["argv"])
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_reports_budget_exceeded_as_distinct_outcome(tmp_path: Path) -> None:
+    from carlo.execution_telemetry import ToolBudgetExceeded
+
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stderr.write('CARLO_TOOL_BUDGET_EXCEEDED\\n')\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions")
+    with pytest.raises(ToolBudgetExceeded):
+        await provider.run(
+            AgentProfile("implementation", None, None, (), ()), "Do it", str(tmp_path),
+            "CAR-1-implementation-1", max_tool_calls=2,
+        )
 
 
 @pytest.mark.asyncio
@@ -312,6 +375,51 @@ async def test_pi_provider_loads_managed_superpowers_and_frontend_skill(
         "frontend-design": "b" * 40,
         "ponytail": "c" * 40,
     }
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_allows_selected_skill_through_runtime_sandbox(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'type': 'final', 'output': 'done'}))\n"
+    )
+    executable.chmod(0o755)
+    project = tmp_path / "project"
+    project.mkdir()
+    skill_root = tmp_path / "skills"
+    skill = skill_root / "carlo-runtime"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: carlo-runtime\n---\n")
+    runtime_root = tmp_path / "runtime"
+    provider = PiProvider(
+        str(executable),
+        tmp_path / "sessions",
+        skill_root=skill_root,
+        runtime_builder=PiRuntimeSnapshotBuilder(runtime_root),
+    )
+
+    await provider.run(
+        AgentProfile(
+            "implementation",
+            None,
+            None,
+            (),
+            ("carlo-runtime",),
+            resolved_model=_resolved_model(),
+        ),
+        "Implement",
+        str(project),
+        "CAR-4-implementation",
+    )
+
+    sandbox = json.loads(
+        (runtime_root / "CAR-4-implementation" / "sandbox.json").read_text()
+    )
+    assert str(skill.resolve()) in sandbox["filesystem"]["allowRead"]
 
 
 @pytest.mark.asyncio

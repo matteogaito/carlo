@@ -8,17 +8,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.discovery_runtime import DiscoveryRuntime
+from carlo.domain import TaskStage, TaskStatus
 from carlo.model_providers import CredentialCipher
 from carlo.models import (
     AgentProfile,
+    Attempt,
     AvailableModel,
     Base,
     Discovery,
     DiscoveryMessage,
     DiscoveryTurn,
+    Escalation,
     Event,
     ModelProvider,
+    PlanRevision,
     Project,
+    Task,
 )
 from carlo.provider import ConversationEvent, ConversationState
 
@@ -154,6 +159,76 @@ async def test_discovery_turn_persists_reply_state_and_memory(tmp_path: Path) ->
     await engine.dispose()
 
 
+class ReworkSession(Session):
+    async def prompt(self, message):
+        assert "Failed task" in message
+        assert "Missing empty case" in message
+        yield ConversationEvent("message_update", {"delta": "Agreed, revising the package."})
+        yield ConversationEvent("tool_execution_end", {"toolName": "task_fix_proposal", "result": {"details": {
+            "action": "revise_task",
+            "summary": "Load before migrating.",
+            "brief_markdown": "Brief",
+            "plan_markdown": "Plan",
+            "package": {"id": "wp-1", "title": "Fix archive"},
+            "packages": [],
+        }}})
+        yield ConversationEvent("agent_end", {})
+
+
+@pytest.mark.asyncio
+async def test_discovery_rework_mode_uses_task_context_and_fix_proposal_tool(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    key = f"RW{uuid4().hex[:6].upper()}"
+    async with factory() as session:
+        project = Project(name=key, key=key, repository_path=str(tmp_path))
+        task = Task(
+            id=f"{key}-1", project=project, sequence=1, title="Fix archive",
+            goal="Persist destinations", status=TaskStatus.FAILED, stage=TaskStage.BLOCKED,
+            approved_plan_revision=1,
+        )
+        plan = PlanRevision(
+            task=task, revision=1, brief_markdown="Brief", plan_markdown="Plan",
+            metadata_json={"implementation_tasks": [{"id": "wp-1", "title": "Fix archive"}]},
+        )
+        session.add_all([project, task, plan])
+        await session.commit()
+        session.add_all([
+            Attempt(task_id=task.id, number=1, instruction="Go", outcome="budget_exceeded"),
+            Escalation(task_id=task.id, reason="work_package", evidence={}, diagnosis="Missing empty case", strategy="revise", status="completed"),
+        ])
+        await session.commit()
+        discovery = Discovery(
+            project=project, task_id=task.id, title="Fix archive", provider_session_id=f"discovery-{key}",
+            state={}, memory_path=str(tmp_path / "MEMORY.md"),
+        )
+        message = DiscoveryMessage(discovery=discovery, sequence=1, role="user", content="Show me the diagnosis")
+        session.add(DiscoveryTurn(discovery=discovery, input_message=message))
+        await session.commit()
+        discovery_id = discovery.id
+
+    provider = Provider()
+    provider.session = ReworkSession()
+    runtime = DiscoveryRuntime(
+        factory, provider, Path("/discovery-guard.mjs"),
+        rework_guard_extension=Path("/rework-guard.mjs"),
+    )
+    assert await runtime.run_next() == discovery_id
+    assert provider.profiles[0].skills == ("carlo-rework",)
+    assert provider.open_kwargs[0]["extensions"] == (Path("/rework-guard.mjs"),)
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        assert discovery.turns[0].status == "COMPLETED"
+        proposal = discovery.state["fix_proposal"]
+        assert proposal["action"] == "revise_task"
+        assert proposal["package"] == {"id": "wp-1", "title": "Fix archive"}
+        assert proposal["packages"] == []
+    await runtime.close()
+    await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_discovery_fails_a_turn_that_stops_emitting_events(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -201,6 +276,233 @@ async def test_discovery_fails_a_turn_that_stops_emitting_events(
         assert discovery.turns[1].status == "COMPLETED"
     assert provider.opened == 2
     assert provider.sessions[0].closed is True
+    await runtime.close()
+    await engine.dispose()
+
+
+class BusySession(Session):
+    def __init__(self):
+        self.attempts = 0
+
+    async def prompt(self, message, *, images=()):
+        self.attempts += 1
+        raise RuntimeError(
+            "Agent is already processing. Specify streamingBehavior "
+            "('steer' or 'followUp') to queue the message."
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    async def close(self):
+        pass
+
+
+class RetryProvider:
+    def __init__(self):
+        self.sessions = [BusySession(), RecoveredSession()]
+        self.opened = 0
+
+    async def open_conversation(self, *args, **kwargs):
+        session = self.sessions[self.opened]
+        self.opened += 1
+        return session
+
+
+@pytest.mark.asyncio
+async def test_discovery_retries_a_transient_agent_busy_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "carlo.discovery_runtime.TRANSIENT_RETRY_DELAY_SECONDS", 0.01, raising=False
+    )
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    key = f"BUSY{uuid4().hex[:6].upper()}"
+    async with factory() as session:
+        discovery = Discovery(
+            project=Project(name=key, key=key, repository_path=str(tmp_path)),
+            title="Busy",
+            provider_session_id=f"discovery-{key}",
+            state={},
+            memory_path=str(tmp_path / "MEMORY.md"),
+        )
+        message = DiscoveryMessage(
+            discovery=discovery, sequence=1, role="user", content="Investigate imports"
+        )
+        session.add(DiscoveryTurn(discovery=discovery, input_message=message))
+        await session.commit()
+        discovery_id = discovery.id
+
+    provider = RetryProvider()
+    runtime = DiscoveryRuntime(factory, provider, Path("/guard.mjs"))
+
+    assert await runtime.run_next() == discovery_id
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        assert discovery.turns[0].status == "QUEUED"
+        assert discovery.messages[-1].role == "system"
+        assert "ritento automaticamente" in discovery.messages[-1].content
+
+    assert await runtime.run_next() == discovery_id
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        assert discovery.turns[0].status == "COMPLETED"
+        assert discovery.messages[-1].content == "Recovered."
+
+    assert provider.opened == 2
+    assert provider.sessions[0].attempts == 1
+    await runtime.close()
+    await engine.dispose()
+
+
+class StateFailureSession(Session):
+    async def prompt(self, message, *, images=()):
+        yield ConversationEvent(
+            "tool_execution_end",
+            {
+                "toolName": "discovery_state",
+                "result": {
+                    "content": [{
+                        "type": "text",
+                        "text": 'Validation failed for tool "discovery_state": '
+                        "task_proposals.0.metadata: must not have additional properties",
+                    }],
+                },
+            },
+        )
+        yield ConversationEvent("message_update", {"delta": "Riprovo con uno stato più piccolo."})
+        yield ConversationEvent(
+            "tool_execution_end",
+            {
+                "toolName": "discovery_state",
+                "result": {
+                    "content": [{"type": "text", "text": "Discovery state recorded."}],
+                    "details": {
+                        "summary": "Done.", "findings": [], "decisions": [],
+                        "unresolved_questions": [], "inspected_resources": [],
+                        "commands": [], "task_proposals": [],
+                    },
+                },
+            },
+        )
+        yield ConversationEvent("agent_end", {})
+
+
+class StateFailureProvider:
+    def __init__(self):
+        self.session = StateFailureSession()
+
+    async def open_conversation(self, *args, **kwargs):
+        return self.session
+
+
+@pytest.mark.asyncio
+async def test_discovery_surfaces_state_validation_failures_in_chat(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    key = f"SF{uuid4().hex[:6].upper()}"
+    async with factory() as session:
+        discovery = Discovery(
+            project=Project(name=key, key=key, repository_path=str(tmp_path)),
+            title="StateFailure",
+            provider_session_id=f"discovery-{key}",
+            state={},
+            memory_path=str(tmp_path / "MEMORY.md"),
+        )
+        message = DiscoveryMessage(
+            discovery=discovery, sequence=1, role="user", content="Investigate imports"
+        )
+        session.add(DiscoveryTurn(discovery=discovery, input_message=message))
+        await session.commit()
+        discovery_id = discovery.id
+
+    runtime = DiscoveryRuntime(factory, StateFailureProvider(), Path("/guard.mjs"))
+    assert await runtime.run_next() == discovery_id
+
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        assert discovery.turns[0].status == "COMPLETED"
+        assert discovery.state["summary"] == "Done."
+        system_messages = [m for m in discovery.messages if m.role == "system"]
+        assert len(system_messages) == 1
+        assert "Validation failed" in system_messages[0].content
+    await runtime.close()
+    await engine.dispose()
+
+
+MISMATCHED_WORK_PACKAGE = {
+    "id": "wp-1", "title": "Archivio", "position": 0,
+    "objective": "Persist destinations.",
+    "files": [
+        {"path": "src/archive.py", "mode": "create", "reason": "New archive"},
+        {"path": "src/store.py", "mode": "edit", "reason": "Wire it in"},
+    ],
+    "interfaces": ["archive persists records"], "changes": {"src/archive.py": "Create the archive", "docs": "stray key"},
+    "constraints": [], "verification": {"commands": ["pytest -q"], "success": "Pass"},
+    "done_when": ["Archive persists records"], "budget": {"max_tool_calls": 20},
+}
+
+
+class MismatchedProposalSession(Session):
+    async def prompt(self, message, *, images=()):
+        yield ConversationEvent("tool_execution_end", {"toolName": "discovery_state", "result": {"details": {
+            "summary": "Ready.", "findings": [], "decisions": [], "unresolved_questions": [],
+            "inspected_resources": [], "commands": [],
+            "task_proposals": [{
+                "id": "archive", "title": "Archivio destinazioni", "megaprompt": "Build the archive.",
+                "depends_on": [], "brief_markdown": "# Brief", "plan_markdown": "# Plan",
+                "metadata": {
+                    "skills": [], "implementation_tasks": [MISMATCHED_WORK_PACKAGE],
+                    "implementation_phases": ["Archivio"], "validation_commands": ["pytest -q"],
+                    "browser_validation": False, "build_required": False, "run_required": False,
+                    "deployment_expected": False, "risk_flags": [], "affected_areas": ["src"],
+                },
+            }],
+        }}})
+        yield ConversationEvent("agent_end", {})
+
+
+class MismatchedProposalProvider:
+    def __init__(self):
+        self.session = MismatchedProposalSession()
+
+    async def open_conversation(self, *args, **kwargs):
+        return self.session
+
+
+@pytest.mark.asyncio
+async def test_discovery_flags_a_proposal_whose_changes_do_not_match_its_files(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    key = f"MM{uuid4().hex[:6].upper()}"
+    async with factory() as session:
+        discovery = Discovery(
+            project=Project(name=key, key=key, repository_path=str(tmp_path)),
+            title="Mismatched", provider_session_id=f"discovery-{key}",
+            state={}, memory_path=str(tmp_path / "MEMORY.md"),
+        )
+        message = DiscoveryMessage(discovery=discovery, sequence=1, role="user", content="Plan it")
+        session.add(DiscoveryTurn(discovery=discovery, input_message=message))
+        await session.commit()
+        discovery_id = discovery.id
+
+    runtime = DiscoveryRuntime(factory, MismatchedProposalProvider(), Path("/guard.mjs"))
+    assert await runtime.run_next() == discovery_id
+
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        assert discovery.turns[0].status == "COMPLETED"
+        proposal = discovery.state["task_proposals"][0]
+        assert "changes must describe every edit/create file" in proposal["validation_error"]
+        system_messages = [m for m in discovery.messages if m.role == "system"]
+        assert len(system_messages) == 1
+        assert "Archivio destinazioni" in system_messages[0].content
+        assert "changes must describe every edit/create file" in system_messages[0].content
     await runtime.close()
     await engine.dispose()
 
@@ -319,6 +621,7 @@ async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path
     assert first_process.profiles[0].resolved_model.external_id == "first"
     assert second_process.profiles[0].resolved_model.external_id == "first"
     assert first_process.profiles[0].skills == (
+        "carlo-runtime",
         "carlo-discovery",
         "frontend-design",
     )

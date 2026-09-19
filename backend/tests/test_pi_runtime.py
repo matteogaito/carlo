@@ -79,6 +79,7 @@ def test_pi_runtime_snapshot_is_isolated_atomic_and_secret_free(tmp_path: Path) 
     assert snapshot.manifest["context_window"] == 65_536
     assert "api_key" not in snapshot.manifest
 
+
     frozen_root = tmp_path / "frozen-package"
     sandbox_root = tmp_path / "sandbox-package"
     frozen_root.mkdir()
@@ -108,6 +109,39 @@ def test_pi_runtime_snapshot_is_isolated_atomic_and_secret_free(tmp_path: Path) 
     assert resumed_runtime.materialize(
         "DIMMELA-1-implementation-1", resolved
     ).packages == (frozen, updated_sandbox)
+
+
+def test_pi_runtime_can_expose_full_131k_window_and_disable_thinking(tmp_path: Path) -> None:
+    from carlo.pi_runtime import PiRuntimeSnapshotBuilder
+    from carlo.provider import ResolvedModel
+
+    model = ResolvedModel(
+        model_provider_id=1,
+        available_model_id=608,
+        provider_slug="omlx",
+        base_url="http://127.0.0.1:11435/v1",
+        api="openai-completions",
+        external_id="Qwen3.8-27B-4bit",
+        display_name="Qwen local",
+        api_key=None,
+        compatibility={},
+        input_modalities=("text",),
+        reasoning=False,
+        context_window=131_072,
+        max_tokens=8_192,
+        compaction_enabled=True,
+        reserve_tokens=8_192,
+        keep_recent_tokens=26_214,
+        context_window_percent=100,
+        sampling_params={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+    snapshot = PiRuntimeSnapshotBuilder(tmp_path).materialize("CAR-1-implementation-1", model)
+    definition = json.loads((snapshot.agent_dir / "models.json").read_text())["providers"]["omlx"]["models"][0]
+    assert definition["contextWindow"] == 131_072
+    assert definition["samplingParams"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    settings = json.loads((snapshot.agent_dir / "settings.json").read_text())
+    assert definition["contextWindow"] - settings["compaction"]["reserveTokens"] == 122_880
 
 
 def test_pi_runtime_cleanup_only_removes_its_temporary_files(tmp_path: Path) -> None:

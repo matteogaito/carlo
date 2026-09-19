@@ -111,6 +111,15 @@ fresh Pi context and starts from the previous child's validated checkpoint; the
 hidden parent completes only after all children complete. A context-limit error
 stops the affected child instead of retrying the same oversized prompt.
 
+New plans hand each child a bounded work package with exact files and verification.
+Implementation gets two local attempts before planner escalation; a correction
+stays automatic only when it preserves the approved scope. Session metrics are
+available in the task detail. For old-format subtasks, use
+`POST /api/tasks/{id}/regenerate-plan` and approve the new revision; completed
+siblings and earlier plan revisions remain untouched. Set
+`CARLO_PI_REQUEST_DIAGNOSTICS=true` only when tracing request structure: it logs
+roles, lengths, hashes, tool count and safe parameters, never message contents.
+
 ## Discoveries
 
 Use **Discoveries** when the change is not clear yet. Pick a project and start a

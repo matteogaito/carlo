@@ -51,8 +51,13 @@ Each proposal contains:
 - `plan_markdown`: ordered, technical implementation strategy with invariants,
   error handling, validation and stopping conditions;
 - `metadata`: the same contract as CARLO planning, including ordered
-  `implementation_tasks` with a self-contained `title`, `prompt`, and concrete
-  `intervention_points` for every context-bounded subtask; plus `packages`,
+  `implementation_tasks` with complete work packages (`id`, `title`, zero-based
+  `position`, `objective`, project-relative `files` with mode/ranges or symbols,
+  `interfaces`, file-keyed `changes`, `constraints`, exact quiet `verification`,
+  `done_when`, and `budget.max_tool_calls`, default 20 and never above 30) for
+  every context-bounded subtask; keep each planned context pack near
+  15,000–20,000 tokens — a task needing more than 30 tool calls is not one
+  outcome, propose several smaller ones instead; plus `packages`,
   standalone `skills`, concise ordered `implementation_phases`, verified
   `validation_commands`, the four validation/deployment booleans, `risk_flags`,
   and `affected_areas`.

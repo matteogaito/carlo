@@ -54,6 +54,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
         "python3 -c \"from pathlib import Path; "
         "assert Path('feature.txt').read_text() == 'done'\""
     )
+    implementation_instructions: list[str] = []
 
     class Provider:
         async def run(
@@ -71,6 +72,17 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
                         "plan_markdown": "# Plan\nCreate feature.txt and validate it.",
                         "metadata": {
                             "skills": ["carlo-ui-design"],
+                            "implementation_tasks": [{
+                                "id": "wp-1", "title": "Create feature", "position": 0,
+                                "objective": "Create feature.txt containing done.",
+                                "files": [{"path": "feature.txt", "mode": "create", "reason": "Requested output"}],
+                                "interfaces": ["feature.txt contains exactly done"],
+                                "changes": {"feature.txt": "Write done into the file"},
+                                "constraints": [],
+                                "verification": {"commands": [validation], "success": "Command exits zero"},
+                                "done_when": ["The feature file exists and validation passes"],
+                                "budget": {"max_tool_calls": 20},
+                            }],
                             "validation_commands": [validation],
                             "browser_validation": False,
                             "build_required": False,
@@ -82,6 +94,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
                     }
                 )
             else:
+                implementation_instructions.append(instruction)
                 Path(cwd, "feature.txt").write_text("done")
                 output = "implemented"
             return AgentResult(session_id, output, (), 0)
@@ -118,14 +131,38 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
             f'/api/tasks/{task["id"]}/approve',
             json={"revision": 1, "version": planned["version"]},
         )
-        assert approved.json()["status"] == "READY"
+        assert approved.json()["status"] == "IN_PROGRESS"
 
         pipeline = ImplementationPipeline(factory, provider, tmp_path / "artifacts")
-        assert await Orchestrator(engine, factory, pipeline.run).run_next() == task["id"]
+        assert await Orchestrator(engine, factory, pipeline.run).run_next() == "CAR-2"
         detail = (await client.get(f'/api/tasks/{task["id"]}')).json()
         assert detail["status"] == "DONE"
-        assert detail["branch_name"] == "CAR-1_feature"
-        assert detail["checkpoint_sha"]
-        assert detail["validations"][0]["classification"] == "VERIFIED"
-        assert any(event["type"] == "execution.completed" for event in detail["events"])
+        child = (await client.get("/api/tasks/CAR-2")).json()
+        assert "Objective: Create feature.txt containing done." in implementation_instructions[0]
+        assert "File: feature.txt (create; not yet present)" in implementation_instructions[0]
+        assert "Verification commands:" in implementation_instructions[0]
+        assert child["branch_name"] == "CAR-1_feature"
+        assert child["checkpoint_sha"]
+        assert child["validations"][0]["classification"] == "VERIFIED"
+        assert any(event["type"] == "execution.completed" for event in child["events"])
+
+        another = (await client.post(
+            "/api/tasks",
+            json={"project_id": project["id"], "title": "Second feature", "goal": "Create feature.txt"},
+        )).json()
+        replanned = (await client.post(f'/api/tasks/{another["id"]}/plan')).json()
+        assert (await client.post(
+            f'/api/tasks/{another["id"]}/approve',
+            json={"revision": 1, "version": replanned["version"]},
+        )).status_code == 200
+        small_budget = ImplementationPipeline(
+            factory, provider, tmp_path / "artifacts", context_pack_budget_tokens=20
+        )
+        assert await Orchestrator(engine, factory, small_budget.run).run_next() == "CAR-4"
+        failed_parent = (await client.get(f'/api/tasks/{another["id"]}')).json()
+        failed_child = (await client.get("/api/tasks/CAR-4")).json()
+        assert failed_child["status"] == "FAILED"
+        assert failed_parent["replan_allowed"] is True
+        assert any(event["type"] == "context_pack.replan_required" for event in failed_child["events"])
+        assert len(implementation_instructions) == 1
     await engine.dispose()

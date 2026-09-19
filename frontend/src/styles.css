@@ -38,6 +38,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .runtime-state { margin-left: auto; display: flex; align-items: center; gap: 10px; font: 600 12px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .06em; }
 .pulse { width: 9px; height: 9px; border-radius: 50%; background: #718078; }
 .pulse.active { background: var(--brass); box-shadow: 0 0 0 5px rgb(201 145 58 / .15); animation: slow-pulse 3.8s ease-in-out infinite; }
+.discovery-indicator { display: flex; align-items: center; gap: 8px; border: 0; padding: 0; color: inherit; background: transparent; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; max-width: 260px; }
+.discovery-indicator span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.discovery-indicator.active span:last-child { color: var(--brass); }
 .connection { margin-left: 14px; color: #d4a19c; }
 .connection.online { color: #8bc6ad; }
 .signed-user { color: #aebbb4; }
@@ -290,6 +293,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .chat-message > span { display: block; margin-bottom: 7px; color: #999; font: 750 9px ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; }
 .chat-message.user { width: fit-content; max-width: 82%; margin-left: auto; padding: 12px 16px; background: #f1f1ef; border-radius: 18px 18px 5px 18px; }
 .chat-message.user > span { text-align: right; }
+.chat-message.system { padding: 10px 14px; color: #6b241d; background: #fbeae7; border: 1px solid #e3b3ac; border-radius: 10px; font-size: 13px; }
+.chat-message.system > span { color: var(--fault); }
 .chat-message p { margin: 0 0 12px; }
 .chat-message pre, .tool-message pre { max-width: 100%; overflow-x: auto; padding: 14px; color: #eee; background: #171717; border-radius: 10px; font: 12px/1.55 ui-monospace, monospace; }
 .chat-message code { font-family: ui-monospace, monospace; }
@@ -325,6 +330,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .proposal details, .proposal summary { min-width: 0; }
 .proposal summary { display: grid; gap: 4px; cursor: pointer; }
 .proposal-state { color: #69756e; font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
+.proposal-error { margin: 0; padding: 8px 10px; color: #6b241d; background: #fbeae7; border: 1px solid #e3b3ac; border-radius: 8px; font-size: 12px; }
 .proposal-plan { margin-top: 10px; padding: 10px; background: white; border-left: 3px solid var(--pine); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .proposal-plan h4 { margin: 10px 0 4px; color: var(--pine); font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
 .proposal-plan h4:first-child { margin-top: 0; }
@@ -447,7 +453,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 @media (max-width: 900px) {
   body { padding-bottom: 64px; }
   .masthead { min-height: 62px; padding: 10px 14px; }
-  .masthead > p, .runtime-state > span:not(.connection), .signed-user, .sign-out { display: none; }
+  .masthead > p, .runtime-state > span:not(.connection), .discovery-indicator span:last-child, .signed-user, .sign-out { display: none; }
   .runtime-state { width: auto; margin-left: auto; }
   .view-tabs { position: fixed; top: auto; bottom: 0; left: 0; right: 0; z-index: 20; transform: none; justify-content: space-around; width: 100%; padding: 7px max(8px, env(safe-area-inset-right)) calc(7px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border: 0; border-top: 1px solid var(--line); border-radius: 0; background: rgb(255 255 255 / .96); }
   .view-tabs button { min-width: 0; min-height: 46px; flex: 1; padding: 7px; font-size: 12px; }

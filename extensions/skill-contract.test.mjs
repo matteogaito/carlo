@@ -9,9 +9,16 @@ test("Discovery skill defines the state and task handoff contracts", async () =>
   }
 });
 
-test("Planning skill splits work at independent validation boundaries", async () => {
+test("Rework skill defines the fix proposal contract", async () => {
+  const skill = await readFile("skills/carlo-rework/SKILL.md", "utf8");
+  for (const required of ["task_fix_proposal", "revise_task", "revise_parent", "objective", "files", "changes", "constraints", "verification", "done_when", "budget"]) {
+    assert.match(skill, new RegExp(required));
+  }
+});
+
+test("Planning skill defines bounded, verifiable work packages", async () => {
   const skill = await readFile("skills/carlo-planning/SKILL.md", "utf8");
-  for (const required of ["independently verifiable outcome", "distinct validation loop", "separate implementation task"]) {
+  for (const required of ["independently verifiable outcome", "15,000–20,000 tokens", "max_tool_calls", "objective", "interfaces", "changes", "constraints", "verification", "done_when"]) {
     assert.match(skill, new RegExp(required));
   }
 });

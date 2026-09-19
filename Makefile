@@ -1,7 +1,7 @@
 UV_CACHE_DIR ?= /tmp/carlo-uv-cache
 export UV_CACHE_DIR
 
-.PHONY: install migrate bootstrap-admin build prod-check prod-api api worker ui test deploy status logs undeploy
+.PHONY: install migrate bootstrap-admin build prod-check prod-api api worker ui test deploy status logs stop undeploy
 
 install:
 	cd backend && uv sync
@@ -47,6 +47,9 @@ status:
 
 logs:
 	@./scripts/deploy.sh logs
+
+stop:
+	@./scripts/deploy.sh stop
 
 undeploy:
 	@./scripts/deploy.sh undeploy

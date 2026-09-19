@@ -423,6 +423,7 @@ class Task(TimestampMixin, Base):
     )
     subtask_position: Mapped[int | None] = mapped_column(Integer)
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    depends_on_task_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
 
     project: Mapped[Project] = relationship(back_populates="tasks", lazy="selectin")
     parent: Mapped["Task | None"] = relationship(
@@ -456,6 +457,9 @@ class Discovery(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(240))
     status: Mapped[str] = mapped_column(String(10), default="OPEN", index=True)
     profile_id: Mapped[int | None] = mapped_column(ForeignKey("agent_profiles.id"))
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), index=True
+    )
     provider_session_id: Mapped[str] = mapped_column(String(160), unique=True)
     session_path: Mapped[str | None] = mapped_column(Text)
     provider_cursor: Mapped[str | None] = mapped_column(String(160))

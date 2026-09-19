@@ -30,6 +30,7 @@ MODEL_CATALOG_LIMIT = 8 * 1024 * 1024
 MANAGED_PROFILE_PACKAGES = ("superpowers", "ponytail")
 DEFAULT_PROFILE_PACKAGES = MANAGED_PROFILE_PACKAGES
 MANAGED_PROFILE_SKILLS = ("frontend-design",)
+GLOBAL_PROFILE_SKILLS = ("carlo-runtime",)
 REQUIRED_PROFILE_SKILLS: dict[str, tuple[str, ...]] = {
     "plan": ("carlo-planning",),
 }
@@ -107,6 +108,61 @@ def calculate_compaction(
     return CompactionTokens(reserve, keep_recent)
 
 
+def validate_runtime_policy(policy: dict[str, Any]) -> None:
+    allowed = {
+        "context_window_percent", "reserve_tokens", "keep_recent_percent",
+        "enable_thinking", "context_window_tokens",
+    }
+    unknown = set(policy) - allowed
+    if unknown:
+        raise ModelProviderError(f"unknown context policy fields: {', '.join(sorted(unknown))}")
+    for key in ("context_window_percent", "keep_recent_percent"):
+        if key in policy and (type(policy[key]) is not int or not 1 <= policy[key] <= 100):
+            raise ModelProviderError(f"{key} must be an integer between 1 and 100")
+    if "reserve_tokens" in policy and (type(policy["reserve_tokens"]) is not int or policy["reserve_tokens"] < 1):
+        raise ModelProviderError("reserve_tokens must be a positive integer")
+    if "context_window_tokens" in policy and (type(policy["context_window_tokens"]) is not int or policy["context_window_tokens"] < 1):
+        raise ModelProviderError("context_window_tokens must be a positive integer")
+    if "enable_thinking" in policy and type(policy["enable_thinking"]) is not bool:
+        raise ModelProviderError("enable_thinking must be a boolean")
+
+
+def resolve_runtime_policy(
+    profile_name: str,
+    policy: dict[str, Any],
+    context_window: int,
+    max_tokens: int,
+    reserve_percent: int,
+    keep_recent_percent: int,
+    *,
+    api: str = "openai-completions",
+) -> tuple[int, int, CompactionTokens, dict[str, Any] | None]:
+    validate_runtime_policy(policy)
+    cap = policy.get("context_window_tokens", 65_536 if profile_name == "implementation" else context_window)
+    context_window = min(context_window, cap)
+    if context_window <= max_tokens:
+        raise ModelProviderError("context_window_tokens must exceed max_tokens")
+    percent = policy.get("context_window_percent", 100 if profile_name == "implementation" else 75)
+    recent_percent = policy.get("keep_recent_percent", keep_recent_percent)
+    exposed_window = max(max_tokens + 1, int(context_window * percent / 100))
+    default_reserve = max(max_tokens, context_window - 56_000) if profile_name == "implementation" else max(
+        max_tokens, int(exposed_window * reserve_percent / 100)
+    )
+    reserve = policy.get("reserve_tokens", default_reserve)
+    if type(reserve) is not int or reserve < max_tokens or reserve >= exposed_window:
+        raise ModelProviderError("reserve_tokens must be at least max_tokens and below the exposed context window")
+    recent_base = exposed_window if profile_name == "implementation" else context_window
+    recent = int(recent_base * recent_percent / 100)
+    if recent >= exposed_window - reserve:
+        raise ModelProviderError("keep_recent_percent does not fit the exposed context window")
+    thinking = policy.get("enable_thinking", False if profile_name == "implementation" else None)
+    sampling = (
+        {"chat_template_kwargs": {"enable_thinking": thinking}}
+        if thinking is not None and api == "openai-completions" else None
+    )
+    return context_window, percent, CompactionTokens(reserve, recent), sampling
+
+
 async def resolve_agent_profile(
     session: AsyncSession,
     record: AgentProfileRecord,
@@ -179,6 +235,7 @@ async def resolve_agent_profile(
     skills = tuple(
         dict.fromkeys(
             (
+                *GLOBAL_PROFILE_SKILLS,
                 *(
                     (workflow_skill,)
                     if workflow_skill
@@ -213,9 +270,6 @@ async def resolve_agent_profile(
         raise ModelProviderError("selected model has no verified context limits")
     reserve_percent = runtime.reserve_percent if runtime else 10
     keep_recent_percent = runtime.keep_recent_percent if runtime else 20
-    compaction = calculate_compaction(
-        context_window, max_tokens, reserve_percent, keep_recent_percent
-    )
     api_key = _provider_api_key(provider, cipher, selected=True)
     compatibility = dict(provider.compatibility)
     default_api = (
@@ -224,6 +278,10 @@ async def resolve_agent_profile(
         else "openai-completions"
     )
     api = str(compatibility.pop("api", default_api))
+    context_window, percent, compaction, sampling_params = resolve_runtime_policy(
+        record.name, record.context_policy or {}, context_window, max_tokens,
+        reserve_percent, keep_recent_percent, api=api,
+    )
     packages: tuple[Any, ...] = (
         tuple(
             ResolvedPiPackage(
@@ -262,6 +320,8 @@ async def resolve_agent_profile(
             compaction_enabled=runtime.compaction_enabled if runtime else True,
             reserve_tokens=compaction.reserve_tokens,
             keep_recent_tokens=compaction.keep_recent_tokens,
+            context_window_percent=percent,
+            sampling_params=sampling_params,
         ),
         packages=packages,
     )

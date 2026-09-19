@@ -29,7 +29,9 @@ def planning_output(
             "plan_markdown": plan,
             "metadata": {
                 "skills": ["testing"],
-                "implementation_tasks": implementation_tasks or [],
+                "implementation_tasks": implementation_tasks if implementation_tasks is not None else [
+                    work_package("Implement task", "Complete the approved goal.")
+                ],
                 "validation_commands": ["pytest -q"],
                 "browser_validation": False,
                 "build_required": False,
@@ -40,6 +42,60 @@ def planning_output(
             },
         }
     )
+
+
+def work_package(title: str, objective: str, position: int = 0) -> dict[str, object]:
+    return {
+        "id": f"wp-{position + 1}", "title": title, "position": position,
+        "objective": objective,
+        "files": [{"path": "backend/carlo/api.py", "mode": "edit", "reason": "API entry point"}],
+        "interfaces": ["Preserve the existing API response contract."],
+        "changes": {"backend/carlo/api.py": objective},
+        "constraints": [],
+        "verification": {"commands": ["pytest -q tests/test_api.py --tb=short"], "success": "Tests pass."},
+        "done_when": ["The endpoint behavior is covered by tests."],
+        "budget": {"max_tool_calls": 20},
+    }
+
+
+@pytest.mark.asyncio
+async def test_legacy_child_can_regenerate_without_touching_done_sibling(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(text(
+            "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+            "user_sessions, project_memberships, users, events, validation_runs, "
+            "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+            "RESTART IDENTITY CASCADE"
+        ))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    async with factory() as session:
+        await add_managed_profiles(session, "plan")
+        project = Project(name="Test", key="TST", repository_path=str(tmp_path))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        done = Task(id="TST-2", project=project, sequence=2, title="Done", goal="Done", parent=parent, subtask_position=0, status=TaskStatus.DONE, stage=TaskStage.COMPLETE)
+        legacy = Task(id="TST-3", project=project, sequence=3, title="Legacy", goal="Finish parser", parent=parent, subtask_position=1, status=TaskStatus.FAILED, stage=TaskStage.BLOCKED, approved_plan_revision=1)
+        session.add_all([project, parent, done, legacy, PlanRevision(task=legacy, revision=1, brief_markdown="Old brief", plan_markdown="Old plan", metadata_json={"implementation_tasks": [{"title": "Legacy", "prompt": "Finish parser"}]}, approved_at=datetime.now(UTC))])
+        await session.commit()
+    provider = FakeProvider(planning_output(implementation_tasks=[work_package("Finish parser", "Finish parser")]))
+    app = create_app(factory, provider, Settings(app_origin="http://test"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        client.headers["Origin"] = "http://test"
+        response = await client.post("/api/tasks/TST-3/regenerate-plan")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["plan"]["revision"] == 2
+        assert data["plan"]["metadata"]["legacy_regeneration"] is True
+        approved = await client.post("/api/tasks/TST-3/approve", json={"revision": 2, "version": data["version"]})
+        assert approved.status_code == 200
+    async with factory() as session:
+        assert (await session.get(Task, "TST-2")).status == TaskStatus.DONE
+        assert (await session.get(Task, "TST-3")).approved_plan_revision == 2
+        assert len((await session.scalars(select(PlanRevision).where(PlanRevision.task_id == "TST-3"))).all()) == 2
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -62,11 +118,7 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
     replacement_tasks = [
-        {
-            "title": f"Replacement {number}",
-            "prompt": f"Implement replacement {number}",
-            "intervention_points": [f"part-{number}"],
-        }
+        work_package(f"Replacement {number}", f"Implement replacement {number}", number - 1)
         for number in range(1, 4)
     ]
     provider = FakeProvider(
@@ -135,6 +187,14 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
                     type="execution.context_limit",
                     payload={"error": "Prompt too long"},
                 ),
+                Event(
+                    task=child,
+                    type="execution.session_metrics",
+                    payload={"attempt": 1, "duration_seconds": 4.0, "model_calls": 2,
+                             "tool_calls": 3, "outside_reads": ["README.md"],
+                             "compactions": 1, "peak_prompt_tokens": 100,
+                             "generated_tokens": 20, "outcome": "failed"},
+                ),
             ]
         )
         await session.commit()
@@ -178,8 +238,10 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
             )
             await session.commit()
         before = (await client.get("/api/tasks/PHOTO-1")).json()
+        assert before["execution_summary"]["tool_calls"] == 3
+        assert before["execution_summary"]["outside_reads"] == 1
         assert before["replan_allowed"] is True
-        response = await client.post("/api/tasks/PHOTO-1/replan")
+        response = await client.post("/api/tasks/PHOTO-1/regenerate-plan")
         assert response.status_code == 200
         replanned = response.json()
         assert replanned["stage"] == "awaiting_approval"
@@ -287,7 +349,7 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
             ]
         )
         await session.commit()
-    provider.output = planning_output("# Plan\nNo replacement tasks.")
+    provider.output = planning_output("# Plan\nNo replacement tasks.", [])
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
@@ -296,15 +358,7 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
             json={"username": "admin", "password": "admin-password"},
         )
         client.headers["Origin"] = "http://test"
-        empty_replan = (await client.post("/api/tasks/PHOTO-1/replan")).json()
-        rejected = await client.post(
-            "/api/tasks/PHOTO-1/approve",
-            json={
-                "revision": empty_replan["plan"]["revision"],
-                "version": empty_replan["version"],
-            },
-        )
-        assert rejected.status_code == 409
+        assert (await client.post("/api/tasks/PHOTO-1/replan")).status_code == 502
     async with factory() as session:
         assert await session.scalar(
             select(func.count(Task.id)).where(
@@ -478,11 +532,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
                     "description": "Reuse the existing API boundary and session storage.",
                     "key_points": ["Preserve the current error envelope"],
                     "implementation_tasks": [
-                        {
-                            "title": "Add the login endpoint",
-                            "prompt": "Implement the endpoint using the existing auth service.",
-                            "intervention_points": ["backend/carlo/api.py:create_app"],
-                        }
+                        work_package("Add the login endpoint", "Implement the endpoint using the existing auth service.")
                     ],
                     "skills": ["testing"],
                     "validation_commands": ["pytest -q"],
@@ -496,6 +546,10 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
             }
         )
     )
+    provider.outputs = [
+        planning_output(implementation_tasks=[{"title": "Incomplete", "prompt": "Legacy handoff"}]),
+        provider.output,
+    ]
     provider.events = (
         {"type": "agent_start"},
         {
@@ -559,6 +613,8 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
 
         plan_response = await client.post(f'/api/tasks/{task["id"]}/plan')
         assert plan_response.status_code == 200
+        assert len(provider.calls) == 2
+        assert "implementation_tasks" in provider.calls[1][1]
         assert plan_response.json()["used_skills"] == ["carlo-planning"]
         planned = (await client.get(f'/api/tasks/{task["id"]}')).json()
         assert planned["stage"] == "awaiting_approval"
@@ -647,9 +703,18 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
         )
         assert updated.status_code == 200
         assert "model" not in updated.json()
+        invalid_policy = await client.patch(
+            "/api/agent-profiles/plan",
+            json={"context_policy": {"context_window_percent": 0}},
+        )
+        assert invalid_policy.status_code == 422
 
     assert provider.calls[0][0].name == "plan"
-    assert provider.calls[0][0].skills == ("carlo-planning", "carlo-ui-design")
+    assert provider.calls[0][0].skills == (
+        "carlo-runtime",
+        "carlo-planning",
+        "carlo-ui-design",
+    )
     assert provider.calls[0][1].startswith("/skill:carlo-planning ")
     assert provider.calls[0][2] == str(repository)
     await engine.dispose()
@@ -1047,22 +1112,7 @@ async def test_planning_runs_concurrently_without_the_implementation_lock(
         await session.commit()
     await bootstrap_admin(factory, "admin", "admin-password")
 
-    output = json.dumps(
-        {
-            "brief_markdown": "Brief",
-            "plan_markdown": "Plan",
-            "metadata": {
-                "skills": [],
-                "validation_commands": ["pytest -q"],
-                "browser_validation": False,
-                "build_required": False,
-                "run_required": False,
-                "deployment_expected": False,
-                "risk_flags": [],
-                "affected_areas": [],
-            },
-        }
-    )
+    output = planning_output()
 
     class ConcurrentProvider:
         def __init__(self) -> None:

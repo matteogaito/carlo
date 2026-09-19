@@ -10,15 +10,24 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .models import AgentProfile as ProfileRecord
-from .models import Discovery, DiscoveryMessage, DiscoveryTurn, Event
+from .models import Attempt, Discovery, DiscoveryMessage, DiscoveryTurn, Escalation, Event, PlanRevision, Task
 from .model_providers import (
     CredentialCipher,
     model_runtime_evidence,
     resolve_agent_profile,
 )
 from .provider import AgentProfile, CodingAgentProvider, ConversationEvent, ConversationSession
+from .api import _queue_fix_proposal_fix_request, validate_fix_proposal, validate_task_proposal
 
 EVENT_IDLE_TIMEOUT_SECONDS = 180
+MAX_TRANSIENT_RETRIES = 2
+TRANSIENT_RETRY_DELAY_SECONDS = 1.0
+TRANSIENT_PROVIDER_ERROR_MARKERS = ("already processing",)
+
+
+def _is_transient_provider_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in TRANSIENT_PROVIDER_ERROR_MARKERS)
 
 
 @dataclass
@@ -37,16 +46,19 @@ class DiscoveryRuntime:
         guard_extension: Path,
         max_sessions_per_project: int = 3,
         credential_cipher: CredentialCipher | None = None,
+        rework_guard_extension: Path | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.provider = provider
         self.guard_extension = guard_extension
+        self.rework_guard_extension = rework_guard_extension or guard_extension
         self.max_sessions_per_project = max_sessions_per_project
         self.credential_cipher = credential_cipher
         self._sessions: dict[int, _LiveSession] = {}
         self._active: set[int] = set()
         self._claim_lock = asyncio.Lock()
         self._pool_lock = asyncio.Lock()
+        self._retry_counts: dict[int, int] = {}
 
     async def recover(self) -> None:
         async with self.session_factory() as session:
@@ -111,7 +123,15 @@ class DiscoveryRuntime:
             metadata = input_message.metadata_json or {}
             attachments = metadata.get("attachments") or []
             attachment_folder = Path(discovery.memory_path).resolve().parent / "attachments"
-            memory = _memory_markdown(discovery)
+            is_rework = discovery.task_id is not None
+            workflow_skill = "carlo-rework" if is_rework else "carlo-discovery"
+            terminal_tool = "task_fix_proposal" if is_rework else "discovery_state"
+            guard_extension = self.rework_guard_extension if is_rework else self.guard_extension
+            memory = (
+                await _task_failure_markdown(session, discovery.task_id)
+                if is_rework
+                else _memory_markdown(discovery)
+            )
             pinned_model_id = discovery.state.get("model_runtime", {}).get(
                 "available_model_id"
             )
@@ -128,17 +148,17 @@ class DiscoveryRuntime:
                             "grep",
                             "find",
                             "ls",
-                            "discovery_state",
+                            terminal_tool,
                         ),
-                        workflow_skill="carlo-discovery",
+                        workflow_skill=workflow_skill,
                     )
                     if profile
                     else AgentProfile(
                         "plan",
                         None,
                         None,
-                        ("read", "bash", "grep", "find", "ls", "discovery_state"),
-                        ("carlo-discovery",),
+                        ("read", "bash", "grep", "find", "ls", terminal_tool),
+                        (workflow_skill,),
                         packages=("superpowers", "ponytail"),
                     )
                 )
@@ -160,12 +180,14 @@ class DiscoveryRuntime:
             discovery.provider_session_id,
             project.validation_commands,
             attachment_folder,
+            guard_extension,
         )
         output: list[str] = []
         stream = ""
         state: dict[str, Any] | None = None
         pending_tools: dict[str, dict[str, Any]] = {}
         tools: list[dict[str, Any]] = []
+        state_failures: list[str] = []
         try:
             readable_attachments = list(attachments)
             if metadata.get("image_path"):
@@ -198,11 +220,15 @@ class DiscoveryRuntime:
                     if len(stream) >= 200:
                         await self._emit_delta(turn_id, discovery_id, stream)
                         stream = ""
-                found = _event_state(event)
+                found = _event_state(event, terminal_tool)
                 if found is not None:
                     state = found
+                elif event.type == "tool_execution_end" and event.payload.get("toolName") == terminal_tool:
+                    failure_text = _tool_result_text(event.payload.get("result"))
+                    if failure_text:
+                        state_failures.append(failure_text)
                 tool_key = str(event.payload.get("toolCallId") or event.payload.get("toolName") or "tool")
-                if event.type == "tool_execution_start" and event.payload.get("toolName") != "discovery_state":
+                if event.type == "tool_execution_start" and event.payload.get("toolName") != terminal_tool:
                     pending_tools[tool_key] = {
                         "tool": str(event.payload.get("toolName") or "tool"),
                         "args": event.payload.get("args", {}),
@@ -227,7 +253,7 @@ class DiscoveryRuntime:
             if stream:
                 await self._emit_delta(turn_id, discovery_id, stream)
             provider_state = await live.session.get_state()
-            await self._complete(turn_id, discovery_id, "".join(output), state, provider_state.session_file, tools)
+            await self._complete(turn_id, discovery_id, "".join(output), state, provider_state.session_file, tools, state_failures, is_rework)
         except TimeoutError:
             try:
                 await asyncio.wait_for(live.session.abort(), 5)
@@ -240,7 +266,15 @@ class DiscoveryRuntime:
                 f"Pi produced no activity for {EVENT_IDLE_TIMEOUT_SECONDS:g} seconds",
             )
         except Exception as error:
-            await self._fail(turn_id, discovery_id, str(error))
+            message_text = str(error)
+            retries = self._retry_counts.get(turn_id, 0)
+            if _is_transient_provider_error(message_text) and retries < MAX_TRANSIENT_RETRIES:
+                self._retry_counts[turn_id] = retries + 1
+                await self._discard_session(discovery_id, live)
+                await self._requeue(turn_id, discovery_id, message_text)
+            else:
+                self._retry_counts.pop(turn_id, None)
+                await self._fail(turn_id, discovery_id, message_text)
         finally:
             live.busy = False
             live.used_at = monotonic()
@@ -256,7 +290,7 @@ class DiscoveryRuntime:
         except Exception:
             pass
 
-    async def _acquire(self, discovery_id: int, project_id: int, profile: AgentProfile, cwd: str, session_id: str, validation_commands: list[str], attachment_folder: Path) -> _LiveSession:
+    async def _acquire(self, discovery_id: int, project_id: int, profile: AgentProfile, cwd: str, session_id: str, validation_commands: list[str], attachment_folder: Path, guard_extension: Path) -> _LiveSession:
         while True:
             async with self._pool_lock:
                 existing = self._sessions.get(discovery_id)
@@ -269,7 +303,7 @@ class DiscoveryRuntime:
                         profile,
                         cwd,
                         session_id,
-                        extensions=(self.guard_extension,),
+                        extensions=(guard_extension,),
                         environment={
                             "CARLO_DISCOVERY_COMMANDS": json.dumps(
                                 validation_commands
@@ -288,7 +322,7 @@ class DiscoveryRuntime:
                     continue
             await asyncio.sleep(0.1)
 
-    async def _complete(self, turn_id: int, discovery_id: int, content: str, state: dict[str, Any] | None, session_path: str | None, tools: list[dict[str, Any]]) -> None:
+    async def _complete(self, turn_id: int, discovery_id: int, content: str, state: dict[str, Any] | None, session_path: str | None, tools: list[dict[str, Any]], state_failures: list[str] | None = None, is_rework: bool = False) -> None:
         async with self.session_factory() as session:
             turn = await session.get(DiscoveryTurn, turn_id)
             discovery = await session.get(Discovery, discovery_id)
@@ -306,9 +340,59 @@ class DiscoveryRuntime:
                     )
                 )
                 sequence += 1
-            session.add(DiscoveryMessage(discovery=discovery, sequence=sequence, role="assistant", content=content or "No response was produced."))
+            terminal_tool = "task_fix_proposal" if is_rework else "discovery_state"
+            for failure in state_failures or ():
+                session.add(
+                    DiscoveryMessage(
+                        discovery=discovery,
+                        sequence=sequence,
+                        role="system",
+                        content=f"⚠️ Salvataggio dello stato non riuscito, Pi ha ritentato: {failure[:1500]}",
+                        metadata_json={"tool": terminal_tool, "failed": True},
+                    )
+                )
+                sequence += 1
+            normalized: dict[str, Any] | None = None
+            fix_proposal_error: str | None = None
             if state is not None:
-                normalized = _normalized_state(state)
+                if is_rework:
+                    normalized = await _normalized_fix_proposal(session, discovery.task_id, state)
+                    fix_proposal = normalized.get("fix_proposal")
+                    fix_proposal_error = (
+                        fix_proposal.get("validation_error") if isinstance(fix_proposal, dict) else None
+                    )
+                    if fix_proposal_error:
+                        session.add(
+                            DiscoveryMessage(
+                                discovery=discovery,
+                                sequence=sequence,
+                                role="system",
+                                content=f"⚠️ La correzione proposta non è ancora applicabile: {fix_proposal_error[:1500]}",
+                                metadata_json={"tool": terminal_tool, "failed": True},
+                            )
+                        )
+                        sequence += 1
+                else:
+                    normalized = _normalized_state(state)
+                    for proposal in normalized.get("task_proposals", []):
+                        error = proposal.get("validation_error") if isinstance(proposal, dict) else None
+                        if not error:
+                            continue
+                        session.add(
+                            DiscoveryMessage(
+                                discovery=discovery,
+                                sequence=sequence,
+                                role="system",
+                                content=(
+                                    f"⚠️ La proposta \"{proposal.get('title', 'senza titolo')}\" non è ancora creabile: "
+                                    f"{error[:1500]}"
+                                ),
+                                metadata_json={"proposal_id": proposal.get("id"), "failed": True},
+                            )
+                        )
+                        sequence += 1
+            session.add(DiscoveryMessage(discovery=discovery, sequence=sequence, role="assistant", content=content or "No response was produced."))
+            if normalized is not None:
                 if "model_runtime" in discovery.state:
                     normalized["model_runtime"] = discovery.state["model_runtime"]
                 discovery.state = normalized
@@ -318,17 +402,60 @@ class DiscoveryRuntime:
             turn.finished_at = datetime.now(UTC)
             session.add(Event(discovery=discovery, type="discovery.turn.completed", payload={"turn_id": turn.id}))
             await session.commit()
-            _write_memory(Path(discovery.memory_path), _memory_markdown(discovery))
+            if not is_rework:
+                _write_memory(Path(discovery.memory_path), _memory_markdown(discovery))
+            elif fix_proposal_error:
+                await _queue_fix_proposal_fix_request(session, discovery, fix_proposal_error)
+        self._retry_counts.pop(turn_id, None)
 
     async def _fail(self, turn_id: int, discovery_id: int, error: str) -> None:
         async with self.session_factory() as session:
             turn = await session.get(DiscoveryTurn, turn_id)
+            discovery = await session.get(Discovery, discovery_id)
             if turn is not None:
                 turn.status = "FAILED"
                 turn.error = error[:2000]
                 turn.finished_at = datetime.now(UTC)
                 session.add(Event(discovery_id=discovery_id, type="discovery.turn.failed", payload={"turn_id": turn_id, "error": turn.error}))
+                if discovery is not None:
+                    sequence = max((message.sequence for message in discovery.messages), default=0) + 1
+                    session.add(
+                        DiscoveryMessage(
+                            discovery=discovery,
+                            sequence=sequence,
+                            role="system",
+                            content=f"⚠️ Turno interrotto da un errore: {turn.error}",
+                        )
+                    )
                 await session.commit()
+        self._retry_counts.pop(turn_id, None)
+
+    async def _requeue(self, turn_id: int, discovery_id: int, error: str) -> None:
+        async with self.session_factory() as session:
+            turn = await session.get(DiscoveryTurn, turn_id)
+            discovery = await session.get(Discovery, discovery_id)
+            if turn is not None:
+                turn.status = "QUEUED"
+                turn.started_at = None
+                if discovery is not None:
+                    sequence = max((message.sequence for message in discovery.messages), default=0) + 1
+                    session.add(
+                        DiscoveryMessage(
+                            discovery=discovery,
+                            sequence=sequence,
+                            role="system",
+                            content=f"⚠️ Pi era ancora occupato con il turno precedente, ritento automaticamente: {error[:500]}",
+                        )
+                    )
+                session.add(
+                    Event(
+                        discovery_id=discovery_id,
+                        type="discovery.turn.retrying",
+                        payload={"turn_id": turn_id, "error": error[:2000]},
+                    )
+                )
+                await session.commit()
+        await asyncio.sleep(TRANSIENT_RETRY_DELAY_SECONDS)
 
     async def _should_stop(self, turn_id: int, discovery_id: int) -> bool:
         async with self.session_factory() as session:
@@ -356,6 +483,7 @@ class DiscoveryRuntime:
                     )
                 )
                 await session.commit()
+        self._retry_counts.pop(turn_id, None)
 
     async def _emit_delta(self, turn_id: int, discovery_id: int, delta: str) -> None:
         async with self.session_factory() as session:
@@ -404,12 +532,26 @@ async def _events_with_idle_timeout(events):
             return
 
 
-def _event_state(event: ConversationEvent) -> dict[str, Any] | None:
-    if event.type != "tool_execution_end" or event.payload.get("toolName") != "discovery_state":
+def _event_state(event: ConversationEvent, terminal_tool: str = "discovery_state") -> dict[str, Any] | None:
+    if event.type != "tool_execution_end" or event.payload.get("toolName") != terminal_tool:
         return None
     result = event.payload.get("result")
     details = result.get("details") if isinstance(result, dict) else None
     return details if isinstance(details, dict) else None
+
+
+def _tool_result_text(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    content = result.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts = [
+        str(item.get("text", ""))
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "text"
+    ]
+    return "\n".join(part for part in parts if part)
 
 
 def _normalized_state(state: dict[str, Any]) -> dict[str, Any]:
@@ -418,9 +560,113 @@ def _normalized_state(state: dict[str, Any]) -> dict[str, Any]:
         **{key: list(state.get(key, [])) for key in ("findings", "decisions", "unresolved_questions", "inspected_resources", "commands", "task_proposals")},
     }
     for index, proposal in enumerate(result["task_proposals"], start=1):
-        if isinstance(proposal, dict) and not proposal.get("id"):
+        if not isinstance(proposal, dict):
+            continue
+        if not proposal.get("id"):
             proposal["id"] = f"proposal-{index}"
+        if proposal.get("created_task_id"):
+            proposal.pop("validation_error", None)
+            continue
+        _, detail = validate_task_proposal(proposal)
+        if detail:
+            proposal["validation_error"] = detail
+        else:
+            proposal.pop("validation_error", None)
     return result
+
+
+async def _normalized_fix_proposal(
+    session: AsyncSession, task_id: str | None, state: dict[str, Any]
+) -> dict[str, Any]:
+    package = state.get("package")
+    packages = state.get("packages")
+    proposal = {
+        "action": str(state.get("action", "")),
+        "summary": str(state.get("summary", "")),
+        "brief_markdown": str(state.get("brief_markdown", "")),
+        "plan_markdown": str(state.get("plan_markdown", "")),
+        "package": package if isinstance(package, dict) else None,
+        "packages": list(packages) if isinstance(packages, list) else [],
+    }
+    task = await session.get(Task, task_id) if task_id else None
+    if task is not None and proposal["action"] in {"revise_task", "revise_parent"}:
+        _, detail = await validate_fix_proposal(session, task, proposal)
+        if detail:
+            proposal["validation_error"] = detail
+    return {"fix_proposal": proposal}
+
+
+async def _task_failure_markdown(session: AsyncSession, task_id: str | None) -> str:
+    task = await session.get(Task, task_id) if task_id else None
+    if task is None:
+        return "# Failed task\n\nThe task could not be loaded.\n"
+    plan = (
+        await session.scalar(
+            select(PlanRevision).where(
+                PlanRevision.task_id == task_id,
+                PlanRevision.revision == task.approved_plan_revision,
+            )
+        )
+        if task.approved_plan_revision
+        else None
+    )
+    attempts = (
+        await session.scalars(
+            select(Attempt).where(Attempt.task_id == task_id).order_by(Attempt.number)
+        )
+    ).all()
+    escalations = (
+        await session.scalars(
+            select(Escalation).where(Escalation.task_id == task_id).order_by(Escalation.created_at)
+        )
+    ).all()
+    related_task_ids = [task_id] + [
+        child_id
+        for child_id in (
+            await session.scalars(
+                select(Task.id).where(Task.parent_task_id == task_id, Task.superseded_at.is_(None))
+            )
+        ).all()
+    ]
+    rejection_event = await session.scalar(
+        select(Event)
+        .where(Event.task_id.in_(related_task_ids), Event.type == "escalation.approval_required")
+        .order_by(Event.created_at.desc())
+        .limit(1)
+    )
+    sections = [
+        "# Failed task",
+        "",
+        f"**{task.id}** — {task.title}",
+        task.goal,
+    ]
+    if plan is not None:
+        sections += ["", "## Approved plan", "", plan.brief_markdown, "", plan.plan_markdown]
+        packages = plan.metadata_json.get("implementation_tasks") or []
+        if packages:
+            sections += [
+                "",
+                "## Work package(s)",
+                "```json",
+                json.dumps(packages, indent=2, ensure_ascii=False),
+                "```",
+            ]
+    if attempts:
+        sections += ["", "## Attempts"]
+        sections += [f"- #{attempt.number}: {attempt.outcome or 'unknown'}" for attempt in attempts]
+    if escalations:
+        sections += ["", "## Escalation diagnosis"]
+        sections += [
+            f"- **{escalation.reason}** ({escalation.strategy or 'n/a'}): {escalation.diagnosis or 'no diagnosis recorded'}"
+            for escalation in escalations
+        ]
+    if rejection_event is not None and rejection_event.payload.get("rejected_reason"):
+        sections += [
+            "",
+            "## Why the proposed fix was not applied automatically",
+            rejection_event.payload["rejected_reason"],
+        ]
+    return "\n".join(sections).rstrip() + "\n"
 
 
 def _memory_markdown(discovery: Discovery) -> str:

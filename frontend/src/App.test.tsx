@@ -74,6 +74,8 @@ const api: Api = {
   stopDiscovery: async () => { throw new Error('unused') },
   closeDiscovery: async () => { throw new Error('unused') },
   createDiscoveryTasks: async () => [],
+  reworkChat: async () => { throw new Error('unused') },
+  applyDiscoveryFix: async () => { throw new Error('unused') },
   getTask: async () => task,
   createProject: async () => { throw new Error('unused') },
   createTask: async () => { throw new Error('unused') },
@@ -278,9 +280,17 @@ describe('CARLO board', () => {
           description: 'Reuse the existing session boundary without changing public errors.',
           key_points: ['Keep current clients compatible', 'Validate the complete login flow'],
           implementation_tasks: [{
+            id: 'task-1',
             title: 'Add the session endpoint',
-            prompt: 'Implement login through the existing authentication service.',
-            intervention_points: ['backend/carlo/api.py:create_app', 'backend/tests/test_auth.py'],
+            position: 0,
+            objective: 'Implement login through the existing authentication service.',
+            files: [{ path: 'backend/carlo/api.py', mode: 'edit', ranges: [], symbols: ['create_app'], reason: 'Wire the session endpoint.' }],
+            interfaces: ['POST /api/session'],
+            changes: { 'backend/carlo/api.py': 'Add session endpoint handler.' },
+            constraints: ['Keep the public error envelope unchanged.'],
+            verification: { commands: ['pytest backend/tests/test_auth.py -q'], success: 'Login flow returns a valid session.' },
+            done_when: ['Session endpoint returns 200 with a valid token.'],
+            budget: { max_tool_calls: 20 },
           }],
           planner_profile: {
             name: 'plan', provider: 'pi', model: 'openai/gpt-5.6-sol', effort: 'high',
@@ -334,7 +344,9 @@ describe('CARLO board', () => {
     await userEvent.click(taskTitle)
     expect(disclosure.open).toBe(true)
     expect(screen.getByText('Implement login through the existing authentication service.')).toBeTruthy()
-    expect(screen.getByText('backend/carlo/api.py:create_app')).toBeTruthy()
+    expect(screen.getByText('backend/carlo/api.py')).toBeTruthy()
+    expect(screen.getByText('Keep the public error envelope unchanged.')).toBeTruthy()
+    expect(screen.getByText('Session endpoint returns 200 with a valid token.')).toBeTruthy()
 
     cleanup()
     const approved = { ...planned, plan: { ...planned.plan!, approved_at: '2026-08-23T20:00:00Z' } }
@@ -454,6 +466,40 @@ describe('CARLO board', () => {
     expect(reworkTask).toHaveBeenCalledWith('CAR-1')
   })
 
+  it('opens a rework chat for a failed task and switches to the Discoveries view', async () => {
+    const failed = { ...task, status: 'FAILED' as const, stage: 'blocked' }
+    const discovery: Discovery = {
+      // A freshly created rework-chat discovery starts with an empty state object
+      // (no task_proposals, no summary/findings/...) — only fix_proposal ever appears there.
+      id: 42, project_id: 1, task_id: 'CAR-1', title: 'Fix: Login flow', status: 'OPEN',
+      state: {},
+      final_summary: null, last_active_at: '2026-09-19T08:00:00Z', closed_at: null,
+      current_turn: { id: 1, status: 'QUEUED', kind: 'CHAT', cancel_requested_at: null, error: null },
+      messages: [{ id: 1, sequence: 1, role: 'user', content: 'Il task è fallito. Mostrami la diagnosi e proponi una soluzione.', metadata: {}, created_at: '2026-09-19T08:00:00Z' }],
+    }
+    const reworkChat = vi.fn(async () => discovery)
+    render(<App api={{
+      ...api,
+      listTasks: async () => [failed],
+      getTask: async () => failed,
+      listDiscoveries: async () => [discovery],
+      getDiscovery: async () => discovery,
+      reworkChat,
+    } as Api} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Discuti e correggi' }))
+    expect(reworkChat).toHaveBeenCalledWith('CAR-1')
+    expect(await screen.findByRole('heading', { name: 'Fix: Login flow' })).toBeTruthy()
+    expect(screen.getByText('Il task è fallito. Mostrami la diagnosi e proponi una soluzione.')).toBeTruthy()
+
+    // Opening the Context panel must not crash even though state has none of the
+    // repository-Discovery fields (this reproduces a real "Cannot read properties
+    // of undefined (reading 'filter')" crash from an unguarded state.task_proposals access).
+    await userEvent.click(screen.getByRole('button', { name: 'Context' }))
+    expect(screen.getByRole('heading', { name: 'Context' })).toBeTruthy()
+  })
+
   it('retries a failed subtask without planning', async () => {
     const failed = {
       ...task,
@@ -481,6 +527,37 @@ describe('CARLO board', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Retry subtask' }))
     expect(retrySubtask).toHaveBeenCalledWith('CAR-2')
     expect(screen.queryByRole('button', { name: 'Rework from original request' })).toBeNull()
+  })
+
+  it('offers Retry subtask even when the subtask never reached a checkout', async () => {
+    // A subtask can fail before ever getting a branch/worktree (e.g. a shared
+    // checkout collision) — the backend already resets to a fresh checkout on
+    // retry in that case, so the button must not require branch_name/worktree_path.
+    const neverStarted = {
+      ...task,
+      id: 'CAR-2',
+      status: 'FAILED' as const,
+      stage: 'blocked',
+      parent_task_id: 'CAR-1',
+      approved_plan_revision: 1,
+      branch_name: null,
+      worktree_path: null,
+    }
+    const retrySubtask = vi.fn(async () => ({
+      ...neverStarted,
+      status: 'READY' as const,
+      stage: 'queued',
+    }))
+    render(<App api={{
+      ...api,
+      listTasks: async () => [neverStarted],
+      getTask: async () => neverStarted,
+      retrySubtask,
+    } as Api} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-2.*Login flow/i }))
+    await userEvent.click(screen.getByRole('button', { name: 'Retry subtask' }))
+    expect(retrySubtask).toHaveBeenCalledWith('CAR-2')
   })
 
   it('groups repository actions, confirms a run and opens its console history', async () => {
@@ -790,7 +867,7 @@ describe('CARLO board', () => {
 
   it('continues a persistent Discovery conversation', async () => {
     const discovery: Discovery = {
-      id: 7, project_id: 1, title: 'CSV direction', status: 'OPEN',
+      id: 7, project_id: 1, title: 'CSV direction', status: 'OPEN', task_id: null,
       state: { summary: 'Reuse ingestion.', findings: ['src/ingest.py'], decisions: [], unresolved_questions: [], inspected_resources: ['src/ingest.py'], commands: [], task_proposals: [] },
       final_summary: null, last_active_at: '2026-08-23T08:00:00Z', closed_at: null,
       current_turn: null,
@@ -815,7 +892,7 @@ describe('CARLO board', () => {
 
   it('keeps Discovery attachments local until the message is sent', async () => {
     const discovery: Discovery = {
-      id: 7, project_id: 1, title: 'CSV direction', status: 'OPEN',
+      id: 7, project_id: 1, title: 'CSV direction', status: 'OPEN', task_id: null,
       state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [] },
       final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
     }
@@ -845,7 +922,7 @@ describe('CARLO board', () => {
       revokeObjectURL: vi.fn(),
     })
     const discovery: Discovery = {
-      id: 7, project_id: 1, title: 'Image review', status: 'OPEN',
+      id: 7, project_id: 1, title: 'Image review', status: 'OPEN', task_id: null,
       state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [] },
       final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
     }
@@ -872,7 +949,7 @@ describe('CARLO board', () => {
       metadata: { skills: [], implementation_phases: ['Implement parsing', 'Validate imports'], validation_commands: ['pytest -q'], browser_validation: false, build_required: false, run_required: false, deployment_expected: false, risk_flags: [], affected_areas: ['src/ingest.py'] },
     }
     const discovery: Discovery = {
-      id: 9, project_id: 1, title: 'Plan CSV', status: 'OPEN',
+      id: 9, project_id: 1, title: 'Plan CSV', status: 'OPEN', task_id: null,
       state: { summary: 'CSV is understood.', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [proposal] },
       final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
     }
@@ -883,12 +960,54 @@ describe('CARLO board', () => {
     const chat = document.querySelector<HTMLElement>('.message-stream')!
     expect(within(chat).getByText('Add CSV import')).toBeTruthy()
     await userEvent.click(within(chat).getByRole('button', { name: 'Create all Ready tasks' }))
-    expect(createDiscoveryTasks).toHaveBeenCalledWith(9)
+    expect(createDiscoveryTasks).toHaveBeenCalledWith(9, undefined)
+  })
+
+  it('surfaces the queued fix request in chat when Create task fails validation', async () => {
+    const proposal = {
+      id: 'archive', title: 'Archivio destinazioni', megaprompt: 'Build it.', depends_on: [],
+      brief_markdown: 'Brief', plan_markdown: 'Plan',
+      metadata: { skills: [], implementation_tasks: [{
+        id: 'wp-1', title: 'Archivio', position: 0, objective: 'Persist destinations.',
+        files: [{ path: 'src/archive.py', mode: 'create' as const, ranges: [], symbols: [], reason: 'New archive' }],
+        interfaces: [], changes: { docs: 'stray key' }, constraints: [],
+        verification: { commands: [], success: 'Pass' }, done_when: [], budget: { max_tool_calls: 20 },
+      }], implementation_phases: ['Archivio'], validation_commands: ['pytest -q'], browser_validation: false, build_required: false, run_required: false, deployment_expected: false, risk_flags: [], affected_areas: [] },
+    }
+    const before: Discovery = {
+      id: 11, project_id: 1, title: 'Archivio', status: 'OPEN', task_id: null,
+      state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [proposal] },
+      final_summary: null, last_active_at: '', closed_at: null, current_turn: null,
+      messages: [{ id: 1, sequence: 1, role: 'user', content: 'Plan it', metadata: {}, created_at: '2026-09-19T09:00:00Z' }],
+    }
+    const after: Discovery = {
+      ...before,
+      messages: [
+        ...before.messages!,
+        { id: 2, sequence: 2, role: 'system', content: 'La proposta "Archivio destinazioni" non è creabile: changes must describe every edit/create file and no other file. Correggila e richiama discovery_state con lo stato completo aggiornato.', metadata: {}, created_at: '2026-09-19T09:05:00Z' },
+      ],
+    }
+    const createDiscoveryTasks = vi.fn(async () => {
+      throw new Error("task proposal 'Archivio destinazioni' is not fully planned: changes must describe every edit/create file and no other file — ho chiesto a Pi di correggerla, guarda la chat.")
+    })
+    const getDiscovery = vi.fn(async () => after)
+    const setError = vi.fn()
+    render(<DiscoveriesView api={{
+      ...api, listDiscoveries: async () => [before], getDiscovery, createDiscoveryTasks,
+    }} projects={[]} event={null} setError={setError} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Archivio/ }))
+    const chat = document.querySelector<HTMLElement>('.message-stream')!
+    await userEvent.click(await within(chat).findByRole('button', { name: 'Create all Ready tasks' }))
+
+    expect(setError).toHaveBeenCalledWith(expect.stringContaining('ho chiesto a Pi'))
+    expect(getDiscovery).toHaveBeenCalled()
+    expect(await screen.findByText(/non è creabile/)).toBeTruthy()
   })
 
   it('keeps Discovery task actions disabled until subtasks are planned', async () => {
     const discovery: Discovery = {
-      id: 10, project_id: 1, title: 'Incomplete plan', status: 'OPEN',
+      id: 10, project_id: 1, title: 'Incomplete plan', status: 'OPEN', task_id: null,
       state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [{
         id: 'csv', title: 'Add CSV import', megaprompt: 'Implement CSV import.', depends_on: [],
         brief_markdown: 'Reuse ingestion.', plan_markdown: 'Implement parsing.',
@@ -905,7 +1024,7 @@ describe('CARLO board', () => {
 
   it('renders aggregated realtime Discovery deltas', async () => {
     const discovery: Discovery = {
-      id: 8, project_id: 1, title: 'Streaming', status: 'OPEN',
+      id: 8, project_id: 1, title: 'Streaming', status: 'OPEN', task_id: null,
       state: { summary: '', findings: [], decisions: [], unresolved_questions: [], inspected_resources: [], commands: [], task_proposals: [] },
       final_summary: null, last_active_at: '2026-08-23T08:00:00Z', closed_at: null,
       current_turn: { id: 4, status: 'RUNNING', kind: 'CHAT', cancel_requested_at: null, error: null }, messages: [],

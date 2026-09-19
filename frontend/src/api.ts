@@ -7,10 +7,26 @@ export interface User {
 
 export class AuthenticationRequired extends Error {}
 
+export interface ImplementationTaskFile {
+  path: string
+  mode: 'edit' | 'read_only' | 'create'
+  ranges: { start: number; end: number }[]
+  symbols: string[]
+  reason: string
+}
+
 export interface ImplementationTask {
+  id: string
   title: string
-  prompt: string
-  intervention_points: string[]
+  position: number
+  objective: string
+  files: ImplementationTaskFile[]
+  interfaces: string[]
+  changes: Record<string, string>
+  constraints: string[]
+  verification: { commands: string[]; success: string }
+  done_when: string[]
+  budget: { max_tool_calls: number }
 }
 
 export interface PlannerProfile {
@@ -115,16 +131,28 @@ export interface DiscoveryProposal {
   plan_markdown?: string
   metadata?: Plan['metadata']
   created_task_id?: string
+  validation_error?: string
+}
+
+export interface FixProposal {
+  action: 'revise_task' | 'revise_parent' | ''
+  summary: string
+  brief_markdown: string
+  plan_markdown: string
+  package: ImplementationTask | null
+  packages: ImplementationTask[]
+  validation_error?: string
 }
 
 export interface DiscoveryState {
-  summary: string
-  findings: string[]
-  decisions: string[]
-  unresolved_questions: string[]
-  inspected_resources: string[]
-  commands: string[]
-  task_proposals: DiscoveryProposal[]
+  summary?: string
+  findings?: string[]
+  decisions?: string[]
+  unresolved_questions?: string[]
+  inspected_resources?: string[]
+  commands?: string[]
+  task_proposals?: DiscoveryProposal[]
+  fix_proposal?: FixProposal | null
 }
 
 export interface DiscoveryMessage {
@@ -139,6 +167,7 @@ export interface DiscoveryMessage {
 export interface Discovery {
   id: number
   project_id: number
+  task_id: string | null
   title: string
   status: 'OPEN' | 'CLOSED'
   state: DiscoveryState
@@ -330,6 +359,8 @@ export interface Api {
   stopDiscovery(id: number): Promise<Discovery>
   closeDiscovery(id: number): Promise<Discovery>
   createDiscoveryTasks(id: number, proposalIds?: string[]): Promise<Task[]>
+  reworkChat(taskId: string): Promise<Discovery>
+  applyDiscoveryFix(id: number): Promise<Task>
   getTask(id: string): Promise<Task>
   createProject(input: Pick<Project, 'name' | 'key' | 'repository_path'>): Promise<Project>
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'> & { prompt_filename?: string }): Promise<Task>
@@ -432,6 +463,8 @@ export const httpApi: Api = {
   stopDiscovery: (id) => request(`/api/discoveries/${id}/stop`, { method: 'POST' }),
   closeDiscovery: (id) => request(`/api/discoveries/${id}/close`, { method: 'POST' }),
   createDiscoveryTasks: (id, proposalIds = []) => request(`/api/discoveries/${id}/tasks`, { method: 'POST', body: JSON.stringify({ proposal_ids: proposalIds }) }),
+  reworkChat: (taskId) => request(`/api/tasks/${taskId}/rework-chat`, { method: 'POST' }),
+  applyDiscoveryFix: (id) => request(`/api/discoveries/${id}/apply-fix`, { method: 'POST' }),
   getTask: (id) => request(`/api/tasks/${id}`),
   createProject: (input) => request('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),

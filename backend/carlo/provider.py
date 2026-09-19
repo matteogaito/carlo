@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .maintenance import pi_process_lock
+from .execution_telemetry import ToolBudgetExceeded
 
 PI_JSON_EVENT_LIMIT = 4 * 1024 * 1024
 PI_RPC_JSON_EVENT_LIMIT = 8 * 1024 * 1024
@@ -48,6 +49,8 @@ class ResolvedModel:
     compaction_enabled: bool
     reserve_tokens: int
     keep_recent_tokens: int
+    context_window_percent: int = 75
+    sampling_params: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,11 +185,11 @@ class PiProvider:
         if self.status(session_id) == "running":
             raise ProviderError(f"session is already running: {session_id}")
         self.session_dir.mkdir(parents=True, exist_ok=True)
+        package_paths, external_skills, _ = self._resource_snapshot()
         model, runtime_environment, runtime_packages = self._runtime(
-            profile, session_id, cwd, sandbox_read_paths
+            profile, session_id, cwd, sandbox_read_paths, external_skills
         )
         self._require_sandbox_rg(runtime_packages)
-        package_paths, external_skills, _ = self._resource_snapshot()
         command = [
             self.executable,
             *self._package_arguments(runtime_packages, package_paths),
@@ -236,14 +239,17 @@ class PiProvider:
         cwd: str,
         session_id: str,
         on_event: AgentEventHandler | None = None,
+        *,
+        max_tool_calls: int | None = None,
+        request_diagnostics: bool = False,
     ) -> AgentResult:
         cwd = self._project_boundary(cwd)
         self.session_dir.mkdir(parents=True, exist_ok=True)
+        package_paths, external_skills, resource_revisions = self._resource_snapshot()
         model, runtime_environment, runtime_packages = self._runtime(
-            profile, session_id, cwd
+            profile, session_id, cwd, external_skills=external_skills
         )
         self._require_sandbox_rg(runtime_packages)
-        package_paths, external_skills, resource_revisions = self._resource_snapshot()
         base_command = [
             self.executable,
             *self._package_arguments(runtime_packages, package_paths),
@@ -257,6 +263,10 @@ class PiProvider:
             str(self.session_dir),
         ]
         base_command.extend(self._profile_arguments(profile, model, external_skills))
+        if max_tool_calls is not None:
+            if max_tool_calls < 1:
+                raise ValueError("max_tool_calls must be positive")
+            base_command.extend(("--extension", str(Path(__file__).resolve().parents[2] / "extensions" / "carlo-execution-guard.mjs")))
         if self.debug:
             self._write_debug_replay(
                 session_id,
@@ -271,7 +281,10 @@ class PiProvider:
             instruction,
             "Continue from the compacted session and finish the current task.",
         )
+        tool_calls_consumed = 0
         for retry, prompt in enumerate(prompts):
+            if max_tool_calls is not None and tool_calls_consumed >= max_tool_calls:
+                raise ToolBudgetExceeded(f"tool-call budget exceeded ({max_tool_calls})")
             async with pi_process_lock(self.lock_path, exclusive=False):
                 process = await asyncio.create_subprocess_exec(
                     *base_command,
@@ -280,7 +293,12 @@ class PiProvider:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=PI_JSON_EVENT_LIMIT,
-                    env={**os.environ, **runtime_environment},
+                    env={
+                        **os.environ,
+                        **runtime_environment,
+                        **({"CARLO_MAX_TOOL_CALLS": str(max_tool_calls - tool_calls_consumed)} if max_tool_calls is not None else {}),
+                        **({"CARLO_PI_REQUEST_DIAGNOSTICS": "true"} if request_diagnostics else {}),
+                    },
                 )
                 self._processes[session_id] = process
                 stderr_task = asyncio.create_task(process.stderr.read())
@@ -302,6 +320,8 @@ class PiProvider:
                         if not isinstance(event, dict):
                             raise ProviderError("Pi returned a non-object JSON event")
                         attempt_events.append(event)
+                        if event.get("type") == "tool_execution_start":
+                            tool_calls_consumed += 1
                         if on_event:
                             await on_event(event)
                     await process.wait()
@@ -313,6 +333,13 @@ class PiProvider:
                 finally:
                     self._processes.pop(session_id, None)
                     stderr = await stderr_task
+
+            if request_diagnostics:
+                for line in stderr.decode(errors="replace").splitlines():
+                    if line.startswith("CARLO_PI_REQUEST_DIAGNOSTIC "):
+                        logger.info("Pi request session=%s %s", session_id, line.removeprefix("CARLO_PI_REQUEST_DIAGNOSTIC "))
+            if b"CARLO_TOOL_BUDGET_EXCEEDED" in stderr:
+                raise ToolBudgetExceeded(f"tool-call budget exceeded ({max_tool_calls})")
 
             if process.returncode:
                 raise ProviderError(stderr.decode(errors="replace").strip())
@@ -380,9 +407,18 @@ class PiProvider:
         session_id: str,
         cwd: str,
         read_paths: tuple[Path, ...] = (),
+        external_skills: dict[str, Path] | None = None,
     ) -> tuple[str | None, dict[str, str], tuple[ResolvedPiPackage | str, ...]]:
         if not profile.resolved_model or not self.runtime_builder:
             return profile.model, {}, profile.packages
+        skill_paths = tuple(
+            resolved
+            for skill in profile.skills
+            if (
+                resolved := (external_skills or {}).get(skill)
+                or self.skill_root / skill
+            ).is_dir()
+        )
         snapshot = self.runtime_builder.materialize(
             session_id,
             profile.resolved_model,
@@ -392,7 +428,7 @@ class PiProvider:
                 if isinstance(package, ResolvedPiPackage)
             ),
             project=Path(cwd),
-            read_paths=read_paths,
+            read_paths=(*read_paths, *skill_paths),
         )
         return snapshot.model_pattern, {
             **snapshot.environment,

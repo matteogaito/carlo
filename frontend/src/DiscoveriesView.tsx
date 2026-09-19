@@ -1,13 +1,15 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 
-import type { Api, Discovery, Event, Project } from './api'
+import type { Api, Discovery, DiscoveryProposal, Event, Project } from './api'
 
-export function DiscoveriesView({ api, projects, event, setError }: {
+export function DiscoveriesView({ api, projects, event, setError, openDiscoveryId, onOpenedDiscovery }: {
   api: Api
   projects: Project[]
   event: Event | null
   setError: (message: string) => void
+  openDiscoveryId?: number | null
+  onOpenedDiscovery?: () => void
 }) {
   const [items, setItems] = useState<Discovery[]>([])
   const [selected, setSelected] = useState<Discovery | null>(null)
@@ -27,6 +29,16 @@ export function DiscoveriesView({ api, projects, event, setError }: {
 
   useEffect(() => { void refresh().catch((error) => setError(String(error))) }, [refresh, event?.sequence])
   useEffect(() => {
+    if (openDiscoveryId == null) return
+    setStream('')
+    setActivity('')
+    setAttachments([])
+    void api.getDiscovery(openDiscoveryId)
+      .then(setSelected)
+      .catch((error) => setError(String(error)))
+      .finally(() => onOpenedDiscovery?.())
+  }, [openDiscoveryId])
+  useEffect(() => {
     if (!selected || event?.discovery_id !== selected.id) return
     if (event.type === 'discovery.message.delta' && typeof event.payload.delta === 'string') {
       setStream((value) => value + event.payload.delta)
@@ -44,6 +56,16 @@ export function DiscoveriesView({ api, projects, event, setError }: {
       setActivity('')
     }
   }, [event?.sequence, selected?.id])
+
+  async function createTasks(discoveryId: number, proposalIds?: string[]) {
+    try {
+      await api.createDiscoveryTasks(discoveryId, proposalIds)
+    } catch (error) {
+      setError(String(error))
+    } finally {
+      await refresh()
+    }
+  }
 
   async function open(discovery: Discovery) {
     try {
@@ -98,13 +120,15 @@ export function DiscoveriesView({ api, projects, event, setError }: {
   }
 
   const state = selected?.state
-  const pendingProposals = state?.task_proposals.filter((proposal) => !proposal.created_task_id) || []
+  const pendingProposals = state?.task_proposals?.filter((proposal) => !proposal.created_task_id) || []
   const allProposalsReady = pendingProposals.length > 0 && pendingProposals.every(proposalReady)
+  const fixProposal = state?.fix_proposal
+  const fixReady = Boolean(fixProposal?.action && (fixProposal.package || fixProposal.packages?.length) && !fixProposal.validation_error)
   return <main className={`discoveries-page${selected ? ' conversation-open' : ''}`}>
     <aside className="discovery-list">
       <header><div><span>UNDERSTAND</span><h1>Discoveries</h1></div><button onClick={() => setCreating(true)}>New</button></header>
       {items.map((item) => <button className={selected?.id === item.id ? 'active' : ''} key={item.id} onClick={() => void open(item)}>
-        <span>{projects.find((project) => project.id === item.project_id)?.key || 'PROJECT'} · {item.status}</span>
+        <span>{projects.find((project) => project.id === item.project_id)?.key || 'PROJECT'} · {item.status}{item.task_id ? ` · Fix ${item.task_id}` : ''}</span>
         <strong>{item.title}</strong>
         <small>{item.state.summary || 'Conversation ready'}</small>
       </button>)}
@@ -114,12 +138,14 @@ export function DiscoveriesView({ api, projects, event, setError }: {
     {selected ? <section className="discovery-chat">
       <header>
         <button className="mobile-back" onClick={() => setSelected(null)} aria-label="Back to discoveries">←</button>
-        <div><span>{selected.status}</span><h2>{selected.title}</h2></div>
+        <div><span>{selected.status}{selected.task_id ? ` · Fix ${selected.task_id}` : ''}</span><h2>{selected.title}</h2></div>
         <button onClick={() => setContextOpen(true)}>Context</button>
       </header>
       <div className="message-stream">
         {selected.messages?.map((message) => message.role === 'tool' ?
           <details className="tool-message" key={message.id}><summary>{String(message.metadata?.tool || 'Command output')}</summary><pre>{message.content}</pre></details> :
+          message.role === 'system' ?
+          <article className="chat-message system" key={message.id}><span>Errore</span><Markdown>{message.content}</Markdown></article> :
           <article className={`chat-message ${message.role}`} key={message.id}>
             <span>{message.role === 'user' ? 'You' : 'CARLO'}</span>
             <Markdown>{message.content}</Markdown>
@@ -135,9 +161,17 @@ export function DiscoveriesView({ api, projects, event, setError }: {
           <h3>{pendingProposals.length === 1 ? '1 task is ready' : `${pendingProposals.length} tasks are ready`}</h3>
           {pendingProposals.map((proposal) => <div key={proposal.id}>
             <strong>{proposal.title}</strong>
-            <button disabled={!proposalReady(proposal)} onClick={() => void api.createDiscoveryTasks(selected.id, [proposal.id]).then(refresh).catch((error) => setError(String(error)))}>Create task</button>
+            {proposal.validation_error && <p className="proposal-error">⚠️ {proposal.validation_error}</p>}
+            <button disabled={!proposalReady(proposal)} onClick={() => void createTasks(selected.id, [proposal.id])}>Create task</button>
           </div>)}
-          <button className="create-all" disabled={!allProposalsReady} onClick={() => void api.createDiscoveryTasks(selected.id).then(refresh).catch((error) => setError(String(error)))}>Create all Ready tasks</button>
+          <button className="create-all" disabled={!allProposalsReady} onClick={() => void createTasks(selected.id)}>Create all Ready tasks</button>
+        </section>}
+        {fixProposal && <section className="discovery-actions" aria-label="Fix proposal">
+          <span>PROPOSTA DI CORREZIONE</span>
+          <h3>{fixProposal.action === 'revise_parent' ? 'Ristruttura il task padre' : 'Rivedi questo task'}</h3>
+          <p>{fixProposal.summary}</p>
+          {fixProposal.validation_error && <p className="proposal-error">⚠️ {fixProposal.validation_error}</p>}
+          <button className="create-all" disabled={!fixReady} onClick={() => void api.applyDiscoveryFix(selected.id).then(refresh).catch((error) => setError(String(error)))}>Applica e riprendi</button>
         </section>}
       </div>
       {selected.status === 'OPEN' ? <form className="chat-composer" onSubmit={send}>
@@ -159,17 +193,18 @@ export function DiscoveriesView({ api, projects, event, setError }: {
       <Context title="Open questions" values={state?.unresolved_questions || []} />
       <Context title="Files explored" values={state?.inspected_resources || []} code />
       <Context title="Commands" values={state?.commands || []} code />
-      {!!state?.task_proposals.length && <section><h3>Ready tasks</h3>{state.task_proposals.map((proposal) => <article className="proposal" key={proposal.id}>
+      {!!state?.task_proposals?.length && <section><h3>Ready tasks</h3>{state.task_proposals.map((proposal) => <article className="proposal" key={proposal.id}>
         {proposal.created_task_id ? <><strong>{proposal.title}</strong><span className="proposal-state">Created · {proposal.created_task_id}</span></> : <>
           <details>
-            <summary><strong>{proposal.title}</strong><span className="proposal-state">{proposalReady(proposal) ? 'Plan ready' : 'Planning in Discovery…'}</span></summary>
+            <summary><strong>{proposal.title}</strong><span className="proposal-state">{proposal.validation_error ? 'Needs a fix' : proposalReady(proposal) ? 'Plan ready' : 'Planning in Discovery…'}</span></summary>
+            {proposal.validation_error && <p className="proposal-error">⚠️ {proposal.validation_error}</p>}
             {proposalReady(proposal) && <div className="proposal-plan"><h4>Brief</h4><Markdown>{proposal.brief_markdown}</Markdown><h4>Plan</h4><Markdown>{proposal.plan_markdown}</Markdown>
               {!!proposal.metadata?.implementation_phases?.length && <ol>{proposal.metadata.implementation_phases.map((phase) => <li key={phase}>{phase}</li>)}</ol>}
             </div>}
           </details>
-          <button disabled={!proposalReady(proposal)} onClick={() => void api.createDiscoveryTasks(selected.id, [proposal.id]).then(refresh)}>Create Ready task</button>
+          <button disabled={!proposalReady(proposal)} onClick={() => void createTasks(selected.id, [proposal.id])}>Create Ready task</button>
         </>}
-      </article>)}<button className="create-all" disabled={!allProposalsReady} onClick={() => void api.createDiscoveryTasks(selected.id).then(refresh)}>Create all Ready tasks</button></section>}
+      </article>)}<button className="create-all" disabled={!allProposalsReady} onClick={() => void createTasks(selected.id)}>Create all Ready tasks</button></section>}
       {selected.status === 'OPEN' && <footer><button className="danger" onClick={() => void api.closeDiscovery(selected.id).then(setSelected)}>Close Discovery</button></footer>}
     </aside>}
 
@@ -177,10 +212,11 @@ export function DiscoveriesView({ api, projects, event, setError }: {
   </main>
 }
 
-function proposalReady(proposal: Discovery['state']['task_proposals'][number]): boolean {
+function proposalReady(proposal: DiscoveryProposal): boolean {
   const metadata = proposal.metadata
   return Boolean(
-    proposal.brief_markdown?.trim()
+    !proposal.validation_error
+    && proposal.brief_markdown?.trim()
     && proposal.plan_markdown?.trim()
     && (metadata?.implementation_tasks?.length || metadata?.implementation_phases?.length),
   )

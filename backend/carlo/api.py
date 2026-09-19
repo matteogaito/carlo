@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlparse
 
 from fastapi import (
@@ -27,7 +27,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -47,6 +47,7 @@ from .model_providers import (
     model_runtime_evidence,
     refresh_model_provider,
     resolve_agent_profile,
+    validate_runtime_policy,
 )
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
 from .git import parent_branch_name
@@ -224,11 +225,80 @@ class PlanMetadata(BaseModel):
     risk_flags: list[str]
     affected_areas: list[str]
 
+    @model_validator(mode="after")
+    def ordered_packages(self) -> "PlanMetadata":
+        ids = [item.id for item in self.implementation_tasks]
+        if len(ids) != len(set(ids)):
+            raise ValueError("implementation_tasks ids must be unique")
+        if [item.position for item in self.implementation_tasks] != list(range(len(ids))):
+            raise ValueError("implementation_tasks positions must be zero-based and ordered")
+        return self
+
+
+class FileRange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: int = Field(ge=1)
+    end: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def ordered(self) -> "FileRange":
+        if self.end < self.start:
+            raise ValueError("range end must be at least start")
+        return self
+
+
+class PackageFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1)
+    mode: Literal["edit", "read_only", "create"]
+    ranges: list[FileRange] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+    @field_validator("path")
+    @classmethod
+    def project_relative_path(cls, value: str) -> str:
+        if value.startswith("/") or any(part in {".", "..", ""} for part in value.split("/")):
+            raise ValueError("file path must be project-relative and cannot traverse directories")
+        return value
+
+
+class PackageVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commands: list[str] = Field(min_length=1)
+    success: str = Field(min_length=1)
+
+
+class PackageBudget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_tool_calls: int = Field(default=20, ge=1, le=30)
+
 
 class ImplementationTask(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
     title: str = Field(min_length=1)
-    prompt: str = Field(min_length=1)
-    intervention_points: list[str] = Field(default_factory=list)
+    position: int = Field(ge=0)
+    objective: str = Field(min_length=1)
+    files: list[PackageFile] = Field(min_length=1)
+    interfaces: list[str] = Field(min_length=1)
+    changes: dict[str, str] = Field(min_length=1)
+    constraints: list[str]
+    verification: PackageVerification
+    done_when: list[str] = Field(min_length=1)
+    budget: PackageBudget = Field(default_factory=PackageBudget)
+
+    @model_validator(mode="after")
+    def changes_match_editable_files(self) -> "ImplementationTask":
+        editable = {item.path for item in self.files if item.mode in {"edit", "create"}}
+        if set(self.changes) != editable or any(not value.strip() for value in self.changes.values()):
+            raise ValueError("changes must describe every edit/create file and no other file")
+        return self
 
 
 class PlanPayload(BaseModel):
@@ -360,7 +430,7 @@ async def _materialize_plan_subtasks(
             project=project,
             sequence=sequence,
             title=str(item["title"]),
-            goal=str(item["prompt"]),
+            goal=str(item["objective"]),
             priority=task.priority,
             created_source="plan",
             status=TaskStatus.READY,
@@ -374,7 +444,7 @@ async def _materialize_plan_subtasks(
             **plan.metadata_json,
             "replan": False,
             "title": str(item["title"]),
-            "description": str(item["prompt"]),
+            "description": str(item["objective"]),
             "implementation_tasks": [item],
             "implementation_phases": [str(item["title"])],
         }
@@ -385,7 +455,7 @@ async def _materialize_plan_subtasks(
                     task=child,
                     revision=1,
                     brief_markdown=plan.brief_markdown,
-                    plan_markdown=str(item["prompt"]),
+                    plan_markdown=str(item["objective"]),
                     metadata_json=child_metadata,
                     approved_at=plan.approved_at,
                 ),
@@ -403,28 +473,147 @@ def _proposal_implementation_tasks(
     proposal: dict[str, Any], metadata: dict[str, Any]
 ) -> list[dict[str, Any]]:
     items = metadata.get("implementation_tasks")
-    if items:
-        return items
-    phases = metadata.get("implementation_phases")
-    if not isinstance(phases, list) or not phases:
-        return []
-    intervention_points = metadata.get("affected_areas")
-    if not isinstance(intervention_points, list):
-        intervention_points = []
-    context = str(proposal.get("megaprompt") or "").strip()
-    plan = str(proposal.get("plan_markdown") or "").strip()
-    return [
-        {
-            "title": str(phase),
-            "prompt": (
-                f"{context}\n\nApproved plan:\n{plan}\n\n"
-                f"Implement only this phase: {phase}. Preserve completed earlier phases, "
-                "do not start later phases, and run the relevant declared validations."
-            ),
-            "intervention_points": intervention_points,
-        }
-        for phase in phases
-    ]
+    return items if isinstance(items, list) else []
+
+
+def validate_task_proposal(proposal: dict[str, Any]) -> tuple[PlanPayload | None, str | None]:
+    """Validate a Discovery task_proposal the same way create_discovery_tasks
+    does, without side effects — returns (plan, None) if valid, or (None,
+    human-readable detail) if not. Shared so the check can run as soon as a
+    proposal is produced, not only when a human clicks Create task.
+    """
+    try:
+        metadata = dict(proposal.get("metadata") or {})
+        metadata["implementation_tasks"] = _proposal_implementation_tasks(proposal, metadata)
+        approved_plan = PlanPayload.model_validate(
+            {
+                "brief_markdown": proposal.get("brief_markdown"),
+                "plan_markdown": proposal.get("plan_markdown"),
+                "metadata": metadata,
+            }
+        )
+        if not approved_plan.metadata.implementation_tasks:
+            raise ValueError("implementation_tasks must not be empty")
+        return approved_plan, None
+    except ValueError as error:
+        detail = (
+            "; ".join(
+                f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
+                for item in error.errors(include_input=False, include_url=False)[:5]
+            )
+            if isinstance(error, ValidationError) else str(error)
+        )
+        return None, detail
+
+
+async def validate_fix_proposal(
+    session: AsyncSession, task: Task, proposal: dict[str, Any]
+) -> tuple[PlanPayload | None, str | None]:
+    """Validate a task-rework fix_proposal the same way apply_discovery_fix
+    applies it, without side effects — returns (plan, None) if valid, or
+    (None, human-readable detail) otherwise. Shared so the check can run as
+    soon as Pi proposes a fix, not only when the human clicks "Applica e
+    riprendi".
+    """
+    action = proposal.get("action") if isinstance(proposal, dict) else None
+    if action not in {"revise_task", "revise_parent"}:
+        return None, "action must be revise_task or revise_parent"
+    target = task
+    if action == "revise_parent":
+        if task.parent_task_id is None:
+            return None, "task has no parent to revise"
+        target = await session.get(Task, task.parent_task_id)
+        if target is None:
+            return None, "parent task not found"
+    items = (
+        [proposal.get("package")]
+        if action == "revise_task"
+        else list(proposal.get("packages") or [])
+    )
+    current_plan = (
+        await session.scalar(
+            select(PlanRevision).where(
+                PlanRevision.task_id == target.id,
+                PlanRevision.revision == target.approved_plan_revision,
+            )
+        )
+        if target.approved_plan_revision
+        else None
+    )
+    try:
+        approved_plan = PlanPayload.model_validate(
+            {
+                "brief_markdown": proposal.get("brief_markdown"),
+                "plan_markdown": proposal.get("plan_markdown"),
+                "metadata": {
+                    **(current_plan.metadata_json if current_plan else {}),
+                    "implementation_tasks": items,
+                    "replan": action == "revise_parent",
+                },
+            }
+        )
+        if not approved_plan.metadata.implementation_tasks:
+            raise ValueError("fix proposal has no work packages")
+        return approved_plan, None
+    except ValueError as error:
+        detail = (
+            "; ".join(
+                f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
+                for item in error.errors(include_input=False, include_url=False)[:5]
+            )
+            if isinstance(error, ValidationError) else str(error)
+        )
+        return None, detail
+
+
+async def _queue_proposal_fix_request(
+    session: AsyncSession, discovery: Discovery, proposal: dict[str, Any], detail: str | None
+) -> bool:
+    """When a user tries to create a task from an invalid proposal, ask Pi to
+    fix it in the same Discovery instead of leaving the human to relay the
+    validation error by hand. Returns whether a request was actually queued
+    (a closed Discovery cannot accept a new turn).
+    """
+    content = (
+        f"La proposta \"{proposal.get('title', 'senza titolo')}\" non è creabile: {detail}. "
+        "Correggila e richiama discovery_state con lo stato completo aggiornato."
+    )
+    return await _queue_discovery_fix_request(session, discovery, content)
+
+
+async def _queue_fix_proposal_fix_request(
+    session: AsyncSession, discovery: Discovery, detail: str | None
+) -> bool:
+    """Same self-healing pattern as `_queue_proposal_fix_request`, for the
+    task-rework chat: when "Applica e riprendi" fails validation, ask Pi to
+    correct its `task_fix_proposal` instead of leaving the human to relay a
+    Pydantic error by hand.
+    """
+    content = (
+        f"La proposta di correzione non è applicabile: {detail}. "
+        "Correggila e richiama task_fix_proposal con il pacchetto/i pacchetti completi e corretti."
+    )
+    return await _queue_discovery_fix_request(session, discovery, content)
+
+
+async def _queue_discovery_fix_request(
+    session: AsyncSession, discovery: Discovery, content: str
+) -> bool:
+    if discovery.status != "OPEN":
+        return False
+    sequence = max((message.sequence for message in discovery.messages), default=0) + 1
+    message = DiscoveryMessage(discovery=discovery, sequence=sequence, role="system", content=content)
+    session.add(message)
+    await session.flush()
+    session.add_all(
+        [
+            DiscoveryTurn(discovery=discovery, input_message=message),
+            Event(discovery=discovery, type="discovery.message.queued", payload={}),
+        ]
+    )
+    discovery.last_active_at = datetime.now(UTC)
+    await session.commit()
+    return True
 
 
 def _replan_allowed(task: Task, children: list[Task]) -> bool:
@@ -1167,6 +1356,13 @@ def create_app(
         )
         if selected_model_id is not None:
             await _selectable_model(session, selected_model_id)
+        if "context_policy" in payload.model_fields_set:
+            if payload.context_policy is None:
+                raise HTTPException(422, "context_policy cannot be null")
+            try:
+                validate_runtime_policy(payload.context_policy)
+            except ModelProviderError as error:
+                raise HTTPException(422, str(error)) from error
         if "default_packages" in payload.model_fields_set:
             if payload.default_packages is None:
                 raise HTTPException(422, "default_packages cannot be null")
@@ -1775,26 +1971,15 @@ def create_app(
         ]
         planned: list[PlanPayload] = []
         for proposal in pending:
-            try:
-                metadata = dict(proposal.get("metadata") or {})
-                metadata["implementation_tasks"] = _proposal_implementation_tasks(
-                    proposal, metadata
-                )
-                approved_plan = PlanPayload.model_validate(
-                    {
-                        "brief_markdown": proposal.get("brief_markdown"),
-                        "plan_markdown": proposal.get("plan_markdown"),
-                        "metadata": metadata,
-                    }
-                )
-                if not approved_plan.metadata.implementation_tasks:
-                    raise ValueError("implementation_tasks must not be empty")
-                planned.append(approved_plan)
-            except ValueError as error:
+            approved_plan, detail = validate_task_proposal(proposal)
+            if approved_plan is None:
+                asked_pi = await _queue_proposal_fix_request(session, discovery, proposal, detail)
                 raise HTTPException(
                     409,
-                    f"task proposal '{proposal.get('title', 'untitled')}' is not fully planned",
-                ) from error
+                    f"task proposal '{proposal.get('title', 'untitled')}' is not fully planned: {detail}"
+                    + (" — ho chiesto a Pi di correggerla, guarda la chat." if asked_pi else ""),
+                )
+            planned.append(approved_plan)
         created: list[Task] = []
         for proposal, approved_plan in zip(pending, planned, strict=True):
             try:
@@ -1846,10 +2031,141 @@ def create_app(
             )
             proposal["created_task_id"] = task.id
             created.append(task)
+        # depends_on is documented (carlo-discovery SKILL.md) as proposal *titles*;
+        # also accept proposal ids for robustness.
+        proposal_task_ids = {
+            key: item["created_task_id"]
+            for item in proposals
+            if item.get("created_task_id")
+            for key in (str(item.get("title", "")), str(item.get("id", "")))
+            if key
+        }
+        for proposal, task in zip(pending, created, strict=True):
+            task.depends_on_task_ids = [
+                proposal_task_ids[dep]
+                for dep in proposal.get("depends_on", [])
+                if dep in proposal_task_ids and proposal_task_ids[dep] != task.id
+            ]
         discovery.state = {**discovery.state, "task_proposals": proposals}
         session.add(Event(discovery=discovery, type="discovery.tasks.created", payload={"task_ids": [task.id for task in created]}))
         await session.commit()
         return [await _task_view(session, task) for task in created]
+
+    @api.post("/tasks/{task_id}/rework-chat", status_code=status.HTTP_201_CREATED)
+    async def rework_chat(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await _task_or_404(session, task_id, lock=True)
+        if not _task_is_stuck(task):
+            raise HTTPException(409, "task is not stuck")
+        existing = await session.scalar(
+            select(Discovery)
+            .where(Discovery.task_id == task_id, Discovery.status == "OPEN")
+            .order_by(Discovery.id.desc())
+        )
+        if existing is not None:
+            return await _discovery_view(session, existing)
+        project = await session.get(Project, task.project_id)
+        if project is None:
+            raise HTTPException(404, "project not found")
+        profile = await _profile(session, "escalation")
+        discovery = Discovery(
+            project=project,
+            task_id=task.id,
+            title=f"Fix: {task.title}",
+            profile_id=profile.id,
+            provider_session_id=f"discovery-{uuid4().hex}",
+            state={},
+            memory_path="pending",
+        )
+        session.add(discovery)
+        await session.flush()
+        discovery.memory_path = str(
+            Path(settings.artifact_root).resolve()
+            / "discoveries"
+            / str(discovery.id)
+            / "MEMORY.md"
+        )
+        message = DiscoveryMessage(
+            discovery=discovery,
+            sequence=1,
+            role="user",
+            content="Il task è fallito. Mostrami la diagnosi e proponi una soluzione.",
+        )
+        session.add(message)
+        await session.flush()
+        session.add_all(
+            [
+                DiscoveryTurn(discovery=discovery, input_message=message),
+                Event(discovery=discovery, type="discovery.created", payload={"task_id": task.id}),
+            ]
+        )
+        await session.commit()
+        return await _discovery_view(session, discovery)
+
+    @api.post("/discoveries/{discovery_id}/apply-fix")
+    async def apply_discovery_fix(
+        discovery_id: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        discovery = await _discovery_or_404(session, discovery_id, lock=True)
+        if discovery.task_id is None:
+            raise HTTPException(409, "discovery is not a task rework chat")
+        proposal = discovery.state.get("fix_proposal")
+        if not isinstance(proposal, dict) or proposal.get("action") not in {"revise_task", "revise_parent"}:
+            raise HTTPException(409, "no fix proposal is ready to apply")
+        task = await _task_or_404(session, discovery.task_id, lock=True)
+        approved_plan, detail = await validate_fix_proposal(session, task, proposal)
+        if approved_plan is None:
+            asked_pi = await _queue_fix_proposal_fix_request(session, discovery, detail)
+            raise HTTPException(
+                409,
+                f"fix proposal is not valid: {detail}"
+                + (" — ho chiesto a Pi di correggerla, guarda la chat." if asked_pi else ""),
+            )
+        action = proposal["action"]
+        target = task if action == "revise_task" else await _task_or_404(session, task.parent_task_id, lock=True)
+        if not _task_is_stuck(target):
+            raise HTTPException(409, "target task is not stuck")
+        revision = int(await session.scalar(select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
+            PlanRevision.task_id == target.id,
+        )) or 1)
+        now = datetime.now(UTC)
+        plan = PlanRevision(
+            task=target,
+            revision=revision,
+            brief_markdown=approved_plan.brief_markdown,
+            plan_markdown=approved_plan.plan_markdown,
+            metadata_json={**approved_plan.metadata.model_dump(), "fix_source": discovery.id},
+            approved_at=now,
+        )
+        session.add(plan)
+        await session.flush()
+        fix_action = (
+            "approve_amendment" if target.status == TaskStatus.IN_PROGRESS else "approve_fix"
+        )
+        target.status, target.stage = transition(target.status, target.stage, fix_action)
+        target.approved_plan_revision = revision
+        target.version += 1
+        children: list[Task] = []
+        if action == "revise_parent":
+            old_children = await _active_children(session, target.id, lock=True)
+            for child in old_children:
+                child.superseded_at = now
+            children = await _materialize_plan_subtasks(
+                session, target, plan, approved_plan.metadata.model_dump()["implementation_tasks"]
+            )
+        session.add(Event(
+            task=target,
+            type="task.fix_applied",
+            payload={
+                "revision": revision, "action": action, "discovery_id": discovery.id,
+                "new_children": [child.id for child in children],
+            },
+        ))
+        discovery.status = "CLOSED"
+        discovery.closed_at = now
+        await session.commit()
+        return await _task_view(session, target)
 
     @api.post("/discoveries/{discovery_id}/close")
     async def close_discovery(
@@ -2013,12 +2329,40 @@ def create_app(
             session.add(Event(task=task, type="planning.question", payload=task.planning_question))
             await session.commit()
             return await _task_view(session, task, detail=True)
-        try:
-            output = PlanPayload.model_validate(raw)
-        except ValueError as error:
-            session.add(Event(task=task, type="planning.failed", payload={"error": str(error)}))
-            await session.commit()
-            raise HTTPException(502, str(error)) from error
+        output: PlanPayload | None = None
+        for repair in range(3):
+            try:
+                output = PlanPayload.model_validate(raw)
+                if not output.metadata.implementation_tasks:
+                    raise ValueError("metadata.implementation_tasks must contain at least one complete work package")
+                if task.parent_task_id is not None and len(output.metadata.implementation_tasks) != 1:
+                    raise ValueError("a subtask regeneration must contain exactly one complete work package")
+                break
+            except ValueError as error:
+                if repair == 2:
+                    session.add(Event(task=task, type="planning.failed", payload={"error": str(error)}))
+                    await session.commit()
+                    raise HTTPException(502, f"planner returned incomplete work packages: {error}") from error
+                session.add(Event(task=task, type="planning.package_retry", payload={"attempt": repair + 1, "error": str(error)}))
+                await session.commit()
+                correction = (
+                    "The previous plan is invalid. Regenerate the entire JSON plan with complete "
+                    "metadata.implementation_tasks work packages; do not return a partial patch. "
+                    f"Validation errors:\n{error}"
+                )
+                try:
+                    result = await provider.run(
+                        provider_profile, correction, task.project.repository_path,
+                        session_id, on_event=publish,
+                    )
+                    raw = json.loads(result.output)
+                except (ProviderError, ValueError) as retry_error:
+                    raw = {}
+                    if repair == 1:
+                        session.add(Event(task=task, type="planning.failed", payload={"error": str(retry_error)}))
+                        await session.commit()
+                        raise HTTPException(502, str(retry_error)) from retry_error
+        assert output is not None
 
         revision = (
             await session.scalar(
@@ -2030,6 +2374,8 @@ def create_app(
         metadata = output.metadata.model_dump()
         if task.planning_session_id and "-replan-" in task.planning_session_id:
             metadata["replan"] = True
+            if task.parent_task_id is not None:
+                metadata["legacy_regeneration"] = True
         runtime_evidence = model_runtime_evidence(provider_profile)
         metadata["planner_profile"] = {
             "name": profile.name,
@@ -2153,6 +2499,51 @@ def create_app(
                 "task.replan.failed",
                 {"cycle": cycle, "error": str(error.detail)},
             )
+            await session.commit()
+            raise
+
+    @api.post("/tasks/{task_id}/regenerate-plan")
+    async def regenerate_plan(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await _task_or_404(session, task_id, lock=True)
+        if task.parent_task_id is None:
+            return await replan_subtasks(task_id, session)
+        if task.status == TaskStatus.DONE or (task.status == TaskStatus.IN_PROGRESS and task.stage != TaskStage.BLOCKED):
+            raise HTTPException(409, "cannot regenerate a completed or running subtask")
+        plan = await session.scalar(select(PlanRevision).where(
+            PlanRevision.task_id == task.id,
+            PlanRevision.revision == task.approved_plan_revision,
+        ))
+        items = plan.metadata_json.get("implementation_tasks", []) if plan else []
+        if len(items) != 1 or not isinstance(items[0], dict) or "prompt" not in items[0]:
+            raise HTTPException(409, "subtask does not have a legacy plan")
+        previous_status, previous_stage = task.status, task.stage
+        try:
+            task.status, task.stage = transition(task.status, task.stage, "replan")
+            task.status, task.stage = transition(task.status, task.stage, "briefed")
+        except InvalidTransition as error:
+            raise HTTPException(409, str(error)) from error
+        task.planning_session_id = f"{task.id}-replan-{task.version + 1}"
+        task.planning_cursor = None
+        task.planning_question = None
+        task.version += 1
+        session.add(Event(task=task, type="task.replan.started", payload={
+            "previous_status": previous_status.value,
+            "previous_stage": previous_stage.value,
+            "legacy_regeneration": True,
+        }))
+        await session.commit()
+        instruction = (
+            "Regenerate this legacy subtask as exactly one complete work package. "
+            "Preserve its approved goal and do not replan completed siblings. "
+            f"Previous plan:\n{plan.plan_markdown[:8000]}\n\n"
+            + _planning_instruction(task)
+        )
+        try:
+            return await continue_planning(task, session, instruction)
+        except HTTPException as error:
+            await _restore_replan(session, task, "task.replan.failed", {"error": str(error.detail)})
             await session.commit()
             raise
 
@@ -2390,7 +2781,7 @@ def create_app(
         )
         if payload.revision != latest_revision:
             raise HTTPException(409, "only the latest plan revision can be approved")
-        is_replan = plan.metadata_json.get("replan") is True
+        is_replan = plan.metadata_json.get("replan") is True and not plan.metadata_json.get("legacy_regeneration")
         items = plan.metadata_json.get("implementation_tasks") or []
         if is_replan and not items:
             raise HTTPException(409, "replan must contain replacement subtasks")
@@ -2409,6 +2800,9 @@ def create_app(
             action = (
                 "approve_amendment"
                 if task.status == TaskStatus.IN_PROGRESS
+                and task.stage == TaskStage.BLOCKED
+                else "approve_fix"
+                if task.status == TaskStatus.FAILED
                 and task.stage == TaskStage.BLOCKED
                 else "approve"
             )
@@ -2505,6 +2899,18 @@ async def _task_or_404(
     return task
 
 
+def _task_is_stuck(task: Task) -> bool:
+    """Whether a task is blocked and has no other automatic path forward:
+    FAILED/BLOCKED (exhausted retries/escalations), or IN_PROGRESS/BLOCKED with
+    no pending amendment to approve (an escalation asked for a human directly).
+    """
+    if task.stage != TaskStage.BLOCKED:
+        return False
+    if task.status == TaskStatus.FAILED:
+        return True
+    return task.status == TaskStatus.IN_PROGRESS
+
+
 async def _discovery_or_404(
     session: AsyncSession, discovery_id: int, *, lock: bool = False
 ) -> Discovery:
@@ -2567,6 +2973,33 @@ async def _profile(session: AsyncSession, name: str) -> AgentProfileRecord:
     return profile
 
 
+def work_package_example() -> dict[str, Any]:
+    """The exact shape a single `implementation_tasks` entry must have.
+
+    Shared by the planning prompt and the escalation prompt so a diagnosing
+    model is never left to guess field names for the package it must emit.
+    """
+    return {
+        "id": "stable id",
+        "title": "concise task title",
+        "position": 0,
+        "objective": "one to three sentence observable outcome",
+        "files": [
+            {
+                "path": "project-relative path",
+                "mode": "edit | read_only | create",
+                "reason": "why this file is needed",
+            }
+        ],
+        "interfaces": [],
+        "changes": {"project-relative path": "concrete instruction"},
+        "constraints": [],
+        "verification": {"commands": [], "success": "success criterion"},
+        "done_when": [],
+        "budget": {"max_tool_calls": 20},
+    }
+
+
 def _planning_instruction(task: Task, *, fresh_rework: bool = False) -> str:
     contract = {
         "brief_markdown": "evidence-oriented repository understanding",
@@ -2575,13 +3008,7 @@ def _planning_instruction(task: Task, *, fresh_rework: bool = False) -> str:
             "title": "short implementation title",
             "description": "concise description of the approved approach",
             "key_points": [],
-            "implementation_tasks": [
-                {
-                    "title": "concise task title",
-                    "prompt": "self-contained instruction for the implementation agent",
-                    "intervention_points": [],
-                }
-            ],
+            "implementation_tasks": [work_package_example()],
             "skills": [],
             "implementation_phases": [],
             "validation_commands": [],
@@ -2996,6 +3423,20 @@ async def _task_view(
     }
     if not detail:
         return view
+    from .execution_telemetry import summarize_sessions
+
+    measured_ids = [task.id]
+    if task.parent_task_id is None:
+        measured_ids.extend((await session.scalars(select(Task.id).where(Task.parent_task_id == task.id))).all())
+    metric_events = (
+        await session.scalars(
+            select(Event).where(
+                Event.task_id.in_(measured_ids),
+                Event.type == "execution.session_metrics",
+            )
+        )
+    ).all()
+    view["execution_summary"] = summarize_sessions([event.payload for event in metric_events])
     skill_events = (
         await session.scalars(
             select(Event)
@@ -3134,6 +3575,7 @@ async def _discovery_view(
     view: dict[str, Any] = {
         "id": discovery.id,
         "project_id": discovery.project_id,
+        "task_id": discovery.task_id,
         "title": discovery.title,
         "status": discovery.status,
         "state": discovery.state,

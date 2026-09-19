@@ -1,6 +1,7 @@
 import json
 import subprocess
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -19,9 +20,11 @@ from carlo.domain import (
 from carlo.models import (
     AgentProfile as AgentProfileRecord,
     Attempt,
+    AvailableModel,
     Base,
     Escalation,
     Event,
+    ModelProvider,
     PlanRevision,
     Project,
     Task,
@@ -33,8 +36,10 @@ from carlo.orchestrator import (
     TaskStopRequested,
     major_deviation,
 )
-from carlo.provider import AgentProfile, AgentResult, ContextLimitError
+from carlo.provider import AgentProfile, AgentResult, ContextLimitError, ProviderError
 from carlo.git import GitWorkspace
+from carlo.git import Checkout
+from tests.test_work_package_escalation import package as escalation_package
 from tests.fakes import add_managed_profiles
 
 
@@ -73,6 +78,200 @@ async def empty_orchestration_store():
     return engine, async_sessionmaker(
         engine, class_=AsyncSession, expire_on_commit=False
     )
+
+
+@pytest.mark.asyncio
+async def test_work_package_escalation_creates_approved_revision_only_within_scope(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    engine, factory = await empty_orchestration_store()
+    original = escalation_package()
+    revised = {**original, "changes": {"src/parser.py": "Handle empty input too"}}
+    async with factory() as session:
+        project = Project(name="Test", key="TST", repository_path=str(repository), next_task_sequence=3)
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Parse", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Parse", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        plan = PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [original]})
+        parent_plan = PlanRevision(task=parent, revision=1, brief_markdown="Parent brief", plan_markdown="Parent plan", metadata_json={"implementation_tasks": [original]}, approved_at=datetime.now(UTC))
+        session.add_all([project, parent, child, plan, parent_plan])
+        await session.commit()
+
+    class Provider:
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            return AgentResult(session_id, json.dumps({"action": "revise", "diagnosis": "Missing empty case", "package": revised}), (), 0)
+
+    pipeline = ImplementationPipeline(factory, Provider(), tmp_path / "artifacts")
+    outcome = await pipeline._escalate_work_package(
+        child, plan, AgentProfile("escalation", None, None, (), ()),
+        Checkout("main", repository), original, "validation_failed", [],
+    )
+    assert outcome == "retry"
+    async with factory() as session:
+        updated = await session.get(Task, "TST-2")
+        assert updated.approved_plan_revision == 2
+        revision = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == "TST-2", PlanRevision.revision == 2))
+        assert revision.approved_at is not None
+        assert revision.metadata_json["implementation_tasks"] == [revised]
+
+    split_a = {**original, "id": "wp-1a", "budget": {"max_tool_calls": 10}}
+    split_b = {**original, "id": "wp-1b", "title": "Fix parser part 2", "budget": {"max_tool_calls": 10}}
+
+    class SplitProvider:
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            return AgentResult(session_id, json.dumps({"action": "split", "diagnosis": "Need two smaller packages", "packages": [split_a, split_b]}), (), 0)
+
+    pipeline.provider = SplitProvider()
+    assert await pipeline._escalate_work_package(
+        child, plan, AgentProfile("escalation", None, None, (), ()),
+        Checkout("main", repository), original, "validation_failed", [],
+    ) == "failed"
+    async with factory() as session:
+        superseded = await session.get(Task, "TST-2")
+        assert superseded.superseded_at is not None
+        parent_revision = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == "TST-1", PlanRevision.revision == 2))
+        assert parent_revision is not None
+        assert parent_revision.approved_at is not None
+        assert parent_revision.metadata_json["implementation_tasks"] == [split_a, split_b]
+        updated_parent = await session.get(Task, "TST-1")
+        assert updated_parent.approved_plan_revision == 2
+        new_children = (await session.scalars(select(Task).where(Task.parent_task_id == "TST-1", Task.superseded_at.is_(None)))).all()
+        assert sorted(child.title for child in new_children) == ["Fix parser", "Fix parser part 2"]
+
+    out_of_scope_a = {**original, "id": "wp-2a", "files": [*original["files"], {"path": "src/new.py", "mode": "create", "reason": "New"}],
+                       "changes": {**original["changes"], "src/new.py": "Create"}}
+
+    class OutOfScopeSplitProvider:
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            return AgentResult(session_id, json.dumps({"action": "split", "diagnosis": "Needs a new file", "packages": [out_of_scope_a]}), (), 0)
+
+    pipeline.provider = OutOfScopeSplitProvider()
+    assert await pipeline._escalate_work_package(
+        child, plan, AgentProfile("escalation", None, None, (), ()),
+        Checkout("main", repository), original, "validation_failed", [],
+    ) == "blocked"
+    async with factory() as session:
+        blocked_parent = await session.get(Task, "TST-1")
+        assert blocked_parent.stage == TaskStage.BLOCKED
+        assert blocked_parent.approved_plan_revision == 2
+        pending_revision = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == "TST-1", PlanRevision.revision == 3))
+        assert pending_revision is not None
+        assert pending_revision.approved_at is None
+
+    expanded = {**original, "files": [*original["files"], {"path": "src/new.py", "mode": "create", "reason": "New scope"}],
+                "changes": {**original["changes"], "src/new.py": "Create"}}
+
+    class ExpandedProvider:
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            return AgentResult(session_id, json.dumps({"action": "revise", "diagnosis": "Need another file", "package": expanded}), (), 0)
+
+    pipeline.provider = ExpandedProvider()
+    assert await pipeline._escalate_work_package(
+        child, plan, AgentProfile("escalation", None, None, (), ()),
+        Checkout("main", repository), original, "validation_failed", [],
+    ) == "blocked"
+    async with factory() as session:
+        proposal = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == "TST-2", PlanRevision.revision == 3))
+        assert proposal.approved_at is None
+        assert (await session.get(Task, "TST-2")).approved_plan_revision == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_revise_escalation_upgrades_model_only_from_the_second_escalation(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    engine, factory = await empty_orchestration_store()
+    original = escalation_package()
+    revised = {**original, "changes": {"src/parser.py": "Handle empty input too"}}
+    async with factory() as session:
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Parse", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Parse", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1, available_model_id=None)
+        plan = PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [original]})
+        expert_provider = ModelProvider(name="Expert", slug=f"expert-{uuid.uuid4().hex[:12]}", kind="openai-compatible", base_url="http://expert.test/v1")
+        expert_model = AvailableModel(model_provider=expert_provider, external_id="expert-model", status="AVAILABLE", discovered_context_window=65_536, discovered_max_tokens=16_384)
+        session.add_all([project, parent, child, plan, expert_provider, expert_model])
+        await session.commit()
+        expert_model_id = expert_model.id
+
+    class ReviseProvider:
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            return AgentResult(session_id, json.dumps({"action": "revise", "diagnosis": "Missing empty case", "package": revised}), (), 0)
+
+    coder_expert = AgentProfileRecord(name="coder-expert", provider="pi", available_model_id=expert_model_id)
+    pipeline = ImplementationPipeline(factory, ReviseProvider(), tmp_path / "artifacts")
+
+    assert await pipeline._escalate_work_package(
+        child, plan, AgentProfile("escalation", None, None, (), ()),
+        Checkout("main", repository), original, "validation_failed", [],
+        escalation_count=0, coder_expert=coder_expert,
+    ) == "retry"
+    async with factory() as session:
+        assert (await session.get(Task, "TST-2")).available_model_id is None
+        assert await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "escalation.model_upgraded")) is None
+
+    assert await pipeline._escalate_work_package(
+        child, plan, AgentProfile("escalation", None, None, (), ()),
+        Checkout("main", repository), original, "validation_failed", [],
+        escalation_count=1, coder_expert=coder_expert,
+    ) == "retry"
+    async with factory() as session:
+        assert (await session.get(Task, "TST-2")).available_model_id == expert_model_id
+        upgrade_event = await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "escalation.model_upgraded"))
+        assert upgrade_event is not None
+        assert upgrade_event.payload["profile"] == "coder-expert"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_subtask_budget_stops_after_three_local_sessions_then_escalates(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    engine, factory = await empty_orchestration_store()
+    package = {
+        "id": "wp-1", "title": "Create feature", "position": 0,
+        "objective": "Create feature.txt", "files": [{"path": "feature.txt", "mode": "create", "reason": "Output"}],
+        "interfaces": ["feature.txt exists"], "changes": {"feature.txt": "Write done"},
+        "constraints": [], "verification": {"commands": ["test -f feature.txt"], "success": "Exit zero"},
+        "done_when": ["File exists"], "budget": {"max_tool_calls": 2},
+    }
+    async with factory() as session:
+        await add_managed_profiles(session, "implementation", "escalation")
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Create feature", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        session.add_all([project, parent, child, PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [package], "validation_commands": ["test -f feature.txt"]})])
+        await session.commit()
+
+    class Provider:
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            if profile.name == "escalation":
+                return AgentResult(session_id, json.dumps({"action": "blocked", "diagnosis": "Human needed"}), (), 0)
+            for _ in range(3):
+                await on_event({"type": "tool_execution_start", "toolName": "read", "args": {"path": "README.md"}})
+            raise AssertionError("the third tool must be stopped")
+
+    pipeline = ImplementationPipeline(factory, Provider(), tmp_path / "artifacts")
+    assert await pipeline.run("TST-2") == "blocked"
+    async with factory() as session:
+        attempts = (await session.scalars(select(Attempt).where(Attempt.task_id == "TST-2").order_by(Attempt.number))).all()
+        assert [attempt.outcome for attempt in attempts] == ["budget_exceeded", "budget_exceeded", "budget_exceeded"]
+        metrics = (await session.scalars(select(Event).where(Event.task_id == "TST-2", Event.type == "execution.session_metrics"))).all()
+        assert len(metrics) == 3
+        assert all(event.payload["outcome"] == "budget_exceeded" for event in metrics)
+        escalation = await session.scalar(select(Escalation).where(Escalation.task_id == "TST-2"))
+        assert escalation.evidence["reason"] == "repeated_outcome"
+
+    class CrashedProvider:
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            await on_event({"type": "message_end", "message": {"role": "assistant", "usage": {"input": 500, "output": 20}}})
+            raise ProviderError("model unavailable")
+
+    pipeline.provider = CrashedProvider()
+    with pytest.raises(ProviderError, match="model unavailable"):
+        await pipeline.run("TST-2")
+    async with factory() as session:
+        latest = await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "execution.session_metrics").order_by(Event.sequence.desc()))
+        assert latest.payload["outcome"] == "failed"
+        assert latest.payload["model_calls"] == 1
+    await engine.dispose()
 
 
 def test_fewer_failures_is_progress() -> None:
@@ -155,6 +354,19 @@ def test_implementation_instruction_preserves_structured_plan_tasks(
     instruction = ImplementationPipeline._implementation_instruction(task, plan, "follow plan")
 
     assert expected in instruction
+
+
+def test_child_implementation_instruction_contains_prompt_once() -> None:
+    prompt = "Implement only the import workflow."
+    task = Task(id="CAR-2", goal=prompt, parent_task_id="CAR-1")
+    plan = PlanRevision(
+        plan_markdown=prompt,
+        metadata_json={"implementation_tasks": [{"title": "Import", "prompt": prompt}]},
+    )
+
+    instruction = ImplementationPipeline._implementation_instruction(task, plan, "approved_plan")
+
+    assert instruction.count(prompt) == 1
 
 
 @pytest.mark.asyncio
@@ -566,7 +778,19 @@ async def test_fresh_checkout_retry_uses_the_parent_branch_and_full_plan(
             revision=2,
             brief_markdown="Brief",
             plan_markdown="Plan",
-            metadata_json={"skills": [], "validation_commands": ["test -f feature.txt"]},
+            metadata_json={
+                "skills": [], "validation_commands": ["test -f feature.txt"],
+                "implementation_tasks": [{
+                    "id": "wp-1", "title": "Child Feature", "position": 0,
+                    "objective": "Create feature.txt",
+                    "files": [{"path": "feature.txt", "mode": "create", "reason": "Requested output"}],
+                    "interfaces": ["feature.txt exists after implementation"],
+                    "changes": {"feature.txt": "Write fresh content"},
+                    "constraints": [],
+                    "verification": {"commands": ["test -f feature.txt"], "success": "File exists"},
+                    "done_when": ["File is present"], "budget": {"max_tool_calls": 20},
+                }],
+            },
         )
         session.add_all([implementation, escalation, project, parent, task, plan])
         await session.flush()
@@ -593,7 +817,7 @@ async def test_fresh_checkout_retry_uses_the_parent_branch_and_full_plan(
 
     class Provider:
         async def run(self, profile, instruction, cwd, session_id, on_event=None):
-            assert "Approved plan:\nPlan" in instruction
+            assert instruction.count("Create feature.txt") == 1
             Path(cwd, "feature.txt").write_text("fresh\n")
             return AgentResult(session_id, "done", (), 0)
 
@@ -865,7 +1089,7 @@ async def test_stall_escalates_then_local_validation_completes(
         assert completed.payload["skills"] == ["carlo-ui-design"]
     assert "repeated_outcome" in provider.escalation_instruction
     assert provider.implementation_calls == 3
-    assert provider.implementation_skills == ("carlo-ui-design",)
+    assert provider.implementation_skills == ("carlo-runtime", "carlo-ui-design")
     await engine.dispose()
 
 
@@ -1021,4 +1245,189 @@ async def test_stop_kills_running_provider_step() -> None:
         )
         assert event is not None
         assert event.payload["summary"] == "thinking hard"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_root_task_blocks_a_later_root_task_in_the_same_project() -> None:
+    engine, factory = await empty_orchestration_store()
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/tmp/unused")
+        first = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="First",
+            goal="First",
+            status=TaskStatus.FAILED,
+            stage=TaskStage.BLOCKED,
+        )
+        second = Task(
+            id="CAR-2",
+            project=project,
+            sequence=2,
+            title="Second",
+            goal="Second",
+            status=TaskStatus.READY,
+            stage=TaskStage.QUEUED,
+        )
+        session.add_all([project, first, second])
+        await session.commit()
+
+    async def unused_runner(task_id: str) -> str:
+        raise AssertionError(task_id)
+
+    orchestrator = Orchestrator(engine, factory, unused_runner)
+    assert await orchestrator._claim_next() is None
+
+    async with factory() as session:
+        first_task = await session.get(Task, "CAR-1")
+        first_task.status, first_task.stage = TaskStatus.DONE, TaskStage.COMPLETE
+        await session.commit()
+
+    assert await orchestrator._claim_next() == "CAR-2"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unresolved_earlier_root_blocks_a_later_roots_subtask_from_dispatch() -> None:
+    # Mirrors real production shape: every approved task materializes at least
+    # one subtask, and the parent flips to IN_PROGRESS/IMPLEMENTING immediately
+    # at approval time — so the gate that matters lives on subtask eligibility,
+    # not on the (always-has-children) root branch.
+    engine, factory = await empty_orchestration_store()
+    async with factory() as session:
+        project = Project(name="CARLO", key="CAR", repository_path="/tmp/unused")
+        first_root = Task(
+            id="CAR-1",
+            project=project,
+            sequence=1,
+            title="First goal",
+            goal="First goal",
+            status=TaskStatus.FAILED,
+            stage=TaskStage.BLOCKED,
+        )
+        first_subtask = Task(
+            id="CAR-2",
+            project=project,
+            sequence=2,
+            parent_task_id="CAR-1",
+            subtask_position=0,
+            title="First goal step",
+            goal="First goal step",
+            status=TaskStatus.FAILED,
+            stage=TaskStage.BLOCKED,
+        )
+        second_root = Task(
+            id="CAR-3",
+            project=project,
+            sequence=3,
+            title="Second goal",
+            goal="Second goal",
+            status=TaskStatus.IN_PROGRESS,
+            stage=TaskStage.IMPLEMENTING,
+        )
+        second_subtask = Task(
+            id="CAR-4",
+            project=project,
+            sequence=4,
+            parent_task_id="CAR-3",
+            subtask_position=0,
+            title="Second goal step",
+            goal="Second goal step",
+            status=TaskStatus.READY,
+            stage=TaskStage.QUEUED,
+        )
+        session.add_all([project, first_root, first_subtask, second_root, second_subtask])
+        await session.commit()
+
+    async def unused_runner(task_id: str) -> str:
+        raise AssertionError(task_id)
+
+    orchestrator = Orchestrator(engine, factory, unused_runner)
+    assert await orchestrator._claim_next() is None
+
+    async with factory() as session:
+        first_root_task = await session.get(Task, "CAR-1")
+        first_subtask_task = await session.get(Task, "CAR-2")
+        first_root_task.status, first_root_task.stage = TaskStatus.DONE, TaskStage.COMPLETE
+        first_subtask_task.status, first_subtask_task.stage = TaskStatus.DONE, TaskStage.COMPLETE
+        await session.commit()
+
+    assert await orchestrator._claim_next() == "CAR-4"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_root_task_serialization_does_not_cross_projects() -> None:
+    engine, factory = await empty_orchestration_store()
+    async with factory() as session:
+        blocked_project = Project(name="Blocked", key="BLK", repository_path="/tmp/unused1")
+        other_project = Project(name="Other", key="OTH", repository_path="/tmp/unused2")
+        failed = Task(
+            id="BLK-1",
+            project=blocked_project,
+            sequence=1,
+            title="Failed",
+            goal="Failed",
+            status=TaskStatus.FAILED,
+            stage=TaskStage.BLOCKED,
+        )
+        other = Task(
+            id="OTH-1",
+            project=other_project,
+            sequence=1,
+            title="Other",
+            goal="Other",
+            status=TaskStatus.READY,
+            stage=TaskStage.QUEUED,
+        )
+        session.add_all([blocked_project, other_project, failed, other])
+        await session.commit()
+
+    async def unused_runner(task_id: str) -> str:
+        raise AssertionError(task_id)
+
+    assert await Orchestrator(engine, factory, unused_runner)._claim_next() == "OTH-1"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_depends_on_blocks_until_the_dependency_is_done() -> None:
+    engine, factory = await empty_orchestration_store()
+    async with factory() as session:
+        upstream_project = Project(name="Upstream", key="UPS", repository_path="/tmp/unused1")
+        downstream_project = Project(name="Downstream", key="DWN", repository_path="/tmp/unused2")
+        dependency = Task(
+            id="UPS-1",
+            project=upstream_project,
+            sequence=1,
+            title="Dependency",
+            goal="Dependency",
+            status=TaskStatus.READY,
+            stage=TaskStage.QUEUED,
+        )
+        dependent = Task(
+            id="DWN-1",
+            project=downstream_project,
+            sequence=1,
+            title="Dependent",
+            goal="Dependent",
+            status=TaskStatus.READY,
+            stage=TaskStage.QUEUED,
+            depends_on_task_ids=["UPS-1"],
+        )
+        session.add_all([upstream_project, downstream_project, dependency, dependent])
+        await session.commit()
+
+    async with factory() as session:
+        dependent_task = await session.get(Task, "DWN-1")
+        assert await Orchestrator._eligible(session, dependent_task) is False
+
+        dependency_task = await session.get(Task, "UPS-1")
+        dependency_task.status, dependency_task.stage = TaskStatus.DONE, TaskStage.COMPLETE
+        await session.commit()
+
+        dependent_task = await session.get(Task, "DWN-1")
+        assert await Orchestrator._eligible(session, dependent_task) is True
     await engine.dispose()

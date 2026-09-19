@@ -68,6 +68,9 @@ async def run() -> None:
         Path(settings.artifact_root),
         settings.max_attempts,
         cipher,
+        settings.context_pack_budget_tokens,
+        settings.pi_request_diagnostics,
+        settings.max_escalations,
     )
     orchestrator = Orchestrator(engine, factory, pipeline.run)
     action_executor = ActionExecutor(
@@ -86,6 +89,7 @@ async def run() -> None:
         provider,
         Path(__file__).resolve().parents[2] / "extensions" / "carlo-discovery-guard.mjs",
         credential_cipher=cipher,
+        rework_guard_extension=Path(__file__).resolve().parents[2] / "extensions" / "carlo-rework-guard.mjs",
     )
     notifier_task: asyncio.Task[None] | None = None
     command_task: asyncio.Task[None] | None = None

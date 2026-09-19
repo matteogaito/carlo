@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { Component, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import Markdown from 'react-markdown'
 
 import {
@@ -6,6 +6,7 @@ import {
   httpApi,
   type AvailableModel,
   type Api,
+  type Discovery,
   type Event,
   type Plan,
   type Project,
@@ -30,6 +31,23 @@ const COLLAPSED_GOAL_LENGTH = 800
 const DONE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
 const PROJECT_COLORS = ['#dbe9e1', '#f2dfb7', '#d9e4f2', '#eadbea', '#f2d7d1', '#dce5bd']
 
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  render() {
+    if (this.state.error) {
+      return <div className="error-banner" role="alert">
+        Questa schermata si è bloccata per un errore imprevisto: {this.state.error.message}
+      </div>
+    }
+    return this.props.children
+  }
+}
+
 function readText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -43,11 +61,13 @@ export function App({ api = httpApi }: { api?: Api }) {
   const [user, setUser] = useState<User | null>()
   const [projects, setProjects] = useState<Project[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
+  const [discoveries, setDiscoveries] = useState<Discovery[]>([])
   const [taskModels, setTaskModels] = useState<AvailableModel[]>([])
   const [selected, setSelected] = useState<Task | null>(null)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
   const [view, setView] = useState<'board' | 'discoveries' | 'actions' | 'settings'>('board')
+  const [openDiscoveryId, setOpenDiscoveryId] = useState<number | null>(null)
   const [boardLevel, setBoardLevel] = useState<'execution' | 'goals'>('execution')
   const [lastEvent, setLastEvent] = useState<Event | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null)
@@ -62,9 +82,12 @@ export function App({ api = httpApi }: { api?: Api }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextProjects, nextTasks] = await Promise.all([api.listProjects(), api.listTasks()])
+      const [nextProjects, nextTasks, nextDiscoveries] = await Promise.all([
+        api.listProjects(), api.listTasks(), api.listDiscoveries(),
+      ])
       setProjects(nextProjects)
       setTasks(nextTasks)
+      setDiscoveries(nextDiscoveries)
       setError('')
     } catch (cause) {
       if (cause instanceof AuthenticationRequired) {
@@ -89,28 +112,43 @@ export function App({ api = httpApi }: { api?: Api }) {
 
   useEffect(() => {
     if (!user) return
-    let refreshTimer: number | undefined
+    let taskRefreshTimer: number | undefined
+    let discoveryRefreshTimer: number | undefined
     void refresh()
     const closeEvents = api.events(
       (event) => {
         setLastEvent(event)
-        if (!event.task_id) return
-        if (refreshTimer) window.clearTimeout(refreshTimer)
-        refreshTimer = window.setTimeout(() => {
-          void api.listTasks().then(setTasks)
-          if (event.task_id === selected?.id) void api.getTask(event.task_id).then(setSelected)
-        }, 150)
+        if (event.task_id) {
+          if (taskRefreshTimer) window.clearTimeout(taskRefreshTimer)
+          taskRefreshTimer = window.setTimeout(() => {
+            void api.listTasks().then(setTasks)
+            if (event.task_id === selected?.id) void api.getTask(event.task_id).then(setSelected)
+          }, 150)
+        }
+        if (event.discovery_id && event.type.startsWith('discovery.turn.')) {
+          if (discoveryRefreshTimer) window.clearTimeout(discoveryRefreshTimer)
+          discoveryRefreshTimer = window.setTimeout(() => {
+            void api.listDiscoveries().then(setDiscoveries)
+          }, 150)
+        }
       },
       setConnected,
       () => setUser(null),
     )
     return () => {
-      if (refreshTimer) window.clearTimeout(refreshTimer)
+      if (taskRefreshTimer) window.clearTimeout(taskRefreshTimer)
+      if (discoveryRefreshTimer) window.clearTimeout(discoveryRefreshTimer)
       closeEvents()
     }
   }, [api, refresh, selected?.id, user])
 
   const active = useMemo(() => tasks.find((task) => task.status === 'IN_PROGRESS'), [tasks])
+  const workingDiscovery = useMemo(
+    () => discoveries.find((discovery) =>
+      discovery.current_turn?.status === 'RUNNING' || discovery.current_turn?.status === 'QUEUED'
+    ),
+    [discoveries],
+  )
   const visibleTasks = useMemo(() => tasks.filter((task) =>
     (selectedProjectId === null || task.project_id === selectedProjectId)
     && !task.superseded_at
@@ -151,6 +189,17 @@ export function App({ api = httpApi }: { api?: Api }) {
     }
   }
 
+  async function openReworkChat(taskId: string) {
+    try {
+      const discovery = await api.reworkChat(taskId)
+      setOpenDiscoveryId(discovery.id)
+      setSelected(null)
+      setView('discoveries')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not open the rework chat')
+    }
+  }
+
   if (user === undefined) {
     return <main className="auth-shell"><p>Starting CARLO…</p></main>
   }
@@ -178,6 +227,14 @@ export function App({ api = httpApi }: { api?: Api }) {
         <div className="runtime-state">
           <span className={active ? 'pulse active' : 'pulse'} aria-hidden="true" />
           <span>{active ? `${active.id} running` : 'Executor idle'}</span>
+          <button
+            className={workingDiscovery ? 'discovery-indicator active' : 'discovery-indicator'}
+            onClick={() => setView('discoveries')}
+            title={workingDiscovery ? `Pi sta lavorando: ${workingDiscovery.title}` : 'Nessuna Discovery attiva'}
+          >
+            <span className={workingDiscovery ? 'pulse active' : 'pulse'} aria-hidden="true" />
+            <span>{workingDiscovery ? `Pi sta lavorando · ${workingDiscovery.title}` : 'Discovery idle'}</span>
+          </button>
           <span className={connected ? 'connection online' : 'connection'}>
             {connected ? 'Live' : 'Reconnecting'}
           </span>
@@ -209,6 +266,7 @@ export function App({ api = httpApi }: { api?: Api }) {
       {error && <div className="error-banner" role="alert">{error}</div>}
       {installUpdate && <div className="update-banner">A CARLO update is ready.<button onClick={installUpdate}>Update now</button></div>}
 
+      <ErrorBoundary key={view}>
       {view === 'board' ? <main className={selected ? 'workspace detail-open' : 'workspace'}>
         <section className="board" aria-label="Task board">
           {columns.map((column) => {
@@ -249,6 +307,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             startPlanning={() => void act(() => api.startPlanning(selected.id))}
             replan={() => void act(() => api.replanTask(selected.id))}
             rework={() => void act(() => api.reworkTask(selected.id))}
+            reworkChat={() => void openReworkChat(selected.id)}
             retry={() => void act(() => api.retrySubtask(selected.id))}
             stop={() => void act(() => api.stopTask(selected.id))}
             hold={() => void act(() => api.holdTask(selected.id))}
@@ -264,7 +323,8 @@ export function App({ api = httpApi }: { api?: Api }) {
             resize={setDetailWidth}
           />
         )}
-      </main> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} /> : view === 'actions' ? <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} /> : <SettingsView api={api} event={lastEvent} setError={setError} />}
+      </main> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} openDiscoveryId={openDiscoveryId} onOpenedDiscovery={() => setOpenDiscoveryId(null)} /> : view === 'actions' ? <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} /> : <SettingsView api={api} event={lastEvent} setError={setError} />}
+      </ErrorBoundary>
     </div>
   )
 }
@@ -424,12 +484,13 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, replan, rework, retry, stop, hold, resume, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
+function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, retry, stop, hold, resume, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
   replan: () => void
   rework: () => void
+  reworkChat: () => void
   retry: () => void
   stop: () => void
   hold: () => void
@@ -502,9 +563,10 @@ function TaskDetail({ task, close, startPlanning, replan, rework, retry, stop, h
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && <button className="danger" onClick={stop}>Stop → Ready</button>}
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && !task.parent_task_id && <button onClick={hold}>Put in Not Ready</button>}
           {task.status === 'READY' && Boolean(task.subtask_count) && <button onClick={resume}>Resume execution</button>}
-          {task.status === 'FAILED' && task.parent_task_id && task.approved_plan_revision && task.branch_name && task.worktree_path
+          {task.status === 'FAILED' && task.parent_task_id && task.approved_plan_revision
             ? <button onClick={retry}>Retry subtask</button>
             : task.status === 'FAILED' && <button onClick={rework}>Rework from original request</button>}
+          {(task.status === 'FAILED' || (task.status === 'IN_PROGRESS' && task.stage === 'blocked')) && <button onClick={reworkChat}>Discuti e correggi</button>}
         </nav>
         {!['IN_PROGRESS', 'TEST', 'DONE'].includes(task.status) && <label className="task-model-select">Task model<select value={task.available_model_id || ''} onChange={(event) => setModel(Number(event.target.value) || null)}>
           <option value="">Use agent profile</option>
@@ -622,14 +684,27 @@ function StructuredPlan({ plan }: { plan: Plan }) {
     </section>
     <section className="plan-task-list">
       <h3>Implementation tasks</h3>
-      {tasks.map((item, index) => <details className="plan-task" key={`${index}-${item.title}`}>
+      {tasks.map((item, index) => <details className="plan-task" key={item.id || `${index}-${item.title}`}>
         <summary><span>{index + 1}</span><strong>{item.title}</strong></summary>
         <div className="plan-task-body">
-          <h4>Prompt</h4>
-          <TaskMarkdown>{item.prompt}</TaskMarkdown>
-          {!!item.intervention_points.length && <>
-            <h4>Intervention points</h4>
-            <ul>{item.intervention_points.map((point) => <li key={point}><code>{point}</code></li>)}</ul>
+          <h4>Objective</h4>
+          <TaskMarkdown>{item.objective}</TaskMarkdown>
+          {!!item.files?.length && <>
+            <h4>Files</h4>
+            <ul>{item.files.map((file) => <li key={file.path}><code>{file.path}</code> · {file.mode}{file.reason ? ` — ${file.reason}` : ''}</li>)}</ul>
+          </>}
+          {!!item.constraints?.length && <>
+            <h4>Constraints</h4>
+            <ul>{item.constraints.map((point) => <li key={point}>{point}</li>)}</ul>
+          </>}
+          {!!item.done_when?.length && <>
+            <h4>Done when</h4>
+            <ul>{item.done_when.map((point) => <li key={point}>{point}</li>)}</ul>
+          </>}
+          {!!item.verification?.commands?.length && <>
+            <h4>Verification</h4>
+            <ul>{item.verification.commands.map((command) => <li key={command}><code>{command}</code></li>)}</ul>
+            <p>{item.verification.success}</p>
           </>}
         </div>
       </details>)}

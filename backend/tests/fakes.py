@@ -40,6 +40,7 @@ class FakeProvider:
         self.used_skills: tuple[str, ...] = ()
         self.resource_revisions: dict[str, str] = {}
         self.calls: list[tuple[AgentProfile, str, str, str]] = []
+        self.outputs: list[str] = []
 
     async def run(
         self,
@@ -55,7 +56,7 @@ class FakeProvider:
                 await on_event(event)
         return AgentResult(
             session_id=session_id,
-            output=self.output,
+            output=self.outputs.pop(0) if self.outputs else self.output,
             events=self.events,
             exit_code=0,
             used_skills=self.used_skills,

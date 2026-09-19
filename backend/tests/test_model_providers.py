@@ -65,6 +65,75 @@ def test_missing_context_limit_expands_for_the_discovered_output() -> None:
     assert model.effective_context_window == 131_072
 
 
+def test_implementation_profile_uses_65k_window_and_compacts_near_56k() -> None:
+    from carlo.model_providers import resolve_runtime_policy
+
+    window, percent, compaction, sampling = resolve_runtime_policy(
+        "implementation", {}, 131_072, 8_192, 10, 20
+    )
+
+    assert window == 65_536
+    assert percent == 100
+    assert compaction.reserve_tokens == 9_536
+    assert compaction.keep_recent_tokens == 13_107
+    assert window - compaction.reserve_tokens == 56_000
+    assert sampling == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_thinking_template_parameter_is_not_sent_to_responses_api() -> None:
+    from carlo.model_providers import resolve_runtime_policy
+
+    _, _, _, sampling = resolve_runtime_policy(
+        "implementation", {}, 131_072, 8_192, 10, 20, api="openai-responses"
+    )
+
+    assert sampling is None
+
+
+def test_implementation_profile_caps_advertised_262k_model_at_65k() -> None:
+    from carlo.model_providers import resolve_runtime_policy
+
+    window, percent, compaction, _ = resolve_runtime_policy(
+        "implementation", {}, 262_144, 8_192, 10, 20
+    )
+
+    assert window == 65_536
+    assert percent == 100
+    assert compaction.keep_recent_tokens == 13_107
+
+
+def test_profile_can_override_window_reserve_and_thinking() -> None:
+    from carlo.model_providers import resolve_runtime_policy
+
+    window, percent, compaction, sampling = resolve_runtime_policy(
+        "implementation",
+        {"context_window_tokens": 131_072, "context_window_percent": 90, "reserve_tokens": 12_000,
+         "keep_recent_percent": 15, "enable_thinking": True},
+        131_072, 8_192, 10, 20,
+    )
+
+    assert window == 131_072
+    assert percent == 90
+    assert compaction.reserve_tokens == 12_000
+    assert compaction.keep_recent_tokens == int(int(131_072 * .9) * .15)
+    assert sampling == {"chat_template_kwargs": {"enable_thinking": True}}
+
+
+@pytest.mark.parametrize("policy", [
+    {"context_window_percent": 0},
+    {"context_window_percent": 101},
+    {"reserve_tokens": 131_072},
+    {"enable_thinking": "false"},
+    {"context_window_tokens": 0},
+    {"unexpected": 1},
+])
+def test_profile_runtime_policy_rejects_invalid_values(policy) -> None:
+    from carlo.model_providers import ModelProviderError, resolve_runtime_policy
+
+    with pytest.raises(ModelProviderError):
+        resolve_runtime_policy("implementation", policy, 131_072, 8_192, 10, 20)
+
+
 def test_openai_catalog_parser_reads_all_models_and_common_context_fields() -> None:
     module = importlib.import_module("carlo.model_providers")
     assert hasattr(module, "parse_openai_models"), "catalog discovery is missing"
@@ -374,16 +443,19 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
         assert task_resolved.resolved_model.keep_recent_tokens == 26_214
         assert task_resolved.tools == ("read", "edit")
         assert plan_resolved.skills == (
+            "carlo-runtime",
             "carlo-planning",
             "frontend-design",
             "carlo-ui-design",
         )
         assert discovery_resolved.name == "plan"
         assert discovery_resolved.skills == (
+            "carlo-runtime",
             "carlo-discovery",
             "frontend-design",
             "carlo-ui-design",
         )
+        assert resolved.skills[0] == "carlo-runtime"
         assert plan_resolved.packages == ("superpowers", "ponytail")
     assert historical.packages == ("superpowers", "ponytail")
     assert "ponytail" not in historical.skills

@@ -59,25 +59,34 @@ implementation step in this Markdown.
 
 Put executable detail in `metadata.implementation_tasks`. Each task contains:
 
-- a concise `title` describing one coherent outcome;
-- a self-contained `prompt` for the implementation agent, covering objective,
-  approach, patterns to reuse, invariants, expected result, and task-specific
-  validation where applicable;
-- `intervention_points` naming exact repository files, modules, symbols,
-  interfaces, tests, or configuration discovered during exploration.
+- a stable `id`, concise `title`, and zero-based `position` matching array order;
+- `objective`: one to three sentences describing the observable outcome;
+- `files`: project-relative paths, each with `mode` (`edit`, `read_only`, or
+  `create`), `reason`, and optional inclusive line `ranges` or named `symbols`;
+- `interfaces`: exact signatures, types, and behavioral contracts to preserve;
+- `changes`: a concrete instruction keyed by each `edit` or `create` path;
+- `constraints`: prohibited changes, dependencies, or out-of-scope files;
+- `verification`: exact quiet commands that print failures and a success criterion;
+- `done_when`: checks an implementation agent can verify;
+- `budget.max_tool_calls`: default 20, hard maximum 30. If a package seems to
+  need more, it is not one independently verifiable outcome — split it into
+  more packages instead of raising this number.
 
 Tasks remain internal parts of the CARLO Task, not separate Kanban cards. Order
 them by dependency and keep their count as small as the implementation permits.
 Use exact locations discovered in the repository; never invent paths.
 
-Each item must be an independently verifiable outcome. Create a separate implementation task
-when work crosses independently testable subsystems or
-requires a distinct validation loop. Keep tightly coupled files together; do
-not split by arbitrary file count, prompt length, or organizational neatness.
+Read the code required for each package yourself before naming its files and
+ranges. Each item must be an independently verifiable outcome. Keep packages small: prefer
+few files, and split when the estimated context pack of instructions and
+selected file content would exceed 15,000–20,000 tokens. Keep tightly coupled
+files together only when the resulting pack stays within that budget. Never
+invent a path or range. If the package is incomplete, inspect more repository
+evidence and regenerate the complete JSON; do not return a placeholder.
 
-Leave freedom over low-risk details such as variable names, equivalent local
-structures, and trivial refactors. Avoid exact line numbers and patch-sized
-pseudocode unless correctness genuinely depends on them.
+Leave freedom only over low-risk details such as variable names and equivalent
+local structures. Use precise ranges or symbols when only part of a large file
+matters; omit both only when the whole file is needed.
 
 ## Validation strategy
 
@@ -126,9 +135,17 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
     "key_points": ["Important decision or constraint"],
     "implementation_tasks": [
       {
+        "id": "wp-1",
         "title": "Coherent implementation outcome",
-        "prompt": "Self-contained instruction for the implementation agent.",
-        "intervention_points": ["path/to/file.py:symbol"]
+        "position": 0,
+        "objective": "Observable outcome in one to three sentences.",
+        "files": [{"path": "path/to/file.py", "mode": "edit", "ranges": [{"start": 10, "end": 40}], "symbols": ["relevant_symbol"], "reason": "Why this file matters"}],
+        "interfaces": ["function(arg: Type) -> Result preserves contract"],
+        "changes": {"path/to/file.py": "Concrete change to make in this file"},
+        "constraints": ["Do not add dependencies"],
+        "verification": {"commands": ["pytest -q tests/test_target.py --tb=short"], "success": "All targeted tests pass"},
+        "done_when": ["Observable behavior and targeted tests pass"],
+        "budget": {"max_tool_calls": 20}
       }
     ],
     "skills": [],

@@ -63,6 +63,11 @@ case "$action" in
         fi
         exit
         ;;
+    stop)
+        stop_services
+        echo "CARLO stopped; the user service remains installed and enabled."
+        exit
+        ;;
     undeploy)
         stop_services
         if [[ "$platform" == Darwin ]]; then
@@ -76,7 +81,7 @@ case "$action" in
         exit
         ;;
     deploy) ;;
-    *) die "usage: $0 {deploy|status|logs|undeploy}" ;;
+    *) die "usage: $0 {deploy|status|logs|stop|undeploy}" ;;
 esac
 
 [[ -n "${CARLO_SOURCE_ROOT:-}" && -d "$CARLO_SOURCE_ROOT/backend" ]] || die "invalid CARLO_SOURCE_ROOT"

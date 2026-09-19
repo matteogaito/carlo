@@ -13,13 +13,19 @@ def test_default_database_url_is_a_string(monkeypatch) -> None:
 def test_worker_settings_are_loaded_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("CARLO_WORKTREE_ROOT", "/tmp/carlo-worktrees")
     monkeypatch.setenv("CARLO_MAX_ATTEMPTS", "9")
+    monkeypatch.setenv("CARLO_CONTEXT_PACK_BUDGET_TOKENS", "16000")
     monkeypatch.setenv("CARLO_ACTION_CANCEL_GRACE_SECONDS", "7")
     monkeypatch.setenv("CARLO_NPM_EXECUTABLE", "/opt/homebrew/bin/npm")
+    monkeypatch.setenv("CARLO_PI_REQUEST_DIAGNOSTICS", "true")
+    monkeypatch.setenv("CARLO_MAX_ESCALATIONS", "3")
     settings = Settings.from_env()
     assert not hasattr(settings, "worktree_root")
     assert settings.max_attempts == 9
+    assert settings.context_pack_budget_tokens == 16000
     assert settings.action_cancel_grace_seconds == 7
     assert settings.npm_executable == "/opt/homebrew/bin/npm"
+    assert settings.pi_request_diagnostics is True
+    assert settings.max_escalations == 3
 
 
 def test_production_settings_are_loaded(monkeypatch) -> None:
