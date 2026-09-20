@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 import subprocess
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from carlo.api import create_app
 from carlo.config import Settings
 from carlo.domain import TaskStage, TaskStatus
 from carlo.models import AgentProfile, Base, Discovery, DiscoveryTurn, PlanRevision, Project, Task
+from carlo.planning import PlanPayload, proposal_source
 from tests.fakes import FakeProvider
 
 
@@ -31,6 +33,17 @@ def full_metadata(tasks: list[dict]) -> dict:
         "validation_commands": ["pytest -q"], "browser_validation": False, "build_required": False,
         "run_required": False, "deployment_expected": False, "risk_flags": [], "affected_areas": [],
     }
+
+
+def reviewed_state(state: dict) -> dict:
+    for proposal in state["task_proposals"]:
+        proposal["plan_draft"] = PlanPayload.model_validate({
+            "brief_markdown": proposal["brief_markdown"],
+            "plan_markdown": proposal["plan_markdown"],
+            "metadata": proposal["metadata"],
+        }).model_dump()
+        proposal["draft_source"] = proposal_source(proposal, state)
+    return state
 
 
 @pytest.mark.asyncio
@@ -56,6 +69,7 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
         assert discovery["status"] == "OPEN"
         assert discovery["messages"][0]["content"] == "How should imports work?"
         assert discovery["current_turn"]["status"] == "QUEUED"
+        assert (await client.delete(f'/api/discoveries/{discovery["id"]}')).status_code == 409
         async with factory() as session:
             record = await session.get(Discovery, discovery["id"])
             profile = await session.get(AgentProfile, record.profile_id)
@@ -111,24 +125,11 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
             f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": []}
         )
         assert unplanned.status_code == 409
-        assert "implementation_tasks" in unplanned.json()["detail"]
-        assert "ho chiesto a Pi" in unplanned.json()["detail"]
+        assert "stale or pending" in unplanned.json()["detail"]
 
         async with factory() as session:
             record = await session.get(Discovery, discovery["id"])
-            fix_request = record.messages[-1]
-            assert fix_request.role == "system"
-            assert "Add CSV import" in fix_request.content
-            assert "richiama discovery_state" in fix_request.content
-            queued_turn = await session.scalar(
-                select(DiscoveryTurn).where(DiscoveryTurn.input_message_id == fix_request.id)
-            )
-            assert queued_turn is not None
-            assert queued_turn.status == "QUEUED"
-
-        async with factory() as session:
-            record = await session.get(Discovery, discovery["id"])
-            record.state = {
+            record.state = reviewed_state({
                 "summary": "CSV import should reuse the existing ingestion service.",
                 "findings": ["src/ingest.py owns ingestion"],
                 "decisions": ["CSV first"],
@@ -153,7 +154,7 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
                         ], "implementation_phases": ["Add import UI"], "validation_commands": ["npm test"], "browser_validation": True, "build_required": True, "run_required": True, "deployment_expected": False, "risk_flags": [], "affected_areas": ["frontend"]},
                     },
                 ],
-            }
+            })
             await session.commit()
 
         tasks = await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": []})
@@ -195,6 +196,11 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
         assert closed.json()["final_summary"]
         rejected = await client.post(f'/api/discoveries/{discovery["id"]}/messages', json={"content": "More"})
         assert rejected.status_code == 409
+        deleted = await client.delete(f'/api/discoveries/{discovery["id"]}')
+        assert deleted.status_code == 204
+        assert (await client.get(f'/api/discoveries/{discovery["id"]}')).status_code == 404
+        assert (await client.get('/api/tasks/REP-1')).status_code == 200
+        assert not (tmp_path / "artifacts" / "discoveries" / str(discovery["id"])).exists()
 
 
 @pytest.mark.asyncio
@@ -218,7 +224,7 @@ async def test_discovery_task_creation_resolves_depends_on_by_proposal_title(tmp
 
         async with factory() as session:
             record = await session.get(Discovery, discovery["id"])
-            record.state = {
+            record.state = reviewed_state({
                 "task_proposals": [
                     {
                         "id": "p1", "title": "Backend import",
@@ -234,17 +240,100 @@ async def test_discovery_task_creation_resolves_depends_on_by_proposal_title(tmp
                         "metadata": full_metadata([package("Add UI", "frontend/import.ts", 0)]),
                     },
                 ]
-            }
+            })
             await session.commit()
+            reviewed = deepcopy(record.state)
+
+        missing_parent = await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": ["p2"]})
+        assert missing_parent.status_code == 409
+        async with factory() as session:
+            record = await session.get(Discovery, discovery["id"])
+            changed = deepcopy(reviewed)
+            changed["task_proposals"][0]["megaprompt"] = "Changed after review"
+            record.state = changed
+            await session.commit()
+        stale = await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": []})
+        assert stale.status_code == 409
+        async with factory() as session:
+            record = await session.get(Discovery, discovery["id"])
+            cycle = deepcopy(reviewed)
+            cycle["task_proposals"][0]["depends_on"] = ["p2"]
+            record.state = cycle
+            await session.commit()
+        assert (await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": []})).status_code == 409
+        async with factory() as session:
+            record = await session.get(Discovery, discovery["id"])
+            record.state = reviewed
+            await session.commit()
+
+        first = await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": ["p1"]})
+        assert first.status_code == 201
+        first_id = first.json()[0]["id"]
+        async with factory() as session:
+            parent = await session.get(Task, first_id)
+            parent.status, parent.stage = TaskStatus.READY, TaskStage.QUEUED
+            await session.commit()
+        assert (await client.delete(f'/api/tasks/{first_id}')).status_code == 204
+        detail = (await client.get(f'/api/discoveries/{discovery["id"]}')).json()
+        assert "created_task_id" not in detail["state"]["task_proposals"][0]
+        assert (await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": ["p2"]})).status_code == 409
 
         tasks = await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": []})
         assert tasks.status_code == 201
         task_ids = [task["id"] for task in tasks.json()]
+        retry = await client.post(f'/api/discoveries/{discovery["id"]}/tasks', json={"proposal_ids": []})
+        assert [task["id"] for task in retry.json()] == task_ids
         async with factory() as session:
             backend_task = await session.get(Task, task_ids[0])
             ui_task = await session.get(Task, task_ids[1])
             assert backend_task.depends_on_task_ids == []
             assert ui_task.depends_on_task_ids == [backend_task.id]
+            saved = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == backend_task.id))
+            assert saved.metadata_json == reviewed["task_proposals"][0]["plan_draft"]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_parent_task_delete_cascades_children_but_rejects_dependencies(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    prompt = repository / ".carlo" / "prompts" / "request.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("Build parser")
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(text("TRUNCATE projects, users, agent_profiles RESTART IDENTITY CASCADE"))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    async with factory() as session:
+        project = Project(name="Repo", key="REP", repository_path=str(repository))
+        parent = Task(id="REP-1", project=project, sequence=1, title="Parent", goal="Build", prompt_path=".carlo/prompts/request.md", status=TaskStatus.READY, stage=TaskStage.QUEUED)
+        child = Task(id="REP-2", project=project, sequence=2, title="Child", goal="Parse", parent=parent, subtask_position=0, status=TaskStatus.READY, stage=TaskStage.QUEUED)
+        dependent = Task(id="REP-3", project=project, sequence=3, title="Dependent", goal="Use parser", depends_on_task_ids=[parent.id], status=TaskStatus.READY, stage=TaskStage.QUEUED)
+        session.add_all([project, parent, child, dependent])
+        await session.commit()
+    artifact = tmp_path / "artifacts" / "REP-1" / "attempt.log"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("log")
+    app = create_app(factory, FakeProvider("{}"), Settings(app_origin="http://test", artifact_root=str(tmp_path / "artifacts")))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        client.headers["Origin"] = "http://test"
+        assert (await client.get("/api/tasks/REP-1")).json()["delete_allowed"] is False
+        assert (await client.delete("/api/tasks/REP-1")).status_code == 409
+        async with factory() as session:
+            dependent = await session.get(Task, "REP-3")
+            dependent.depends_on_task_ids = []
+            await session.commit()
+        assert (await client.get("/api/tasks/REP-1")).json()["delete_allowed"] is True
+        assert (await client.delete("/api/tasks/REP-1")).status_code == 204
+        assert (await client.get("/api/tasks/REP-1")).status_code == 404
+    async with factory() as session:
+        assert await session.get(Task, "REP-2") is None
+        assert await session.get(Task, "REP-3") is not None
+    assert not prompt.exists()
+    assert not artifact.exists()
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

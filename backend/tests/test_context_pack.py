@@ -75,6 +75,20 @@ def test_pack_budget_is_rejected_not_truncated(tmp_path: Path) -> None:
     assert error.value.estimated_tokens > 100
 
 
+def test_siblings_share_brief_prefix_and_brief_counts_toward_budget(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("value = 1\n")
+    brief = "The API contract is stable. " * 100
+    first = package([{"path": "a.py", "mode": "edit", "reason": "First"}])
+    second = {**first, "objective": "Implement the second outcome."}
+    one = build_context_pack(tmp_path, first, brief=brief)
+    two = build_context_pack(tmp_path, second, brief=brief)
+    assert one.startswith(f"Parent Brief:\n{brief}\n")
+    assert two.startswith(f"Parent Brief:\n{brief}\n")
+    assert one != two
+    with pytest.raises(ContextPackBudgetExceeded):
+        build_context_pack(tmp_path, first, brief=brief, max_tokens=100)
+
+
 def test_pack_rejects_project_escape_and_missing_symbols(tmp_path: Path) -> None:
     external = tmp_path.parent / "external.txt"
     external.write_text("secret")

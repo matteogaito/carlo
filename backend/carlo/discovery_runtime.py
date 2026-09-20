@@ -18,6 +18,7 @@ from .model_providers import (
 )
 from .provider import AgentProfile, CodingAgentProvider, ConversationEvent, ConversationSession
 from .api import _queue_fix_proposal_fix_request, validate_fix_proposal, validate_task_proposal
+from .planning import Planner, PlanningQuestion, PlanningRequest, proposal_source
 
 EVENT_IDLE_TIMEOUT_SECONDS = 180
 MAX_TRANSIENT_RETRIES = 2
@@ -373,7 +374,7 @@ class DiscoveryRuntime:
                         )
                         sequence += 1
                 else:
-                    normalized = _normalized_state(state)
+                    normalized = _normalized_state(state, discovery.state)
                     for proposal in normalized.get("task_proposals", []):
                         error = proposal.get("validation_error") if isinstance(proposal, dict) else None
                         if not error:
@@ -406,7 +407,66 @@ class DiscoveryRuntime:
                 _write_memory(Path(discovery.memory_path), _memory_markdown(discovery))
             elif fix_proposal_error:
                 await _queue_fix_proposal_fix_request(session, discovery, fix_proposal_error)
+        if not is_rework and state is not None:
+            await self._plan_candidates(discovery_id)
         self._retry_counts.pop(turn_id, None)
+
+    async def _plan_candidates(self, discovery_id: int) -> None:
+        async with self.session_factory() as session:
+            discovery = await session.get(Discovery, discovery_id)
+            if discovery is None:
+                return
+            proposals = discovery.state.get("task_proposals", [])
+            for candidate in proposals:
+                if candidate.get("created_task_id"):
+                    continue
+                source = proposal_source(candidate, discovery.state)
+                if candidate.get("draft_source") == source and candidate.get("plan_draft"):
+                    continue
+                profile_record = await session.get(ProfileRecord, discovery.profile_id) if discovery.profile_id else None
+                try:
+                    profile = await resolve_agent_profile(
+                        session, profile_record, self.credential_cipher,
+                        task_model_id=discovery.state.get("model_runtime", {}).get("available_model_id"),
+                        workflow_skill="carlo-planning",
+                    ) if profile_record else AgentProfile("plan", None, None, ("read", "bash", "grep", "find", "ls"), ("carlo-planning",))
+                    handoff = json.dumps({
+                        "summary": discovery.state.get("summary"),
+                        "findings": discovery.state.get("findings", []),
+                        "decisions": discovery.state.get("decisions", []),
+                        "unresolved_questions": discovery.state.get("unresolved_questions", []),
+                        "inspected_resources": discovery.state.get("inspected_resources", []),
+                        "commands": discovery.state.get("commands", []),
+                        "depends_on": candidate.get("depends_on", []),
+                    }, ensure_ascii=False)
+                    result = await Planner(self.provider, profile).plan(PlanningRequest(
+                        discovery.project, str(candidate.get("title", "")),
+                        str(candidate.get("megaprompt", "")),
+                        f"discovery-{discovery_id}-{candidate['id']}-{source[:12]}-plan",
+                        handoff=handoff,
+                    ))
+                    error = result.text if isinstance(result, PlanningQuestion) else None
+                except Exception as exc:
+                    result = None
+                    error = str(exc)
+                await session.refresh(discovery)
+                current = [dict(item) for item in discovery.state.get("task_proposals", [])]
+                item = next((item for item in current if item.get("id") == candidate.get("id")), None)
+                if item is None or proposal_source(item, discovery.state) != source or item.get("created_task_id"):
+                    continue
+                item["plan_draft"] = result.model_dump() if result is not None and not isinstance(result, PlanningQuestion) else None
+                item["draft_source"] = source if item["plan_draft"] else None
+                item["planning_error"] = error
+                item["validation_error"] = error if error else None
+                discovery.state = {**discovery.state, "task_proposals": current}
+                if error:
+                    sequence = max((message.sequence for message in discovery.messages), default=0) + 1
+                    session.add(DiscoveryMessage(
+                        discovery=discovery, sequence=sequence, role="system",
+                        content=f"Piano per {item.get('title')}: {error}",
+                    ))
+                session.add(Event(discovery=discovery, type="discovery.proposal.planned", payload={"proposal_id": item["id"], "ready": bool(item["plan_draft"])}))
+                await session.commit()
 
     async def _fail(self, turn_id: int, discovery_id: int, error: str) -> None:
         async with self.session_factory() as session:
@@ -554,24 +614,37 @@ def _tool_result_text(result: Any) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _normalized_state(state: dict[str, Any]) -> dict[str, Any]:
+def _normalized_state(state: dict[str, Any], previous: dict[str, Any] | None = None) -> dict[str, Any]:
     result = {
         "summary": str(state.get("summary", "")),
         **{key: list(state.get(key, [])) for key in ("findings", "decisions", "unresolved_questions", "inspected_resources", "commands", "task_proposals")},
     }
+    old = {item.get("id"): item for item in (previous or {}).get("task_proposals", []) if isinstance(item, dict)}
     for index, proposal in enumerate(result["task_proposals"], start=1):
         if not isinstance(proposal, dict):
             continue
         if not proposal.get("id"):
             proposal["id"] = f"proposal-{index}"
-        if proposal.get("created_task_id"):
-            proposal.pop("validation_error", None)
+        prior = old.get(proposal["id"], {})
+        proposal.pop("created_task_id", None)
+        if prior.get("created_task_id"):
+            proposal.clear()
+            proposal.update(prior)
             continue
-        _, detail = validate_task_proposal(proposal)
-        if detail:
-            proposal["validation_error"] = detail
+        if prior.get("draft_source") == proposal_source(proposal, result):
+            proposal["plan_draft"] = prior.get("plan_draft")
+            proposal["draft_source"] = prior.get("draft_source")
+        if proposal.get("plan_draft"):
+            _, detail = validate_task_proposal(proposal, result)
+            if detail:
+                proposal["validation_error"] = detail
+            else:
+                proposal.pop("validation_error", None)
         else:
             proposal.pop("validation_error", None)
+    present = {item.get("id") for item in result["task_proposals"] if isinstance(item, dict)}
+    result["task_proposals"].extend(dict(item) for proposal_id, item in old.items()
+                                    if proposal_id not in present and item.get("created_task_id"))
     return result
 
 

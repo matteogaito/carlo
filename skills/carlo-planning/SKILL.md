@@ -73,7 +73,8 @@ Put executable detail in `metadata.implementation_tasks`. Each task contains:
   more packages instead of raising this number.
 
 Tasks remain internal parts of the CARLO Task, not separate Kanban cards. Order
-them by dependency and keep their count as small as the implementation permits.
+them by dependency. Use as many packages as independent verification and context boundaries require; do not minimize the count as a goal.
+State in each package's `interfaces` or `constraints` which verified output from an earlier package it consumes. A package's checks must be runnable before later packages start; put integration checks that need the whole tree in `validation_commands`.
 Use exact locations discovered in the repository; never invent paths.
 
 Read the code required for each package yourself before naming its files and
@@ -164,6 +165,7 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
 
 `implementation_phases` mirrors the ordered task titles for compatibility.
 `validation_commands` contains only commands verified from repository evidence.
+For a parent plan, declare runnable final integration checks here or rely on the project's configured validation commands. If neither exists, ask for the missing validation capability instead of returning a plan that could finish untested.
 `packages` contains Pi packages needed by implementation; `skills` contains
 standalone implementation skills. Use booleans for the four flags and arrays of strings for every list. CARLO adds
 the actual planning profile and loaded skills after Pi returns; do not invent
@@ -194,6 +196,7 @@ Before returning the result, verify:
 - the Brief references concrete locations and distinguishes facts from assumptions;
 - the plan solves the stated goal and follows existing patterns;
 - expensive decisions and invariants are explicit;
+- the parent-child tree covers all requested work, interfaces, dependencies, and tests that depend on later packages;
 - every implementation task tells the implementation model where to intervene
   and how to prove it;
 - validation is specific, executable where possible, and honest about limits;

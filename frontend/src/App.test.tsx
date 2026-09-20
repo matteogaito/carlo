@@ -73,10 +73,12 @@ const api: Api = {
   uploadDiscoveryScreenshot: async () => { throw new Error('unused') },
   stopDiscovery: async () => { throw new Error('unused') },
   closeDiscovery: async () => { throw new Error('unused') },
+  deleteDiscovery: async () => undefined,
   createDiscoveryTasks: async () => [],
   reworkChat: async () => { throw new Error('unused') },
   applyDiscoveryFix: async () => { throw new Error('unused') },
   getTask: async () => task,
+  deleteTask: async () => undefined,
   createProject: async () => { throw new Error('unused') },
   createTask: async () => { throw new Error('unused') },
   startPlanning: async () => task,
@@ -226,6 +228,17 @@ describe('CARLO board', () => {
     expect(await screen.findByRole('heading', { name: 'Validation' })).toBeTruthy()
     expect(screen.getByText('pytest -q')).toBeTruthy()
     expect(screen.getByText('2 failed')).toBeTruthy()
+  })
+
+  it('offers parent deletion in Actions only when the server allows it', async () => {
+    const deletable = { ...task, status: 'READY' as const, stage: 'queued', delete_allowed: true }
+    const deleteTask = vi.fn(async () => undefined)
+    render(<App api={{ ...api, listTasks: async () => [deletable], getTask: async () => deletable, deleteTask }} />)
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    await userEvent.click(screen.getByText('Actions', { selector: 'summary' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Delete parent Task' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm delete' }))
+    await waitFor(() => expect(deleteTask).toHaveBeenCalledWith('CAR-1'))
   })
 
   it('renders Task Markdown and resizes the half-screen detail panel', async () => {
@@ -945,9 +958,11 @@ describe('CARLO board', () => {
   it('shows completed Discovery proposals as task actions in the chat', async () => {
     const proposal = {
       id: 'csv', title: 'Add CSV import', megaprompt: 'Implement CSV import.', depends_on: [],
-      brief_markdown: 'Reuse the **existing ingestion service**.',
-      plan_markdown: 'Implement parsing and preserve the error envelope.',
-      metadata: { skills: [], implementation_phases: ['Implement parsing', 'Validate imports'], validation_commands: ['pytest -q'], browser_validation: false, build_required: false, run_required: false, deployment_expected: false, risk_flags: [], affected_areas: ['src/ingest.py'] },
+      draft_source: 'current',
+      plan_draft: { brief_markdown: 'Reuse the **existing ingestion service**.', plan_markdown: 'Implement parsing and preserve the error envelope.', metadata: { implementation_tasks: [
+        { id: 'parser', title: 'Implement parsing', position: 0, objective: 'Parse CSV.', files: [{ path: 'src/ingest.py', mode: 'edit' as const, ranges: [], symbols: [], reason: 'Parser' }], interfaces: [], changes: {}, constraints: [], verification: { commands: ['pytest -q'], success: 'Pass' }, done_when: [], budget: { max_tool_calls: 20 } },
+        { id: 'tests', title: 'Validate imports', position: 1, objective: 'Run parser tests.', files: [{ path: 'tests/test_ingest.py', mode: 'edit' as const, ranges: [], symbols: [], reason: 'Tests' }], interfaces: [], changes: {}, constraints: [], verification: { commands: ['pytest -q tests/test_ingest.py'], success: 'Pass' }, done_when: [], budget: { max_tool_calls: 20 } },
+      ] } },
     }
     const discovery: Discovery = {
       id: 9, project_id: 1, title: 'Plan CSV', status: 'OPEN', task_id: null,
@@ -960,13 +975,55 @@ describe('CARLO board', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Plan CSV/ }))
     const chat = document.querySelector<HTMLElement>('.message-stream')!
     expect(within(chat).getByText('Add CSV import')).toBeTruthy()
+    expect(within(chat).getByText('2 subtasks')).toBeTruthy()
+    expect(within(chat).getByText('Implement parsing')).toBeTruthy()
     await userEvent.click(within(chat).getByRole('button', { name: 'Create all Ready tasks' }))
     expect(createDiscoveryTasks).toHaveBeenCalledWith(9, undefined)
   })
 
-  it('surfaces the queued fix request in chat when Create task fails validation', async () => {
+  it('shows a parent tree and disables single creation until its parent dependency exists', async () => {
+    const child = (position: number) => ({
+      id: `wp-${position}`, title: `Child ${position}`, position, objective: `Outcome ${position}`,
+      files: [{ path: `src/${position}.py`, mode: 'edit' as const, ranges: [], symbols: [], reason: 'Scope' }],
+      interfaces: ['Preserve API'], changes: { [`src/${position}.py`]: 'Implement' }, constraints: [],
+      verification: { commands: [`pytest -q tests/test_${position}.py`], success: 'Pass' },
+      done_when: ['Tests pass'], budget: { max_tool_calls: 20 },
+    })
+    const proposals = [
+      { id: 'archive', title: 'Archive', megaprompt: 'Build archive', depends_on: [], draft_source: 'a', plan_draft: { brief_markdown: 'Brief', plan_markdown: 'Plan', metadata: { implementation_tasks: [child(0)] } } },
+      { id: 'ui', title: 'UI', megaprompt: 'Build UI', depends_on: ['archive'], draft_source: 'b', plan_draft: { brief_markdown: 'Brief', plan_markdown: 'Plan', metadata: { implementation_tasks: [child(0), child(1), child(2)] } } },
+    ]
+    const discovery: Discovery = {
+      id: 12, project_id: 1, title: 'Build app', status: 'OPEN', task_id: null,
+      state: { task_proposals: proposals }, final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
+    }
+    const createDiscoveryTasks = vi.fn(async () => [])
+    render(<DiscoveriesView api={{ ...api, listDiscoveries: async () => [discovery], getDiscovery: async () => discovery, createDiscoveryTasks }} projects={[]} event={null} setError={() => undefined} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Build app/ }))
+    const chat = document.querySelector<HTMLElement>('.message-stream')!
+    expect(within(chat).getByText('1 subtask')).toBeTruthy()
+    expect(within(chat).getByText('3 subtasks')).toBeTruthy()
+    expect(within(chat).getByText('Depends on: Archive')).toBeTruthy()
+    const childTwo = within(chat).getByText('Child 2').closest('details')!
+    await userEvent.click(within(childTwo).getByText('Child 2'))
+    expect(within(childTwo).getByText('Outcome 2')).toBeTruthy()
+    expect(within(childTwo).getByText('Interfaces: Preserve API')).toBeTruthy()
+    expect(within(childTwo).getByText(/pytest -q tests\/test_2.py/)).toBeTruthy()
+    const single = within(chat).getAllByRole('button', { name: 'Create task' }) as HTMLButtonElement[]
+    expect(single[0].disabled).toBe(false)
+    expect(single[1].disabled).toBe(true)
+    const context = document.querySelector<HTMLElement>('.discovery-context')!
+    const contextSingle = within(context).getAllByRole('button', { name: 'Create Ready task' }) as HTMLButtonElement[]
+    expect(contextSingle[0].disabled).toBe(false)
+    expect(contextSingle[1].disabled).toBe(true)
+    await userEvent.click(single[0])
+    expect(createDiscoveryTasks).toHaveBeenCalledWith(12, ['archive'])
+  })
+
+  it('shows planner failure and disables creation', async () => {
     const proposal = {
       id: 'archive', title: 'Archivio destinazioni', megaprompt: 'Build it.', depends_on: [],
+      planning_error: 'Planner returned invalid work packages', validation_error: 'Planner returned invalid work packages',
       brief_markdown: 'Brief', plan_markdown: 'Plan',
       metadata: { skills: [], implementation_tasks: [{
         id: 'wp-1', title: 'Archivio', position: 0, objective: 'Persist destinations.',
@@ -981,29 +1038,16 @@ describe('CARLO board', () => {
       final_summary: null, last_active_at: '', closed_at: null, current_turn: null,
       messages: [{ id: 1, sequence: 1, role: 'user', content: 'Plan it', metadata: {}, created_at: '2026-09-19T09:00:00Z' }],
     }
-    const after: Discovery = {
-      ...before,
-      messages: [
-        ...before.messages!,
-        { id: 2, sequence: 2, role: 'system', content: 'La proposta "Archivio destinazioni" non è creabile: changes must describe every edit/create file and no other file. Correggila e richiama discovery_state con lo stato completo aggiornato.', metadata: {}, created_at: '2026-09-19T09:05:00Z' },
-      ],
-    }
-    const createDiscoveryTasks = vi.fn(async () => {
-      throw new Error("task proposal 'Archivio destinazioni' is not fully planned: changes must describe every edit/create file and no other file — ho chiesto a Pi di correggerla, guarda la chat.")
-    })
-    const getDiscovery = vi.fn(async () => after)
-    const setError = vi.fn()
+    const createDiscoveryTasks = vi.fn(async () => [])
     render(<DiscoveriesView api={{
-      ...api, listDiscoveries: async () => [before], getDiscovery, createDiscoveryTasks,
-    }} projects={[]} event={null} setError={setError} />)
+      ...api, listDiscoveries: async () => [before], getDiscovery: async () => before, createDiscoveryTasks,
+    }} projects={[]} event={null} setError={() => undefined} />)
 
     await userEvent.click(await screen.findByRole('button', { name: /Archivio/ }))
     const chat = document.querySelector<HTMLElement>('.message-stream')!
-    await userEvent.click(await within(chat).findByRole('button', { name: 'Create all Ready tasks' }))
-
-    expect(setError).toHaveBeenCalledWith(expect.stringContaining('ho chiesto a Pi'))
-    expect(getDiscovery).toHaveBeenCalled()
-    expect(await screen.findByText(/non è creabile/)).toBeTruthy()
+    expect((within(chat).getByRole('button', { name: 'Create all Ready tasks' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(within(chat).getByText('Planner returned invalid work packages')).toBeTruthy()
+    expect(createDiscoveryTasks).not.toHaveBeenCalled()
   })
 
   it('keeps Discovery task actions disabled until subtasks are planned', async () => {
@@ -1021,6 +1065,19 @@ describe('CARLO board', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Incomplete plan/ }))
     const chat = document.querySelector<HTMLElement>('.message-stream')!
     expect((within(chat).getByRole('button', { name: 'Create all Ready tasks' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('deletes a Discovery from its confirmation control', async () => {
+    const discovery: Discovery = {
+      id: 14, project_id: 1, title: 'Old discovery', status: 'CLOSED', task_id: null,
+      state: {}, final_summary: null, last_active_at: '', closed_at: null, current_turn: null, messages: [],
+    }
+    const deleteDiscovery = vi.fn(async () => undefined)
+    render(<DiscoveriesView api={{ ...api, listDiscoveries: async () => [discovery], getDiscovery: async () => discovery, deleteDiscovery }} projects={[]} event={null} setError={() => undefined} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Old discovery/ }))
+    await userEvent.click(screen.getByRole('button', { name: 'Delete Discovery' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Elimina' }))
+    await waitFor(() => expect(deleteDiscovery).toHaveBeenCalledWith(14))
   })
 
   it('renders aggregated realtime Discovery deltas', async () => {

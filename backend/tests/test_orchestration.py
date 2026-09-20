@@ -43,6 +43,50 @@ from tests.test_work_package_escalation import package as escalation_package
 from tests.fakes import add_managed_profiles
 
 
+@pytest.mark.asyncio
+async def test_last_child_runs_local_and_parent_integration_checks(tmp_path: Path) -> None:
+    engine, factory = await empty_orchestration_store()
+    package = {
+        "id": "final", "title": "Finish", "position": 0, "objective": "Finish feature",
+        "files": [{"path": "local.ok", "mode": "create", "reason": "Local proof"}],
+        "interfaces": ["Final result"], "changes": {"local.ok": "Write it"},
+        "constraints": [], "verification": {"commands": ["test -f local.ok"], "success": "Exists"},
+        "done_when": ["Local and integration pass"],
+    }
+    async with factory() as session:
+        project = Project(name="Test", key="TST", repository_path=str(tmp_path))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        first = Task(id="TST-2", project=project, sequence=2, title="First", goal="First", parent=parent, subtask_position=0, status=TaskStatus.DONE, stage=TaskStage.COMPLETE)
+        last = Task(id="TST-3", project=project, sequence=3, title="Last", goal="Last", parent=parent, subtask_position=1, status=TaskStatus.IN_PROGRESS, stage=TaskStage.VALIDATING, approved_plan_revision=1)
+        parent_plan = PlanRevision(task=parent, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"validation_commands": ["test -f integration.ok"]})
+        child_plan = PlanRevision(task=last, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [package], "validation_commands": ["true"]})
+        attempt = Attempt(task_id=last.id, number=1, instruction="Finish")
+        session.add_all([project, parent, first, last, parent_plan, child_plan])
+        await session.flush()
+        session.add(attempt)
+        await session.commit()
+        attempt_id = attempt.id
+    (tmp_path / "local.ok").write_text("yes")
+    pipeline = ImplementationPipeline(factory, object(), tmp_path / "artifacts")
+    failed = await pipeline._validate(last, child_plan, Checkout("main", tmp_path), attempt_id, 1)
+    assert failed.passed is False
+    (tmp_path / "integration.ok").write_text("yes")
+    passed = await pipeline._validate(last, child_plan, Checkout("main", tmp_path), attempt_id, 2)
+    assert passed.passed is True
+    async with factory() as session:
+        revision = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == parent.id))
+        revision.metadata_json = {"validation_commands": ["missing-integration-check-command"]}
+        await session.commit()
+    unavailable = await pipeline._validate(last, child_plan, Checkout("main", tmp_path), attempt_id, 3)
+    assert unavailable.passed is False
+    async with factory() as session:
+        commands = (await session.scalars(select(ValidationRun.command).where(ValidationRun.task_id == last.id).order_by(ValidationRun.id))).all()
+        assert commands == ["test -f local.ok", "test -f integration.ok"] * 2 + ["test -f local.ok", "missing-integration-check-command"]
+        last_run = await session.scalar(select(ValidationRun).where(ValidationRun.task_id == last.id).order_by(ValidationRun.id.desc()).limit(1))
+        assert last_run.classification == "UNVERIFIABLE"
+    await engine.dispose()
+
+
 def git(path: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(path), *args],

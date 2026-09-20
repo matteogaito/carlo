@@ -20,6 +20,8 @@ export function DiscoveriesView({ api, projects, event, setError, openDiscoveryI
   const fileRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<File[]>([])
   const [sending, setSending] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  useEffect(() => setConfirmDelete(false), [selected?.id])
 
   const refresh = useCallback(async () => {
     const discoveries = await api.listDiscoveries()
@@ -84,6 +86,16 @@ export function DiscoveriesView({ api, projects, event, setError, openDiscoveryI
       setCreating(false)
       setSelected(discovery)
       await refresh()
+    } catch (error) { setError(String(error)) }
+  }
+
+  async function deleteSelected() {
+    if (!selected) return
+    try {
+      await api.deleteDiscovery(selected.id)
+      setSelected(null)
+      setConfirmDelete(false)
+      setItems(await api.listDiscoveries())
     } catch (error) { setError(String(error)) }
   }
 
@@ -157,13 +169,12 @@ export function DiscoveriesView({ api, projects, event, setError, openDiscoveryI
         {stream && <article className="chat-message assistant streaming"><span>CARLO</span><Markdown>{stream}</Markdown></article>}
         {selected.current_turn?.status === 'QUEUED' || selected.current_turn?.status === 'RUNNING' ? <div className="thinking" aria-live="polite"><i />{activity || 'Pi is exploring the repository…'} <button onClick={() => void api.stopDiscovery(selected.id).then(setSelected)}>Stop</button></div> : null}
         {!!pendingProposals.length && <section className="discovery-actions" aria-label="Ready task actions">
-          <span>READY TO BUILD</span>
-          <h3>{pendingProposals.length === 1 ? '1 task is ready' : `${pendingProposals.length} tasks are ready`}</h3>
-          {pendingProposals.map((proposal) => <div key={proposal.id}>
-            <strong>{proposal.title}</strong>
-            {proposal.validation_error && <p className="proposal-error">⚠️ {proposal.validation_error}</p>}
-            <button disabled={!proposalReady(proposal)} onClick={() => void createTasks(selected.id, [proposal.id])}>Create task</button>
-          </div>)}
+          <span>PROPOSED TASKS</span>
+          <h3>{pendingProposals.length === 1 ? '1 parent Task proposed' : `${pendingProposals.length} parent Tasks proposed`}</h3>
+          {pendingProposals.map((proposal) => <article className="proposal-tree" key={proposal.id}>
+            <ProposalTree proposal={proposal} proposals={state?.task_proposals || []} />
+            <button disabled={!proposalReady(proposal) || !(proposal.depends_on || []).every((id) => state?.task_proposals?.find((item) => item.id === id)?.created_task_id)} onClick={() => void createTasks(selected.id, [proposal.id])}>Create task</button>
+          </article>)}
           <button className="create-all" disabled={!allProposalsReady} onClick={() => void createTasks(selected.id)}>Create all Ready tasks</button>
         </section>}
         {fixProposal && <section className="discovery-actions" aria-label="Fix proposal">
@@ -193,19 +204,21 @@ export function DiscoveriesView({ api, projects, event, setError, openDiscoveryI
       <Context title="Open questions" values={state?.unresolved_questions || []} />
       <Context title="Files explored" values={state?.inspected_resources || []} code />
       <Context title="Commands" values={state?.commands || []} code />
-      {!!state?.task_proposals?.length && <section><h3>Ready tasks</h3>{state.task_proposals.map((proposal) => <article className="proposal" key={proposal.id}>
+      {!!state?.task_proposals?.length && <section><h3>Proposed tasks</h3>{state.task_proposals.map((proposal) => <article className="proposal" key={proposal.id}>
         {proposal.created_task_id ? <><strong>{proposal.title}</strong><span className="proposal-state">Created · {proposal.created_task_id}</span></> : <>
           <details>
-            <summary><strong>{proposal.title}</strong><span className="proposal-state">{proposal.validation_error ? 'Needs a fix' : proposalReady(proposal) ? 'Plan ready' : 'Planning in Discovery…'}</span></summary>
+            <summary><strong>{proposal.title}</strong><span className="proposal-state">{proposal.planning_error ? 'Plan failed' : proposal.validation_error ? 'Needs a fix' : proposalReady(proposal) ? 'Plan ready' : 'Planning in Carlo…'}</span></summary>
             {proposal.validation_error && <p className="proposal-error">⚠️ {proposal.validation_error}</p>}
-            {proposalReady(proposal) && <div className="proposal-plan"><h4>Brief</h4><Markdown>{proposal.brief_markdown}</Markdown><h4>Plan</h4><Markdown>{proposal.plan_markdown}</Markdown>
-              {!!proposal.metadata?.implementation_phases?.length && <ol>{proposal.metadata.implementation_phases.map((phase) => <li key={phase}>{phase}</li>)}</ol>}
+            {proposalReady(proposal) && <div className="proposal-plan"><h4>Brief</h4><Markdown>{proposal.plan_draft?.brief_markdown}</Markdown><h4>Plan</h4><Markdown>{proposal.plan_draft?.plan_markdown}</Markdown>
+              <ProposalTree proposal={proposal} proposals={state?.task_proposals || []} />
             </div>}
           </details>
-          <button disabled={!proposalReady(proposal)} onClick={() => void createTasks(selected.id, [proposal.id])}>Create Ready task</button>
+          <button disabled={!proposalReady(proposal) || !(proposal.depends_on || []).every((id) => state?.task_proposals?.find((item) => item.id === id)?.created_task_id)} onClick={() => void createTasks(selected.id, [proposal.id])}>Create Ready task</button>
         </>}
       </article>)}<button className="create-all" disabled={!allProposalsReady} onClick={() => void createTasks(selected.id)}>Create all Ready tasks</button></section>}
-      {selected.status === 'OPEN' && <footer><button className="danger" onClick={() => void api.closeDiscovery(selected.id).then(setSelected)}>Close Discovery</button></footer>}
+      <footer>{selected.status === 'OPEN' && <button className="danger" onClick={() => void api.closeDiscovery(selected.id).then(setSelected)}>Close Discovery</button>}
+        {confirmDelete ? <div className="delete-confirm"><p>Eliminare questa discovery e i suoi allegati? I Task creati restano.</p><button onClick={() => setConfirmDelete(false)}>Annulla</button><button className="danger" onClick={() => void deleteSelected()}>Elimina</button></div> : <button className="danger" onClick={() => setConfirmDelete(true)}>Delete Discovery</button>}
+      </footer>
     </aside>}
 
     {creating && <div className="modal-backdrop"><section className="modal-panel discovery-create" role="dialog" aria-modal="true" aria-labelledby="new-discovery"><header><div><span>NEW CONVERSATION</span><h2 id="new-discovery">Start Discovery</h2></div><button className="close" onClick={() => setCreating(false)}>×</button></header><form onSubmit={create}><label>Project<select name="project_id">{projects.map((project) => <option key={project.id} value={project.id}>{project.key} · {project.name}</option>)}</select></label><label>Title<input name="title" required autoFocus /></label><label>First message<textarea name="message" rows={7} required /></label><footer><button type="button" onClick={() => setCreating(false)}>Cancel</button><button className="primary" type="submit">Start Discovery</button></footer></form></section></div>}
@@ -213,13 +226,35 @@ export function DiscoveriesView({ api, projects, event, setError, openDiscoveryI
 }
 
 function proposalReady(proposal: DiscoveryProposal): boolean {
-  const metadata = proposal.metadata
+  const draft = proposal.plan_draft
   return Boolean(
     !proposal.validation_error
-    && proposal.brief_markdown?.trim()
-    && proposal.plan_markdown?.trim()
-    && (metadata?.implementation_tasks?.length || metadata?.implementation_phases?.length),
+    && proposal.draft_source
+    && draft?.brief_markdown?.trim()
+    && draft?.plan_markdown?.trim()
+    && draft?.metadata?.implementation_tasks?.length,
   )
+}
+
+function ProposalTree({ proposal, proposals }: { proposal: DiscoveryProposal; proposals: DiscoveryProposal[] }) {
+  const children = proposal.plan_draft?.metadata?.implementation_tasks || []
+  const dependencies = (proposal.depends_on || []).map((id) => proposals.find((item) => item.id === id)?.title || id)
+  return <details className="proposal-parent" open>
+    <summary><strong>{proposal.title}</strong><span>{children.length} {children.length === 1 ? 'subtask' : 'subtasks'}</span></summary>
+    <p className="proposal-goal">{proposal.megaprompt}</p>
+    {!!dependencies.length && <p>Depends on: {dependencies.join(', ')}</p>}
+    {proposal.planning_error && <p className="proposal-error">{proposal.planning_error}</p>}
+    {proposal.validation_error && !proposal.planning_error && <p className="proposal-error">{proposal.validation_error}</p>}
+    {!children.length && !proposal.planning_error && <p>Planning in corso…</p>}
+    <ol>{children.map((child) => <li key={child.id}><details>
+      <summary>{child.title}</summary>
+      <p>{child.objective}</p>
+      <p>Files: {child.files.map((file) => file.path).join(', ')}</p>
+      <p>Interfaces: {child.interfaces.join(', ')}</p>
+      {!!child.constraints.length && <p>Constraints: {child.constraints.join(', ')}</p>}
+      <p>Checks: {child.verification.commands.join(', ')}</p>
+    </details></li>)}</ol>
+  </details>
 }
 
 type MessageAttachment = { name: string; stored_name: string; kind: 'image' | 'file' }

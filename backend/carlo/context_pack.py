@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .api import ImplementationTask
+from .planning import ImplementationTask
 
 
 class ContextPackError(ValueError):
@@ -70,6 +70,7 @@ def build_context_pack(
     package: dict[str, Any],
     *,
     max_tokens: int = 18_000,
+    brief: str = "",
 ) -> str:
     """Return stable text; reject missing, unsafe, or oversized inputs."""
     if max_tokens < 1:
@@ -84,7 +85,7 @@ def build_context_pack(
     if len({entry.path for entry in item.files}) != len(item.files):
         raise ContextPackError("work package lists a file more than once")
 
-    parts = [
+    parts = ([f"Parent Brief:\n{brief}"] if brief else []) + [
         "Implement only this work package.",
         "The required file context is supplied below. Read or explore other files only if indispensable; explain why in your response.",
         f"Objective: {item.objective}",

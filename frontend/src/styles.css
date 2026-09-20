@@ -142,6 +142,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .timeline-row time { color: #69756e; font-family: ui-monospace, monospace; }
 .detail-stage { margin: 0; padding: 10px 24px; color: white; background: var(--pine); font: 650 11px ui-monospace, monospace; text-transform: uppercase; }
 .task-actions { display: flex; gap: 8px; padding: 10px 24px; border-bottom: 1px solid var(--line); background: var(--paper); }
+.task-action-menu { position: relative; padding: 0 24px 10px; border-bottom: 1px solid var(--line); }
+.task-action-menu > summary { width: fit-content; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: white; cursor: pointer; font-weight: 700; }
+.task-action-menu .task-actions { position: absolute; z-index: 5; top: 40px; left: 24px; display: grid; min-width: 230px; max-width: min(360px, calc(100vw - 48px)); padding: 8px; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 14px 28px rgb(0 0 0 / .14); }
+.task-action-menu .task-actions button { width: 100%; text-align: left; }
+.task-delete-confirm p { margin: 6px 8px; font-size: 12px; line-height: 1.4; }
 .task-actions:empty { display: none; }
 .close { border: 0; background: transparent; font-size: 30px; line-height: 1; }
 .git-evidence dl { display: grid; grid-template-columns: 90px 1fr; gap: 8px; margin: 0; font-size: 12px; }
@@ -310,6 +315,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .discovery-actions button { flex: 0 0 auto; border: 1px solid var(--ink); border-radius: 8px; padding: 7px 10px; background: white; }
 .discovery-actions button:disabled { cursor: not-allowed; opacity: .45; }
 .discovery-actions .create-all { margin-top: 12px; color: white; background: var(--ink); }
+.proposal-tree { padding: 12px 0; border-top: 1px solid #dce5df; }
+.proposal-tree > button { margin-top: 10px; }
+.proposal-parent > summary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; cursor: pointer; }
+.proposal-parent > summary span { color: var(--pine); font: 700 10px ui-monospace, monospace; white-space: nowrap; }
+.proposal-parent > p { margin: 8px 0; color: #66746b; font-size: 12px; }
+.proposal-parent .proposal-goal { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; white-space: pre-wrap; }
+.proposal-parent ol { margin: 10px 0 0; padding-left: 22px; border-left: 1px solid #cbd8cf; }
+.proposal-parent li { padding: 5px 0 5px 4px; font-size: 12px; }
+.proposal-parent li summary { cursor: pointer; font-weight: 700; }
+.proposal-parent li p { margin: 5px 0; color: #5b675f; overflow-wrap: anywhere; }
+.delete-confirm { padding-top: 8px; }
+.delete-confirm p { font-size: 12px; line-height: 1.4; }
 .tool-message { margin: 0 0 18px; border: 1px solid var(--line); border-radius: 10px; background: #fafaf8; }
 .tool-message summary { padding: 10px 13px; cursor: pointer; color: #666; font: 650 11px ui-monospace, monospace; }
 .tool-message pre { margin: 0; border-radius: 0 0 9px 9px; }

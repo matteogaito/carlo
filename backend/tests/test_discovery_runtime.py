@@ -1,13 +1,15 @@
 import asyncio
+import json
+from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from carlo.discovery_runtime import DiscoveryRuntime
+from carlo.discovery_runtime import DiscoveryRuntime, _normalized_state
 from carlo.domain import TaskStage, TaskStatus
 from carlo.model_providers import CredentialCipher
 from carlo.models import (
@@ -26,6 +28,30 @@ from carlo.models import (
     Task,
 )
 from carlo.provider import ConversationEvent, ConversationState
+from carlo.planning import proposal_source
+from tests.fakes import FakeProvider
+
+
+def test_normalized_state_keeps_created_proposals_and_ignores_model_created_ids() -> None:
+    previous = {"task_proposals": [{"id": "built", "title": "Built", "created_task_id": "TST-1"}]}
+    state = _normalized_state({"task_proposals": [
+        {"id": "new", "title": "New", "megaprompt": "Build", "depends_on": [], "created_task_id": "FAKE"},
+        {"id": "built", "title": "Altered", "megaprompt": "Altered", "depends_on": []},
+    ]}, previous)
+    assert state["task_proposals"][0].get("created_task_id") is None
+    assert state["task_proposals"][1]["created_task_id"] == "TST-1"
+    assert state["task_proposals"][1]["title"] == "Built"
+    assert _normalized_state({"task_proposals": []}, previous)["task_proposals"][0]["id"] == "built"
+
+
+@pytest.fixture(autouse=True)
+async def isolate_discovery_worker_queue() -> None:
+    """Each worker test must claim only turns it created."""
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(text("TRUNCATE discovery_turns CASCADE"))
+    await engine.dispose()
 
 
 class Session:
@@ -62,6 +88,83 @@ class Provider:
         self.profiles.append(profile)
         self.open_kwargs.append(kwargs)
         return self.session
+
+
+@pytest.mark.asyncio
+async def test_discovery_candidates_use_canonical_planner_and_keep_unchanged_drafts(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    key = f"PLAN{uuid4().hex[:6].upper()}"
+    state = {"summary": "Implement API and UI", "findings": ["api.py owns API"], "decisions": ["API first"],
+             "task_proposals": [
+                 {"id": "api", "title": "API", "megaprompt": "Build API", "depends_on": []},
+                 {"id": "ui", "title": "UI", "megaprompt": "Build UI", "depends_on": ["api"]},
+             ]}
+    async with factory() as session:
+        discovery = Discovery(project=Project(name=key, key=key, repository_path=str(tmp_path)),
+                              title="Build", provider_session_id=f"discovery-{key}",
+                              state=state, memory_path=str(tmp_path / "MEMORY.md"))
+        session.add(discovery)
+        await session.commit()
+        discovery_id = discovery.id
+    output = {"brief_markdown": "Brief", "plan_markdown": "Plan", "metadata": {
+        "skills": [], "validation_commands": ["pytest -q"], "browser_validation": False,
+        "build_required": False, "run_required": False, "deployment_expected": False,
+        "risk_flags": [], "affected_areas": [], "implementation_tasks": [{
+            "id": "one", "title": "Implement", "position": 0, "objective": "Deliver", "files": [
+                {"path": "app.py", "mode": "edit", "reason": "Implementation"}],
+            "interfaces": ["Preserve API"], "changes": {"app.py": "Implement"},
+            "constraints": [], "verification": {"commands": ["pytest -q"], "success": "Pass"},
+            "done_when": ["Tests pass"],
+        }],
+    }}
+    provider = FakeProvider(json.dumps(output))
+    runtime = DiscoveryRuntime(factory, provider, Path("/guard.mjs"))
+    await runtime._plan_candidates(discovery_id)
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        proposals = deepcopy(discovery.state["task_proposals"])
+        assert [item["plan_draft"]["metadata"]["implementation_tasks"][0]["title"] for item in proposals] == ["Implement", "Implement"]
+        assert len(provider.calls) == 2
+        assert all(call[0].name == "plan" for call in provider.calls)
+        old_ui_source = proposals[1]["draft_source"]
+        proposals[0]["megaprompt"] = "Build a revised API"
+        discovery.state = {**discovery.state, "task_proposals": proposals}
+        await session.commit()
+    await runtime._plan_candidates(discovery_id)
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        assert discovery.state["task_proposals"][1]["draft_source"] == old_ui_source
+        assert len(provider.calls) == 3
+        assert discovery.state["task_proposals"][0]["draft_source"] == proposal_source(discovery.state["task_proposals"][0], discovery.state)
+
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        changed = deepcopy(discovery.state)
+        changed["task_proposals"][0]["megaprompt"] = "Build another API"
+        discovery.state = changed
+        await session.commit()
+
+    class MutatingProvider(FakeProvider):
+        async def run(self, *args, **kwargs):
+            async with factory() as session:
+                current = await session.get(Discovery, discovery_id)
+                state = deepcopy(current.state)
+                state["task_proposals"][0]["megaprompt"] = "Newest API request"
+                current.state = state
+                await session.commit()
+            return await super().run(*args, **kwargs)
+
+    stale_provider = MutatingProvider(json.dumps(output))
+    await DiscoveryRuntime(factory, stale_provider, Path("/guard.mjs"))._plan_candidates(discovery_id)
+    async with factory() as session:
+        discovery = await session.get(Discovery, discovery_id)
+        candidate = discovery.state["task_proposals"][0]
+        assert candidate["draft_source"] != proposal_source(candidate, discovery.state)
+        assert len(stale_provider.calls) == 1
+    await engine.dispose()
 
 
 class CancellingSession(Session):
@@ -453,20 +556,23 @@ class MismatchedProposalSession(Session):
             "inspected_resources": [], "commands": [],
             "task_proposals": [{
                 "id": "archive", "title": "Archivio destinazioni", "megaprompt": "Build the archive.",
-                "depends_on": [], "brief_markdown": "# Brief", "plan_markdown": "# Plan",
-                "metadata": {
-                    "skills": [], "implementation_tasks": [MISMATCHED_WORK_PACKAGE],
-                    "implementation_phases": ["Archivio"], "validation_commands": ["pytest -q"],
-                    "browser_validation": False, "build_required": False, "run_required": False,
-                    "deployment_expected": False, "risk_flags": [], "affected_areas": ["src"],
-                },
+                "depends_on": [],
             }],
         }}})
         yield ConversationEvent("agent_end", {})
 
 
-class MismatchedProposalProvider:
+class MismatchedProposalProvider(FakeProvider):
     def __init__(self):
+        super().__init__(json.dumps({
+            "brief_markdown": "# Brief", "plan_markdown": "# Plan",
+            "metadata": {
+                "skills": [], "implementation_tasks": [MISMATCHED_WORK_PACKAGE],
+                "implementation_phases": ["Archivio"], "validation_commands": ["pytest -q"],
+                "browser_validation": False, "build_required": False, "run_required": False,
+                "deployment_expected": False, "risk_flags": [], "affected_areas": ["src"],
+            },
+        }))
         self.session = MismatchedProposalSession()
 
     async def open_conversation(self, *args, **kwargs):

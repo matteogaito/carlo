@@ -90,6 +90,7 @@ export interface Task {
   subtask_count?: number
   superseded_at?: string | null
   replan_allowed?: boolean
+  delete_allowed?: boolean
   available_model_id?: number | null
   used_skills?: string[]
   skill_revisions?: Record<string, string[]>
@@ -127,6 +128,9 @@ export interface DiscoveryProposal {
   title: string
   megaprompt: string
   depends_on: string[]
+  plan_draft?: Pick<Plan, 'brief_markdown' | 'plan_markdown' | 'metadata'> | null
+  draft_source?: string | null
+  planning_error?: string | null
   brief_markdown?: string
   plan_markdown?: string
   metadata?: Plan['metadata']
@@ -358,10 +362,12 @@ export interface Api {
   uploadDiscoveryScreenshot(id: number, file: File): Promise<Discovery>
   stopDiscovery(id: number): Promise<Discovery>
   closeDiscovery(id: number): Promise<Discovery>
+  deleteDiscovery(id: number): Promise<void>
   createDiscoveryTasks(id: number, proposalIds?: string[]): Promise<Task[]>
   reworkChat(taskId: string): Promise<Discovery>
   applyDiscoveryFix(id: number): Promise<Task>
   getTask(id: string): Promise<Task>
+  deleteTask(id: string): Promise<void>
   createProject(input: Pick<Project, 'name' | 'key' | 'repository_path'>): Promise<Project>
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'> & { prompt_filename?: string }): Promise<Task>
   startPlanning(id: string): Promise<Task>
@@ -463,10 +469,12 @@ export const httpApi: Api = {
   },
   stopDiscovery: (id) => request(`/api/discoveries/${id}/stop`, { method: 'POST' }),
   closeDiscovery: (id) => request(`/api/discoveries/${id}/close`, { method: 'POST' }),
+  deleteDiscovery: (id) => request(`/api/discoveries/${id}`, { method: 'DELETE' }),
   createDiscoveryTasks: (id, proposalIds = []) => request(`/api/discoveries/${id}/tasks`, { method: 'POST', body: JSON.stringify({ proposal_ids: proposalIds }) }),
   reworkChat: (taskId) => request(`/api/tasks/${taskId}/rework-chat`, { method: 'POST' }),
   applyDiscoveryFix: (id) => request(`/api/discoveries/${id}/apply-fix`, { method: 'POST' }),
   getTask: (id) => request(`/api/tasks/${id}`),
+  deleteTask: (id) => request(`/api/tasks/${id}`, { method: 'DELETE' }),
   createProject: (input) => request('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
   startPlanning: (id) => request(`/api/tasks/${id}/plan`, { method: 'POST' }),

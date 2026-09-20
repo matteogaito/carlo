@@ -341,6 +341,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             stop={() => void act(() => api.stopTask(selected.id))}
             hold={() => void act(() => api.holdTask(selected.id))}
             resume={() => void act(() => api.resumeTask(selected.id))}
+            deleteTask={() => void api.deleteTask(selected.id).then(() => { setSelected(null); return refresh() }).catch((cause) => setError(String(cause)))}
             onOpenParent={() => selected.parent_task_id && void openTask(selected.parent_task_id)}
             approve={() => selected.plan && void act(() =>
               api.approvePlan(selected.id, selected.plan!.revision, selected.version)
@@ -513,7 +514,7 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, retry, stop, hold, resume, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
+function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, retry, stop, hold, resume, deleteTask, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
@@ -524,6 +525,7 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
   stop: () => void
   hold: () => void
   resume: () => void
+  deleteTask: () => void
   onOpenParent: () => void
   approve: () => void
   answerPlanning: (answer: string) => void
@@ -540,6 +542,8 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
     && task.plan.metadata.implementation_tasks?.length,
   )
   const [resizing, setResizing] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  useEffect(() => setConfirmDelete(false), [task.id])
   const planningActivity = (task.events || [])
     .filter((event) => event.type.startsWith('planning.'))
     .slice(0, 8)
@@ -584,7 +588,7 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
           <button className="close" onClick={close} aria-label="Close task detail">×</button>
         </header>
         <p className="detail-stage">{task.status.replaceAll('_', ' ')} · {task.stage.replaceAll('_', ' ')}</p>
-        <nav className="task-actions" aria-label="Task actions">
+        <details className="task-action-menu"><summary>Actions</summary><nav className="task-actions" aria-label="Task actions">
           {task.stage === 'created' && <button onClick={startPlanning}>Build Brief & Plan</button>}
           {task.stage === 'awaiting_approval' && task.plan && <button onClick={approve}>{task.plan.metadata.replan ? 'Approve replan → Replace subtasks' : 'Approve Plan → Ready'}</button>}
           {task.replan_allowed && <button onClick={replan}>Replan subtasks</button>}
@@ -597,7 +601,10 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
             ? <button onClick={retry}>Retry subtask</button>
             : task.status === 'FAILED' && <button onClick={rework}>Rework from original request</button>}
           {(task.status === 'FAILED' || (task.status === 'IN_PROGRESS' && task.stage === 'blocked')) && <button onClick={reworkChat}>Discuti e correggi</button>}
-        </nav>
+          {task.delete_allowed && (confirmDelete
+            ? <div className="task-delete-confirm"><p>Eliminare questo Task padre e tutti i suoi subtasks? Branch e worktree nel repository restano.</p><button onClick={() => setConfirmDelete(false)}>Cancel</button><button className="danger" onClick={deleteTask}>Confirm delete</button></div>
+            : <button className="danger" onClick={() => setConfirmDelete(true)}>Delete parent Task</button>)}
+        </nav></details>
         {!['IN_PROGRESS', 'TEST', 'DONE'].includes(task.status) && <label className="task-model-select">Task model<select value={task.available_model_id || ''} onChange={(event) => setModel(Number(event.target.value) || null)}>
           <option value="">Use agent profile</option>
           {models.map((model) => <option key={model.id} value={model.id}>{model.model_provider_name} · {model.display_name || model.external_id}</option>)}

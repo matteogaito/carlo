@@ -542,6 +542,7 @@ class ImplementationPipeline:
                     pack = build_context_pack(
                         worktree.path, packages[0],
                         max_tokens=self.context_pack_budget_tokens,
+                        brief=plan.brief_markdown,
                     )
                 except ContextPackError as error:
                     await self._record_context_pack_replan(task_id, error)
@@ -1070,7 +1071,26 @@ class ImplementationPipeline:
         attempt_id: int,
         attempt_number: int,
     ) -> ValidationBatch:
-        commands = plan.metadata_json.get("validation_commands") or task.project.validation_commands
+        if task.parent_task_id is None:
+            commands = plan.metadata_json.get("validation_commands") or task.project.validation_commands
+        else:
+            packages = plan.metadata_json.get("implementation_tasks") or []
+            commands = list(packages[0].get("verification", {}).get("commands", [])) if len(packages) == 1 else []
+            async with self.session_factory() as session:
+                later = await session.scalar(select(func.count(Task.id)).where(
+                    Task.parent_task_id == task.parent_task_id,
+                    Task.superseded_at.is_(None),
+                    Task.subtask_position > task.subtask_position,
+                ))
+                if not later:
+                    parent = await session.get(Task, task.parent_task_id)
+                    parent_plan = await session.scalar(select(PlanRevision).where(
+                        PlanRevision.task_id == parent.id,
+                        PlanRevision.revision == parent.approved_plan_revision,
+                    )) if parent else None
+                    if parent_plan:
+                        commands.extend(parent_plan.metadata_json.get("validation_commands") or task.project.validation_commands)
+            commands = list(dict.fromkeys(commands))
         if not commands:
             return ValidationBatch(
                 False,

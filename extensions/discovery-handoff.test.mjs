@@ -23,25 +23,17 @@ registerHooks({
   },
 });
 
-test("Discovery tool accepts complete local-worker packages and existing proposal identity", async () => {
+test("Discovery tool captures candidates while Carlo owns work packages", async () => {
   const { default: discoveryGuard } = await import("./carlo-discovery-guard.mjs");
   let tool;
   discoveryGuard({ on() {}, registerTool(value) { tool = value; } });
 
   const proposal = tool.parameters.properties.task_proposals.items.properties;
   assert.ok(proposal.id);
-  assert.ok(proposal.created_task_id);
-  const workPackage = proposal.metadata.properties.implementation_tasks.items.properties;
-  for (const field of ["id", "title", "position", "objective", "files", "interfaces", "changes", "constraints", "verification", "done_when", "budget"]) {
-    assert.ok(workPackage[field], `missing work-package field: ${field}`);
-  }
-  const file = workPackage.files.items.properties;
-  for (const field of ["path", "mode", "ranges", "symbols", "reason"]) {
-    assert.ok(file[field], `missing package-file field: ${field}`);
-  }
-  assert.ok(workPackage.verification.properties.commands);
-  assert.ok(workPackage.verification.properties.success);
-  assert.ok(workPackage.budget.properties.max_tool_calls);
+  assert.equal(proposal.created_task_id, undefined);
+  for (const field of ["title", "megaprompt", "depends_on"]) assert.ok(proposal[field]);
+  assert.equal(proposal.metadata, undefined);
+  assert.equal(proposal.plan_markdown, undefined);
 });
 
 test("Rework tool accepts a task-level revision or a parent-level split", async () => {

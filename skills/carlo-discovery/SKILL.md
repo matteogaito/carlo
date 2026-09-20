@@ -35,37 +35,23 @@ Do not use memory as a substitute for the transcript. Correct stale state when l
 
 When a concrete change emerges, identify distinct Tasks and ask only for missing high-impact information. Once sufficient:
 
-1. Build an evidence-oriented Brief and implementation Plan while repository
-   context is already available in the Discovery.
-2. Clearly propose each fully planned Task in chat.
-3. Put the same proposals in `task_proposals`.
-4. Wait for user confirmation; CARLO creates and approves the real Tasks.
+1. Identify the parent Task boundaries from the approved outcome and repository evidence. A proposal is one parent candidate; use as many as the work requires.
+2. Clearly propose each candidate in chat and put it in `task_proposals`.
+3. CARLO runs its canonical planning profile for each candidate and shows the resulting Brief, Plan, and child tree for review before Create.
+4. Wait for user confirmation; CARLO creates and approves exactly the reviewed plans.
 
-Each proposal contains:
+Each candidate contains:
 
-- `title`: concise goal title;
-- `megaprompt`: self-contained implementation input with goal, scope, relevant findings and decisions, evidence, files/symbols, acceptance criteria, dependencies, constraints, and validation commands;
-- `depends_on`: titles of proposals that must finish first;
-- `brief_markdown`: repository understanding, evidence, constraints, risks,
-  assumptions, relevant files and symbols;
-- `plan_markdown`: ordered, technical implementation strategy with invariants,
-  error handling, validation and stopping conditions;
-- `metadata`: the same contract as CARLO planning, including ordered
-  `implementation_tasks` with complete work packages (`id`, `title`, zero-based
-  `position`, `objective`, project-relative `files` with mode/ranges or symbols,
-  `interfaces`, file-keyed `changes`, `constraints`, exact quiet `verification`,
-  `done_when`, and `budget.max_tool_calls`, default 20 and never above 30) for
-  every context-bounded subtask; keep each planned context pack near
-  15,000–20,000 tokens — a task needing more than 30 tool calls is not one
-  outcome, propose several smaller ones instead; plus `packages`,
-  standalone `skills`, concise ordered `implementation_phases`, verified
-  `validation_commands`, the four validation/deployment booleans, `risk_flags`,
-  and `affected_areas`.
+- `id`: stable identifier across turns;
+- `title`: concise parent goal;
+- `megaprompt`: self-contained implementation input with goal, scope, relevant findings and decisions, evidence, files/symbols, acceptance criteria, constraints, and validation commands;
+- `depends_on`: IDs of parent candidates that must finish first.
+
+Discovery supplies decisions and evidence, not hand-authored Briefs or work packages. Ask high-impact questions before proposing a candidate. The canonical planner decides the ordered, independently verifiable child packages and reviews the tree for omitted work.
 
 Only emit a proposal after high-impact questions are resolved. The plan should
 shift costly decisions upstream without brittle line-by-line pseudocode. The
-user's Create action approves the displayed plans, so incomplete proposals must
-remain questions in the conversation instead of entering `task_proposals`.
+user's Create action approves the displayed canonical plans. Candidates awaiting planning remain visible but cannot be created.
 
 Do not create placeholder candidates, split work merely for organizational neatness, or include unrelated Discovery history. A Discovery may create zero, one, or many Tasks and remain open afterward.
 
@@ -75,5 +61,4 @@ Do not create placeholder candidates, split work merely for organizational neatn
 - Repeating the whole transcript: update concise structured state instead.
 - Treating a hypothesis as a finding: label it and verify where practical.
 - Sneaking implementation into diagnostics: stop and propose a Task.
-- Producing an underspecified handoff: include the evidence and complete plan so
-  the Task does not repeat Discovery or planning.
+- Producing an underspecified handoff: include decisions and evidence so the canonical planner can produce a complete plan.

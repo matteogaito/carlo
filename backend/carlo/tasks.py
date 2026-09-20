@@ -23,6 +23,7 @@ async def create_task(
     *,
     priority: int = 0,
     created_source: str = "web",
+    commit: bool = True,
 ) -> Task:
     project = await session.scalar(
         select(Project).where(Project.id == project_id).with_for_update()
@@ -65,7 +66,10 @@ async def create_task(
         [task, Event(task=task, type="task.created", payload={"source": created_source})]
     )
     try:
-        await session.commit()
+        if commit:
+            await session.commit()
+        else:
+            await session.flush()
     except Exception:
         await session.rollback()
         prompt_path.unlink(missing_ok=True)
