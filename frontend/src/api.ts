@@ -371,6 +371,7 @@ export interface Api {
   stopTask(id: string): Promise<Task>
   holdTask(id: string): Promise<Task>
   resumeTask(id: string): Promise<Task>
+  reorderTasks(taskIds: string[]): Promise<Task[]>
   answerPlanning(id: string, answer: string): Promise<Task>
   approvePlan(id: string, revision: number, version: number): Promise<Task>
   listProjectActions(projectId: number): Promise<ActionCatalog>
@@ -475,6 +476,7 @@ export const httpApi: Api = {
   stopTask: (id) => request(`/api/tasks/${id}/stop`, { method: 'POST' }),
   holdTask: (id) => request(`/api/tasks/${id}/hold`, { method: 'POST' }),
   resumeTask: (id) => request(`/api/tasks/${id}/resume`, { method: 'POST' }),
+  reorderTasks: (taskIds) => request('/api/tasks/reorder', { method: 'POST', body: JSON.stringify({ task_ids: taskIds }) }),
   answerPlanning: (id, answer) => request(`/api/tasks/${id}/plan/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
   approvePlan: (id, revision, version) => request(`/api/tasks/${id}/approve`, {
     method: 'POST',

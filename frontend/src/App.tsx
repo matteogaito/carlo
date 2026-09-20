@@ -142,7 +142,7 @@ export function App({ api = httpApi }: { api?: Api }) {
     }
   }, [api, refresh, selected?.id, user])
 
-  const active = useMemo(() => tasks.find((task) => task.status === 'IN_PROGRESS'), [tasks])
+  const active = useMemo(() => tasks.find((task) => task.status === 'IN_PROGRESS' && !task.superseded_at), [tasks])
   const workingDiscovery = useMemo(
     () => discoveries.find((discovery) =>
       discovery.current_turn?.status === 'RUNNING' || discovery.current_turn?.status === 'QUEUED'
@@ -158,6 +158,23 @@ export function App({ api = httpApi }: { api?: Api }) {
     boardLevel === 'goals' ? !task.parent_task_id : !task.subtask_count
   ), [boardLevel, visibleTasks])
   const hasAggregates = visibleTasks.some((task) => task.subtask_count)
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null)
+  const reorderableColumns: TaskStatus[] = ['NOT_READY', 'READY']
+
+  async function reorderColumn(status: TaskStatus, draggedId: string, targetId: string) {
+    const ids = boardTasks.filter((task) => task.status === status).map((task) => task.id)
+    const from = ids.indexOf(draggedId)
+    const to = ids.indexOf(targetId)
+    if (from === -1 || to === -1 || from === to) return
+    ids.splice(from, 1)
+    ids.splice(to, 0, draggedId)
+    try {
+      await api.reorderTasks(ids)
+      await refresh()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not reorder tasks')
+    }
+  }
 
   async function act(action: () => Promise<Task>) {
     try {
@@ -263,7 +280,7 @@ export function App({ api = httpApi }: { api?: Api }) {
           onClick={() => setSelectedProjectId(project.id)}
         >{project.key} · {project.name}</button>)}
       </nav>}
-      {error && <div className="error-banner" role="alert">{error}</div>}
+      {error && <div className="error-banner" role="alert"><span>{error}</span><button className="error-banner-close" aria-label="Chiudi" onClick={() => setError('')}>×</button></div>}
       {installUpdate && <div className="update-banner">A CARLO update is ready.<button onClick={installUpdate}>Update now</button></div>}
 
       <ErrorBoundary key={view}>
@@ -279,12 +296,23 @@ export function App({ api = httpApi }: { api?: Api }) {
                   <b>{cards.length}</b>
                 </header>
                 <div className="card-stack">
-                  {cards.map((task) => (
+                  {cards.map((task) => {
+                    const reorderable = reorderableColumns.includes(column.status)
+                    return (
                     <button
-                      className={task.status === 'IN_PROGRESS' ? 'task-card running' : 'task-card'}
+                      className={`${task.status === 'IN_PROGRESS' ? 'task-card running' : 'task-card'}${reorderable && draggedTaskId === task.id ? ' dragging' : ''}`}
                       key={task.id}
                       onClick={() => void openTask(task.id)}
                       aria-label={`${task.id} ${task.title}${task.parent_title ? ` ${task.parent_title}` : ''}`}
+                      draggable={reorderable}
+                      onDragStart={reorderable ? () => setDraggedTaskId(task.id) : undefined}
+                      onDragEnd={reorderable ? () => setDraggedTaskId(null) : undefined}
+                      onDragOver={reorderable ? (event) => event.preventDefault() : undefined}
+                      onDrop={reorderable ? (event) => {
+                        event.preventDefault()
+                        if (draggedTaskId && draggedTaskId !== task.id) void reorderColumn(column.status, draggedTaskId, task.id)
+                        setDraggedTaskId(null)
+                      } : undefined}
                     >
                       <span className="task-id">{task.id}</span>
                       <strong>{task.title}</strong>
@@ -292,7 +320,8 @@ export function App({ api = httpApi }: { api?: Api }) {
                       {task.checkpoint_sha && <code>{task.checkpoint_sha.slice(0, 7)}</code>}
                       {task.parent_title && <span className="task-parent">{task.parent_title}</span>}
                     </button>
-                  ))}
+                    )
+                  })}
                   {!cards.length && <p className="empty">No tasks at this stage.</p>}
                 </div>
               </section>
@@ -562,6 +591,7 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
           {task.status === 'IN_PROGRESS' && task.stage === 'blocked' && Boolean(task.plan?.metadata.amendment) && <button onClick={approve}>Approve amendment</button>}
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && <button className="danger" onClick={stop}>Stop → Ready</button>}
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && !task.parent_task_id && <button onClick={hold}>Put in Not Ready</button>}
+          {task.status === 'FAILED' && !task.parent_task_id && <button onClick={hold}>Put in Not Ready</button>}
           {task.status === 'READY' && Boolean(task.subtask_count) && <button onClick={resume}>Resume execution</button>}
           {task.status === 'FAILED' && task.parent_task_id && task.approved_plan_revision
             ? <button onClick={retry}>Retry subtask</button>

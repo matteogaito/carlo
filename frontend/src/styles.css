@@ -75,7 +75,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .project-filter button:first-child { border-color: #aeb8b2; background: var(--paper); }
 .project-filter button.active { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
 .project-filter .board-level-toggle { border-color: var(--ink); color: white; background: var(--ink); }
-.error-banner { margin: 12px 24px 0; padding: 10px 14px; color: #fff; background: var(--fault); font-weight: 650; }
+.error-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 24px 0; padding: 10px 14px; color: #fff; background: var(--fault); font-weight: 650; }
+.error-banner-close { flex: none; border: none; padding: 0 4px; color: #fff; background: transparent; font-size: 18px; line-height: 1; cursor: pointer; opacity: 0.85; }
+.error-banner-close:hover { opacity: 1; }
 .update-banner { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 9px 14px; color: white; background: var(--ink); font-size: 13px; }
 .update-banner button { border: 1px solid white; border-radius: 7px; padding: 5px 8px; color: white; background: transparent; }
 
@@ -91,6 +93,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .task-card { position: relative; display: grid; gap: 8px; width: 100%; min-height: 128px; padding: 15px 16px; text-align: left; color: var(--ink); background: var(--paper); border: 1px solid #aeb8b2; border-radius: 2px; clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%); box-shadow: 0 4px 0 rgb(21 32 28 / .06); }
 .task-card::after { content: ""; position: absolute; right: 0; top: 0; border-style: solid; border-width: 0 12px 12px 0; border-color: transparent var(--line) transparent transparent; }
 .task-card:hover { border-color: var(--pine); transform: translateY(-1px); }
+.task-card[draggable="true"] { cursor: grab; }
+.task-card.dragging { opacity: 0.4; }
 .task-card.running { padding-left: 22px; }
 .task-card.running::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 6px; background: linear-gradient(180deg, var(--pine), var(--brass), var(--pine)); background-size: 100% 200%; animation: runtime-rail 5s linear infinite; }
 .task-id { color: var(--pine); font: 750 11px ui-monospace, monospace; letter-spacing: .08em; }

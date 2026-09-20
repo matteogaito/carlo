@@ -86,6 +86,7 @@ const api: Api = {
   stopTask: async () => task,
   holdTask: async () => task,
   resumeTask: async () => task,
+  reorderTasks: async () => [task],
   answerPlanning: async () => task,
   approvePlan: async () => task,
   listProjectActions: async () => ({ project_id: 1, commit_sha: 'abc', branch: 'main', dirty_paths: [], actions: [], error: null }),
@@ -1067,5 +1068,28 @@ describe('CARLO board', () => {
 
     expect(logout).toHaveBeenCalledOnce()
     expect(await screen.findByRole('heading', { name: 'Sign in to CARLO' })).toBeTruthy()
+  })
+
+  it('drags a Ready card onto another to reorder the column', async () => {
+    const first: Task = { ...task, id: 'CAR-1', title: 'First', status: 'READY', stage: 'queued', parent_task_id: null as string | null }
+    const second: Task = { ...task, id: 'CAR-2', title: 'Second', status: 'READY', stage: 'queued', parent_task_id: null as string | null }
+    const reorderTasks = vi.fn(async () => [second, first])
+    render(<App api={{ ...api, listTasks: async () => [first, second], reorderTasks }} />)
+
+    const firstCard = await screen.findByRole('button', { name: /CAR-1 First/ })
+    const secondCard = await screen.findByRole('button', { name: /CAR-2 Second/ })
+    fireEvent.dragStart(firstCard)
+    fireEvent.dragOver(secondCard)
+    fireEvent.drop(secondCard)
+
+    expect(reorderTasks).toHaveBeenCalledWith(['CAR-2', 'CAR-1'])
+  })
+
+  it('does not let a Failed card be dragged', async () => {
+    const failed: Task = { ...task, id: 'CAR-1', title: 'Failed goal', status: 'FAILED', stage: 'blocked', parent_task_id: null as string | null }
+    render(<App api={{ ...api, listTasks: async () => [failed] }} />)
+
+    const card = await screen.findByRole('button', { name: /CAR-1 Failed goal/ })
+    expect(card.draggable).toBe(false)
   })
 })

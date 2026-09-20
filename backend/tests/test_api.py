@@ -1173,3 +1173,41 @@ async def test_planning_runs_concurrently_without_the_implementation_lock(
         responses = await asyncio.gather(*planning)
         assert [response.status_code for response in responses] == [200, 200]
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reorder_tasks_sets_priority_from_the_given_order(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repository)], check=True, capture_output=True)
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(text("TRUNCATE projects, users, agent_profiles RESTART IDENTITY CASCADE"))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    app = create_app(factory, FakeProvider(json.dumps({})), Settings(app_origin="http://test"))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        client.headers["Origin"] = "http://test"
+        project = (await client.post("/api/projects", json={"name": "CARLO", "key": "CAR", "repository_path": str(repository)})).json()
+
+        async with factory() as session:
+            project_record = await session.get(Project, project["id"])
+            session.add_all([
+                Task(id="CAR-1", project=project_record, sequence=1, title="One", goal="One", status=TaskStatus.NOT_READY, stage=TaskStage.CREATED),
+                Task(id="CAR-2", project=project_record, sequence=2, title="Two", goal="Two", status=TaskStatus.NOT_READY, stage=TaskStage.CREATED),
+                Task(id="CAR-3", project=project_record, sequence=3, title="Three", goal="Three", status=TaskStatus.NOT_READY, stage=TaskStage.CREATED),
+            ])
+            await session.commit()
+
+        reordered = await client.post("/api/tasks/reorder", json={"task_ids": ["CAR-3", "CAR-1", "CAR-2"]})
+        assert reordered.status_code == 200
+        assert [task["priority"] for task in reordered.json()] == [3, 2, 1]
+
+        listed = (await client.get("/api/tasks")).json()
+        assert [task["id"] for task in listed] == ["CAR-3", "CAR-1", "CAR-2"]
+
+        missing = await client.post("/api/tasks/reorder", json={"task_ids": ["CAR-1", "CAR-404"]})
+        assert missing.status_code == 404
+    await engine.dispose()

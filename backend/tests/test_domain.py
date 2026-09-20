@@ -36,3 +36,9 @@ def test_hold_parks_in_progress_task_to_not_ready() -> None:
     assert transition(
         TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING, "hold"
     ) == (TaskStatus.NOT_READY, TaskStage.CREATED)
+
+
+def test_hold_parks_failed_task_to_not_ready() -> None:
+    assert transition(
+        TaskStatus.FAILED, TaskStage.BLOCKED, "hold"
+    ) == (TaskStatus.NOT_READY, TaskStage.CREATED)

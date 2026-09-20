@@ -108,6 +108,10 @@ class TaskCreate(BaseModel):
         return value
 
 
+class TaskReorder(BaseModel):
+    task_ids: list[str] = Field(min_length=1)
+
+
 class DiscoveryCreate(BaseModel):
     project_id: int
     title: str = Field(min_length=1, max_length=240)
@@ -2209,6 +2213,24 @@ def create_app(
             )
         ).unique().all()
         return [await _task_view(session, task) for task in tasks]
+
+    @api.post("/tasks/reorder")
+    async def reorder_tasks(
+        payload: TaskReorder, session: AsyncSession = Depends(get_session)
+    ) -> list[dict[str, Any]]:
+        tasks = (
+            await session.scalars(
+                select(Task).where(Task.id.in_(payload.task_ids)).with_for_update()
+            )
+        ).all()
+        by_id = {task.id: task for task in tasks}
+        if set(by_id) != set(payload.task_ids):
+            raise HTTPException(404, "unknown task id in reorder list")
+        total = len(payload.task_ids)
+        for index, task_id in enumerate(payload.task_ids):
+            by_id[task_id].priority = total - index
+        await session.commit()
+        return [await _task_view(session, by_id[task_id]) for task_id in payload.task_ids]
 
     @api.get("/tasks/{task_id}")
     async def get_task(
