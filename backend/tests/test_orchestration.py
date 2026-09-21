@@ -472,6 +472,49 @@ async def test_subtask_retries_design_only_response_without_repository_changes(t
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_subtask_retry_receives_validation_failure_output(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    checker = repository / "check.sh"
+    checker.write_text("#!/bin/sh\ngrep -qx good feature.txt || { echo EXPECTED_GOOD_CONTENT; exit 1; }\n")
+    checker.chmod(0o755)
+    git(repository, "add", "check.sh")
+    git(repository, "commit", "-m", "add checker")
+    git(repository, "branch", "-f", "carlo-Dev", "HEAD")
+    engine, factory = await empty_orchestration_store()
+    package = {
+        "id": "wp-1", "title": "Create feature", "position": 0,
+        "objective": "Create feature.txt", "files": [{"path": "feature.txt", "mode": "create", "reason": "Output"}],
+        "interfaces": ["feature.txt contains good"], "changes": {"feature.txt": "Write good"},
+        "constraints": [], "verification": {"commands": ["./check.sh"], "success": "Exit zero"},
+        "done_when": ["Checker passes"], "budget": {"max_tool_calls": 20},
+    }
+    async with factory() as session:
+        await add_managed_profiles(session, "implementation", "escalation")
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Create feature", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        session.add_all([project, parent, child, PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [package]})])
+        await session.commit()
+
+    class Provider:
+        calls = 0
+
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            self.calls += 1
+            if self.calls == 1:
+                Path(cwd, "feature.txt").write_text("bad\n")
+            else:
+                assert "EXPECTED_GOOD_CONTENT" in instruction
+                Path(cwd, "feature.txt").write_text("good\n")
+            return AgentResult(session_id, "Implemented.", (), 0)
+
+    provider = Provider()
+    assert await ImplementationPipeline(factory, provider, tmp_path / "artifacts").run("TST-2") == "validated"
+    assert provider.calls == 2
+    await engine.dispose()
+
+
 def test_fewer_failures_is_progress() -> None:
     previous = ValidationSnapshot(failures=7, completed_steps=1)
     current = ValidationSnapshot(failures=2, completed_steps=1)

@@ -450,6 +450,9 @@ class ImplementationPipeline:
         _, previous_cycle_attempt, focused_retry = (
             await self._rework_context(task_id)
         )
+        retry_feedback = (
+            await self._latest_validation_feedback(task_id) if focused_retry else None
+        )
         base_ref = None
         if task.parent_task_id is not None and task.subtask_position:
             async with self.session_factory() as session:
@@ -522,6 +525,8 @@ class ImplementationPipeline:
                 )
                 return "validated"
             previous = recovered.snapshot
+            retry_feedback = recovered.summary[-6_000:]
+            focused_retry = True
         start = await self._next_attempt_number(task_id)
         attempts_used = max(0, start - 1 - previous_cycle_attempt)
         attempts_left = max(0, self.max_attempts - attempts_used)
@@ -533,7 +538,7 @@ class ImplementationPipeline:
             runtime_instruction = (
                 self._context_recovery_instruction(task, recovery_checkpoint)
                 if recovery_checkpoint
-                else self._focused_retry_instruction(task)
+                else self._focused_retry_instruction(task, retry_feedback)
                 if focused_retry
                 else self._implementation_instruction(task, plan, strategy)
             )
@@ -622,6 +627,7 @@ class ImplementationPipeline:
                 raise
             recovery_checkpoint = None
             focused_retry = False
+            retry_feedback = None
             await self._record_provider_result(task_id, attempt_id, number, result)
             deviation = major_deviation(result.output)
             if deviation:
@@ -673,6 +679,8 @@ class ImplementationPipeline:
                 )
                 await self._set_checkpoint(task_id, checkpoint)
             previous = batch.snapshot
+            retry_feedback = batch.summary[-6_000:]
+            focused_retry = True
             stalled = detect_stall(history)
             if stalled and task.parent_task_id is None:
                 root_count = await self._escalation_count(task_id)
@@ -708,6 +716,16 @@ class ImplementationPipeline:
                 Escalation.task_id == task_id,
                 Escalation.reason == "work_package",
             )) or 0)
+
+    async def _latest_validation_feedback(self, task_id: str) -> str | None:
+        async with self.session_factory() as session:
+            run = await session.scalar(
+                select(ValidationRun)
+                .where(ValidationRun.task_id == task_id, ValidationRun.exit_code != 0)
+                .order_by(ValidationRun.id.desc())
+                .limit(1)
+            )
+        return run.summary[-6_000:] if run and run.summary else None
 
     async def _escalation_count(self, task_id: str) -> int:
         async with self.session_factory() as session:
@@ -1450,13 +1468,18 @@ class ImplementationPipeline:
         )
 
     @staticmethod
-    def _focused_retry_instruction(task: Task) -> str:
+    def _focused_retry_instruction(task: Task, validation_feedback: str | None = None) -> str:
         checkpoint = f" at checkpoint {task.checkpoint_sha}" if task.checkpoint_sha else ""
+        feedback = (
+            f"\n\nThe previous validation failed. Fix these exact failures before rerunning it:\n{validation_feedback}"
+            if validation_feedback else ""
+        )
         return (
             f"Retry only subtask {task.id}: {task.goal}\n\n"
             f"Continue from the existing worktree{checkpoint}. Inspect the current "
             "files and recent Git history, fix the failed implementation, and run the "
             "repository's relevant tests. Do not restart or request the broader plan."
+            f"{feedback}"
         )
 
 
