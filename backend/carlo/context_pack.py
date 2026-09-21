@@ -71,6 +71,7 @@ def build_context_pack(
     *,
     max_tokens: int = 18_000,
     brief: str = "",
+    include_file_contents: bool = True,
 ) -> str:
     """Return stable text; reject missing, unsafe, or oversized inputs."""
     if max_tokens < 1:
@@ -86,7 +87,7 @@ def build_context_pack(
         raise ContextPackError("work package lists a file more than once")
 
     parts = ([f"Parent Brief:\n{brief}"] if brief else []) + [
-        "Implement only this work package.",
+        "This work package is already human-approved. Implement it now; do not brainstorm, propose another design, or wait for approval.",
         "The required file context is supplied below. Read or explore other files only if indispensable; explain why in your response.",
         f"Objective: {item.objective}",
         "Changes:",
@@ -106,6 +107,9 @@ def build_context_pack(
         path = (root / entry.path).resolve()
         if not path.is_relative_to(root):
             raise ContextPackError(f"file is outside the project: {entry.path}")
+        if not include_file_contents:
+            parts.append(f"File: {entry.path} ({entry.mode}; content omitted for retry; reason: {entry.reason})")
+            continue
         if not path.exists():
             if entry.mode != "create":
                 raise ContextPackError(f"file is missing: {entry.path}")

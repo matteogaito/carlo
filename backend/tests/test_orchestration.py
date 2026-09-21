@@ -87,6 +87,65 @@ async def test_last_child_runs_local_and_parent_integration_checks(tmp_path: Pat
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_xcode_validation_fails_when_a_requested_test_suite_did_not_run(tmp_path: Path) -> None:
+    engine, factory = await empty_orchestration_store()
+    fake_xcodebuild = tmp_path / "xcodebuild"
+    fake_xcodebuild.write_text(
+        "#!/bin/sh\n"
+        "echo 'Command line invocation:'\n"
+        "echo '    -only-testing:PhotoDiggerTests/MissingTests'\n"
+        "echo '    -only-testing:PhotoDiggerTests/OtherExisting'\n"
+        "echo '    -only-testing:PhotoDiggerTests/ExistingTests/testWork'\n"
+        "echo '    -only-testing:PhotoDiggerTests/ExistingTests/testWorks'\n"
+        "echo \"Test Suite 'ExistingTests' started at 2026-09-21\"\n"
+        "echo \"Test Case '-[PhotoDiggerTests.OtherExistingTests testWorks]' passed (0.001 seconds).\"\n"
+        "echo \"Test Case '-[PhotoDiggerTests.ExistingTests testWorksLonger]' passed (0.001 seconds).\"\n"
+        "echo \"Test Case '-[PhotoDiggerTests.ExistingTests testWorks]' passed (0.001 seconds).\"\n"
+        "exit 0\n"
+    )
+    fake_xcodebuild.chmod(0o755)
+    command = (
+        f"{fake_xcodebuild} test -only-testing:PhotoDiggerTests/MissingTests "
+        "-only-testing:PhotoDiggerTests/OtherExisting "
+        "-only-testing:PhotoDiggerTests/ExistingTests/testWork "
+        "-only-testing:PhotoDiggerTests/ExistingTests/testWorks"
+    )
+    package = {
+        "id": "final", "title": "Finish", "position": 0, "objective": "Finish feature",
+        "files": [{"path": "feature.swift", "mode": "create", "reason": "Feature"}],
+        "interfaces": ["Feature exists"], "changes": {"feature.swift": "Create it"},
+        "constraints": [], "verification": {"commands": [command], "success": "Both suites run"},
+        "done_when": ["Both suites pass"],
+    }
+    async with factory() as session:
+        project = Project(name="Test", key="TST", repository_path=str(tmp_path))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Build", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.VALIDATING, approved_plan_revision=1)
+        plan = PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [package]})
+        session.add_all([project, parent, child, plan])
+        await session.flush()
+        attempt = Attempt(task_id=child.id, number=1, instruction="Build")
+        session.add(attempt)
+        await session.commit()
+        attempt_id = attempt.id
+
+    batch = await ImplementationPipeline(factory, object(), tmp_path / "artifacts")._validate(
+        child, plan, Checkout("main", tmp_path), attempt_id, 1
+    )
+    assert batch.passed is False
+    missing = set(batch.summary.rsplit("CARLO: requested tests did not run: ", 1)[1].split(", "))
+    assert missing == {
+        "PhotoDiggerTests/MissingTests",
+        "PhotoDiggerTests/OtherExisting",
+        "PhotoDiggerTests/ExistingTests/testWork",
+    }
+    async with factory() as session:
+        run = await session.scalar(select(ValidationRun).where(ValidationRun.task_id == child.id))
+        assert run.classification == "PARTIALLY_VERIFIED"
+    await engine.dispose()
+
+
 def git(path: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(path), *args],
@@ -318,6 +377,89 @@ async def test_subtask_budget_stops_after_three_local_sessions_then_escalates(tm
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_subtask_budget_retry_does_not_repack_partial_generated_files(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    engine, factory = await empty_orchestration_store()
+    package = {
+        "id": "wp-1", "title": "Create feature", "position": 0,
+        "objective": "Create feature.txt", "files": [{"path": "feature.txt", "mode": "create", "reason": "Output"}],
+        "interfaces": ["feature.txt exists"], "changes": {"feature.txt": "Write done"},
+        "constraints": [], "verification": {"commands": ["test -f feature.txt"], "success": "Exit zero"},
+        "done_when": ["File exists"], "budget": {"max_tool_calls": 2},
+    }
+    async with factory() as session:
+        await add_managed_profiles(session, "implementation", "escalation")
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Create feature", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        plan = PlanRevision(task=child, revision=1, brief_markdown="Shared architecture", plan_markdown="Plan", metadata_json={"implementation_tasks": [package], "validation_commands": ["test -f feature.txt"]})
+        session.add_all([project, parent, child, plan])
+        await session.commit()
+
+    class Provider:
+        calls = 0
+
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            self.calls += 1
+            if self.calls == 1:
+                Path(cwd, "feature.txt").write_text("partial\n" * 20_000)
+                for _ in range(3):
+                    await on_event({"type": "tool_execution_start", "toolName": "write", "args": {"path": "feature.txt"}})
+                raise AssertionError("the third tool must be stopped")
+            assert "Shared architecture" in instruction
+            assert len(instruction) < 18_000
+            return AgentResult(session_id, "done", (), 0)
+
+    pipeline = ImplementationPipeline(factory, Provider(), tmp_path / "artifacts")
+    assert await pipeline.run("TST-2") == "validated"
+    async with factory() as session:
+        attempts = (await session.scalars(select(Attempt).where(Attempt.task_id == "TST-2").order_by(Attempt.number))).all()
+        assert [attempt.outcome for attempt in attempts] == ["budget_exceeded", "verified"]
+        assert await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "context_pack.replan_required")) is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_subtask_retries_design_only_response_without_repository_changes(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    engine, factory = await empty_orchestration_store()
+    package = {
+        "id": "wp-1", "title": "Create feature", "position": 0,
+        "objective": "Create feature.txt", "files": [{"path": "feature.txt", "mode": "create", "reason": "Output"}],
+        "interfaces": ["feature.txt exists"], "changes": {"feature.txt": "Write done"},
+        "constraints": [], "verification": {"commands": ["test -f feature.txt"], "success": "Exit zero"},
+        "done_when": ["File exists"], "budget": {"max_tool_calls": 20},
+    }
+    async with factory() as session:
+        await add_managed_profiles(session, "implementation", "escalation")
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Create feature", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        plan = PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [package], "validation_commands": ["test -f feature.txt"]})
+        session.add_all([project, parent, child, plan])
+        await session.commit()
+
+    class Provider:
+        calls = 0
+
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            self.calls += 1
+            if self.calls == 1:
+                return AgentResult(session_id, "Ready for approval.", (), 0)
+            Path(cwd, "feature.txt").write_text("done\n")
+            return AgentResult(session_id, "Implemented.", (), 0)
+
+    provider = Provider()
+    pipeline = ImplementationPipeline(factory, provider, tmp_path / "artifacts")
+    assert await pipeline.run("TST-2") == "validated"
+    assert provider.calls == 2
+    async with factory() as session:
+        attempts = (await session.scalars(select(Attempt).where(Attempt.task_id == "TST-2").order_by(Attempt.number))).all()
+        assert [attempt.outcome for attempt in attempts] == ["no_progress", "verified"]
+    await engine.dispose()
+
+
 def test_fewer_failures_is_progress() -> None:
     previous = ValidationSnapshot(failures=7, completed_steps=1)
     current = ValidationSnapshot(failures=2, completed_steps=1)
@@ -490,12 +632,11 @@ async def test_context_limit_rolls_over_to_a_focused_subtask_attempt(
             self.instructions.append(instruction)
             self.sessions.append(session_id)
             if len(self.instructions) == 1:
-                Path(cwd, "feature.txt").write_text("partial")
+                Path(cwd, "feature.txt").write_text("done" if recovery_succeeds else "partial")
                 raise ContextLimitError("Prompt too long")
             if not recovery_succeeds:
                 raise ContextLimitError("Still too long")
-            assert Path(cwd, "feature.txt").read_text() == "partial"
-            Path(cwd, "feature.txt").write_text("done")
+            assert Path(cwd, "feature.txt").read_text() == "done"
             return AgentResult(session_id, "complete", (), 0)
 
         async def stop(self, session_id: str) -> None:

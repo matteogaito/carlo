@@ -32,6 +32,7 @@ def test_pack_is_byte_stable_and_sorts_files_and_ranges(tmp_path: Path) -> None:
     assert "1 | one" in first and "3 | three" in first and "4 | four" in first
     assert "2 | two" not in first
     assert first.index("Objective:") < first.index("File: a.py")
+    assert "already human-approved" in first
 
 
 def test_pack_extracts_python_and_swift_symbols(tmp_path: Path) -> None:
@@ -73,6 +74,19 @@ def test_pack_budget_is_rejected_not_truncated(tmp_path: Path) -> None:
             max_tokens=100,
         )
     assert error.value.estimated_tokens > 100
+
+
+def test_compact_retry_pack_keeps_contract_but_omits_file_contents(tmp_path: Path) -> None:
+    (tmp_path / "large.py").write_text("private implementation\n" * 1_000)
+    result = build_context_pack(
+        tmp_path,
+        package([{"path": "large.py", "mode": "edit", "reason": "Parser"}]),
+        include_file_contents=False,
+    )
+    assert "Objective: The parser accepts quoted fields." in result
+    assert "parse(text: str)" in result
+    assert "pytest -q tests/test_parser.py" in result
+    assert "private implementation" not in result
 
 
 def test_siblings_share_brief_prefix_and_brief_counts_toward_budget(tmp_path: Path) -> None:

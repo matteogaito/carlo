@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import re
 import shlex
@@ -45,6 +46,7 @@ from .api import _active_children, _materialize_plan_subtasks, work_package_exam
 
 IMPLEMENTATION_LOCK = 1_128_352_847
 MAX_INTERRUPTS = 3
+EMPTY_DIFF_HASH = hashlib.sha256(b"").hexdigest()
 
 
 class TaskStopRequested(BaseException):
@@ -527,6 +529,7 @@ class ImplementationPipeline:
             attempts_left = min(attempts_left, 3)
         recovery_checkpoint: str | None = None
         for number in range(start, start + attempts_left):
+            is_recovery_attempt = recovery_checkpoint is not None
             runtime_instruction = (
                 self._context_recovery_instruction(task, recovery_checkpoint)
                 if recovery_checkpoint
@@ -539,23 +542,23 @@ class ImplementationPipeline:
                     packages = plan.metadata_json.get("implementation_tasks")
                     if not isinstance(packages, list) or len(packages) != 1:
                         raise ContextPackError("subtask has no single complete work package; replan required")
-                    pack = build_context_pack(
-                        worktree.path, packages[0],
-                        max_tokens=self.context_pack_budget_tokens,
-                        brief=plan.brief_markdown,
-                    )
+                    if is_recovery_attempt or focused_retry:
+                        pack = build_context_pack(
+                            worktree.path, packages[0],
+                            max_tokens=self.context_pack_budget_tokens,
+                            brief=plan.brief_markdown,
+                            include_file_contents=False,
+                        )
+                    else:
+                        pack = build_context_pack(
+                            worktree.path, packages[0],
+                            max_tokens=self.context_pack_budget_tokens,
+                            brief=plan.brief_markdown,
+                        )
+                        runtime_instruction = f"Current strategy: {strategy}"
                 except ContextPackError as error:
                     await self._record_context_pack_replan(task_id, error)
                     return "failed"
-                if recovery_checkpoint:
-                    runtime_instruction = (
-                        f"Resume from checkpoint {recovery_checkpoint} after context recovery. "
-                        "Inspect the current checkout only as needed and rerun relevant tests."
-                    )
-                elif focused_retry:
-                    runtime_instruction = "Retry from the saved checkout; preserve useful existing work."
-                else:
-                    runtime_instruction = f"Current strategy: {strategy}"
                 instruction = (
                     f"{pack}\nRuntime state:\n{runtime_instruction}\n"
                     "Work only inside the project checkout. Run no undeclared deployment commands."
@@ -598,6 +601,7 @@ class ImplementationPipeline:
                 if meter is not None:
                     await self._record_session_metrics(task_id, number, meter.summary("budget_exceeded"))
                 history.append(AttemptSignal("tool_budget_exceeded", await workspace.diff_hash(worktree), strategy))
+                focused_retry = True
                 continue
             except ContextLimitError as error:
                 was_recovery = recovery_checkpoint is not None
@@ -627,6 +631,21 @@ class ImplementationPipeline:
                 if meter is not None:
                     await self._record_session_metrics(task_id, number, meter.summary("escalated"))
                 return "blocked"
+            if (
+                task.parent_task_id is not None
+                and packages[0].get("changes")
+                and not is_recovery_attempt
+                and task.checkpoint_sha is None
+                and await workspace.diff_hash(worktree) == EMPTY_DIFF_HASH
+            ):
+                await self._mark_attempt_outcome(
+                    task_id, attempt_id, "no_progress", "provider completed without repository changes"
+                )
+                if meter is not None:
+                    await self._record_session_metrics(task_id, number, meter.summary("no_progress"))
+                history.append(AttemptSignal("no_repository_changes", EMPTY_DIFF_HASH, strategy))
+                focused_retry = True
+                continue
             await self._set_stage(task_id, TaskStage.VALIDATING)
             batch = await self._validate(task, plan, worktree, attempt_id, number)
             if batch.passed:
@@ -1117,6 +1136,10 @@ class ImplementationPipeline:
                 stdout, _ = await process.communicate()
                 output = stdout.decode(errors="replace")
                 exit_code = process.returncode or 0
+                missing_tests = _missing_requested_xcode_tests(arguments, output)
+                if exit_code == 0 and missing_tests:
+                    output += "\nCARLO: requested tests did not run: " + ", ".join(missing_tests)
+                    exit_code = 1
                 classification = "VERIFIED" if exit_code == 0 else "PARTIALLY_VERIFIED"
             except (FileNotFoundError, ValueError) as error:
                 output = str(error)
@@ -1409,6 +1432,48 @@ class ImplementationPipeline:
 def _failure_count(output: str) -> int:
     match = re.search(r"(\d+)\s+failed", output, re.IGNORECASE)
     return int(match.group(1)) if match else 1
+
+
+def _missing_requested_xcode_tests(arguments: list[str], output: str) -> list[str]:
+    if not arguments or Path(arguments[0]).name != "xcodebuild" or "test" not in arguments:
+        return []
+    selectors: list[str] = []
+    for index, argument in enumerate(arguments):
+        if argument.startswith("-only-testing:"):
+            selectors.append(argument.split(":", 1)[1])
+        elif argument == "-only-testing" and index + 1 < len(arguments):
+            selectors.append(arguments[index + 1])
+    suite_markers = re.findall(
+        r"^\s*Test Suite ['\"]([^'\"]+)['\"] (?:started|passed|failed)\b",
+        output,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    case_markers = re.findall(
+        r"^\s*Test Case ['\"]([^'\"]+)['\"] (?:started|passed|failed)\b",
+        output,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    case_runs: set[tuple[str, str]] = set()
+    for marker in case_markers:
+        if marker.startswith("-[") and marker.endswith("]") and " " in marker:
+            qualified, method = marker[2:-1].split(" ", 1)
+            case_runs.add((qualified.rsplit(".", 1)[-1], method))
+    missing: list[str] = []
+    for selector in selectors:
+        components = selector.split("/")[1:]
+        if not components:
+            continue
+        suite = components[0]
+        method = components[1] if len(components) > 1 else None
+        ran = (
+            (suite, method) in case_runs
+            if method
+            else any(marker == suite or marker.endswith(f".{suite}") for marker in suite_markers)
+            or any(case_suite == suite for case_suite, _ in case_runs)
+        )
+        if not ran:
+            missing.append(selector)
+    return missing
 
 
 def major_deviation(output: str) -> dict[str, str] | None:
