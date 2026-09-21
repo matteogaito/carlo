@@ -203,6 +203,8 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
     class Provider:
         async def run(self, profile, instruction, cwd, session_id, on_event=None):
             assert "may not raise max_tool_calls above the original package budget" in instruction
+            assert "may be corrected or reverted without human approval" in instruction
+            assert "Failing tests are not a human blocker" in instruction
             return AgentResult(session_id, json.dumps({"action": "revise", "diagnosis": "Missing empty case", "package": revised}), (), 0)
 
     pipeline = ImplementationPipeline(factory, Provider(), tmp_path / "artifacts")
@@ -243,7 +245,9 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
         ]
         updated_parent = await session.get(Task, "TST-1")
         assert updated_parent.approved_plan_revision == 2
-        new_children = (await session.scalars(select(Task).where(Task.parent_task_id == "TST-1", Task.superseded_at.is_(None)))).all()
+        new_children = (await session.scalars(select(Task).where(
+            Task.parent_task_id == "TST-1", Task.superseded_at.is_(None)
+        ).order_by(Task.subtask_position))).all()
         assert [(child.title, child.subtask_position) for child in new_children] == [
             ("Fix parser", 0),
             ("Fix parser part 2", 1),
@@ -291,7 +295,7 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
 
 
 @pytest.mark.asyncio
-async def test_revise_escalation_upgrades_model_only_from_the_second_escalation(tmp_path: Path) -> None:
+async def test_revise_escalation_upgrades_model_for_expert_retry(tmp_path: Path) -> None:
     repository = repository_at(tmp_path / "repo")
     engine, factory = await empty_orchestration_store()
     original = escalation_package()
@@ -320,19 +324,57 @@ async def test_revise_escalation_upgrades_model_only_from_the_second_escalation(
         escalation_count=0, coder_expert=coder_expert,
     ) == "retry"
     async with factory() as session:
-        assert (await session.get(Task, "TST-2")).available_model_id is None
-        assert await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "escalation.model_upgraded")) is None
-
-    assert await pipeline._escalate_work_package(
-        child, plan, AgentProfile("escalation", None, None, (), ()),
-        Checkout("main", repository), original, "validation_failed", [],
-        escalation_count=1, coder_expert=coder_expert,
-    ) == "retry"
-    async with factory() as session:
         assert (await session.get(Task, "TST-2")).available_model_id == expert_model_id
         upgrade_event = await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "escalation.model_upgraded"))
         assert upgrade_event is not None
         assert upgrade_event.payload["profile"] == "coder-expert"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_automatic_package_revision_gets_new_productive_retries(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    (repository / "src").mkdir()
+    (repository / "src/parser.py").write_text("base\n")
+    subprocess.run(["git", "-C", str(repository), "add", "src/parser.py"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-m", "add parser"], check=True)
+    subprocess.run(["git", "-C", str(repository), "branch", "-f", "carlo-Dev", "HEAD"], check=True)
+    engine, factory = await empty_orchestration_store()
+    original = escalation_package()
+    original = {
+        **original,
+        "verification": {"commands": ["grep -q done src/parser.py"], "success": "Exit zero"},
+    }
+    revised = {**original, "changes": {"src/parser.py": "Write done"}}
+    async with factory() as session:
+        await add_managed_profiles(session, "implementation", "escalation", "coder-expert")
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Parse", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Parse", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        plan = PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [original], "validation_commands": ["grep -q done src/parser.py"]})
+        session.add_all([project, parent, child, plan])
+        await session.commit()
+
+    class Provider:
+        implementation_calls = 0
+
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            if profile.name == "escalation":
+                return AgentResult(session_id, json.dumps({"action": "revise", "diagnosis": "Use the exact output", "package": revised}), (), 0)
+            self.implementation_calls += 1
+            Path(cwd, "src/parser.py").write_text(
+                "done\n" if self.implementation_calls == 4 else "wrong\n"
+            )
+            return AgentResult(session_id, "done", (), 0)
+
+    pipeline = ImplementationPipeline(factory, Provider(), tmp_path / "artifacts")
+    outcome = await pipeline.run("TST-2")
+    assert outcome == "validated", pipeline.provider.implementation_calls
+    async with factory() as session:
+        attempts = (await session.scalars(select(Attempt).where(Attempt.task_id == "TST-2").order_by(Attempt.number))).all()
+        assert [attempt.outcome for attempt in attempts] == [
+            "validation_failed", "validation_failed", "validation_failed", "verified"
+        ]
     await engine.dispose()
 
 
@@ -379,6 +421,9 @@ async def test_subtask_budget_stops_after_three_local_sessions_then_escalates(tm
             await on_event({"type": "message_end", "message": {"role": "assistant", "usage": {"input": 500, "output": 20}}})
             raise ProviderError("model unavailable")
 
+    async with factory() as session:
+        session.add(Event(task_id="TST-2", type="task.retry.started", payload={"previous_attempt": 3}))
+        await session.commit()
     pipeline.provider = CrashedProvider()
     with pytest.raises(ProviderError, match="model unavailable"):
         await pipeline.run("TST-2")
@@ -386,6 +431,48 @@ async def test_subtask_budget_stops_after_three_local_sessions_then_escalates(tm
         latest = await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "execution.session_metrics").order_by(Event.sequence.desc()))
         assert latest.payload["outcome"] == "failed"
         assert latest.payload["model_calls"] == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_subtask_budget_overruns_do_not_consume_productive_retries(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    engine, factory = await empty_orchestration_store()
+    package = {
+        "id": "wp-1", "title": "Create feature", "position": 0,
+        "objective": "Create feature.txt", "files": [{"path": "feature.txt", "mode": "create", "reason": "Output"}],
+        "interfaces": ["feature.txt exists"], "changes": {"feature.txt": "Write done"},
+        "constraints": [], "verification": {"commands": ["grep -q done feature.txt"], "success": "Exit zero"},
+        "done_when": ["File contains done"], "budget": {"max_tool_calls": 2},
+    }
+    async with factory() as session:
+        await add_managed_profiles(session, "implementation", "escalation")
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Create feature", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        session.add_all([project, parent, child, PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [package], "validation_commands": ["grep -q done feature.txt"]})])
+        await session.commit()
+
+    class Provider:
+        calls = 0
+
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            if profile.name == "escalation":
+                return AgentResult(session_id, json.dumps({"action": "blocked", "diagnosis": "Human needed"}), (), 0)
+            self.calls += 1
+            if self.calls <= 2:
+                for _ in range(3):
+                    await on_event({"type": "tool_execution_start", "toolName": "read", "args": {"path": "README.md"}})
+            Path(cwd, "feature.txt").write_text("wrong\n" if self.calls == 3 else "done\n")
+            return AgentResult(session_id, "done", (), 0)
+
+    pipeline = ImplementationPipeline(factory, Provider(), tmp_path / "artifacts")
+    assert await pipeline.run("TST-2") == "validated"
+    async with factory() as session:
+        attempts = (await session.scalars(select(Attempt).where(Attempt.task_id == "TST-2").order_by(Attempt.number))).all()
+        assert [attempt.outcome for attempt in attempts] == [
+            "budget_exceeded", "budget_exceeded", "validation_failed", "verified"
+        ]
     await engine.dispose()
 
 

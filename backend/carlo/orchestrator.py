@@ -530,10 +530,53 @@ class ImplementationPipeline:
         start = await self._next_attempt_number(task_id)
         attempts_used = max(0, start - 1 - previous_cycle_attempt)
         attempts_left = max(0, self.max_attempts - attempts_used)
-        if task.parent_task_id is not None:
-            attempts_left = min(attempts_left, 3)
+        had_attempt_capacity = attempts_left > 0
+        async with self.session_factory() as session:
+            latest_revision = await session.scalar(
+                select(Event)
+                .where(
+                    Event.task_id == task_id,
+                    Event.type == "escalation.package_revised",
+                )
+                .order_by(Event.sequence.desc())
+                .limit(1)
+            )
+            local_cycle_attempt = max(
+                previous_cycle_attempt,
+                int(latest_revision.payload.get("previous_attempt", 0))
+                if latest_revision else 0,
+            )
+            cycle_outcomes = list(await session.scalars(
+                select(Attempt.outcome)
+                .where(
+                    Attempt.task_id == task_id,
+                    Attempt.number > local_cycle_attempt,
+                )
+                .order_by(Attempt.number)
+            ))
+        productive_attempts_used = sum(
+            outcome != "budget_exceeded" for outcome in cycle_outcomes
+        )
+        productive_attempts_left = (
+            min(attempts_left, max(0, 3 - productive_attempts_used))
+            if task.parent_task_id is not None else attempts_left
+        )
+        consecutive_budget_overruns = 0
+        for outcome in reversed(cycle_outcomes):
+            if outcome != "budget_exceeded":
+                break
+            consecutive_budget_overruns += 1
+        packages = plan.metadata_json.get("implementation_tasks", [])
         recovery_checkpoint: str | None = None
-        for number in range(start, start + attempts_left):
+        number = start
+        while (
+            attempts_left > 0
+            and productive_attempts_left > 0
+            and consecutive_budget_overruns < 3
+        ):
+            attempts_left -= 1
+            current_number = number
+            number += 1
             is_recovery_attempt = recovery_checkpoint is not None
             runtime_instruction = (
                 self._context_recovery_instruction(task, recovery_checkpoint)
@@ -544,7 +587,6 @@ class ImplementationPipeline:
             )
             if task.parent_task_id is not None:
                 try:
-                    packages = plan.metadata_json.get("implementation_tasks")
                     if not isinstance(packages, list) or len(packages) != 1:
                         raise ContextPackError("subtask has no single complete work package; replan required")
                     if is_recovery_attempt or focused_retry:
@@ -571,7 +613,7 @@ class ImplementationPipeline:
             else:
                 instruction = runtime_instruction
             attempt_id = await self._start_attempt(
-                task_id, implementation.id, number, instruction
+                task_id, implementation.id, current_number, instruction
             )
             meter = None
             if task.parent_task_id is not None:
@@ -588,11 +630,11 @@ class ImplementationPipeline:
                     old_reads = len(meter.outside_reads)
                     meter.observe(event)
                     for path in meter.outside_reads[old_reads:]:
-                        await self._record_outside_read(task_id, number, path)
+                        await self._record_outside_read(task_id, current_number, path)
                 await step_handler(event)
 
             try:
-                args = (implementation_profile, instruction, str(worktree.path), f"{task_id}-implementation-{number}")
+                args = (implementation_profile, instruction, str(worktree.path), f"{task_id}-implementation-{current_number}")
                 if meter is not None and isinstance(self.provider, PiProvider):
                     result = await self.provider.run(
                         *args, on_event=on_event,
@@ -604,38 +646,44 @@ class ImplementationPipeline:
             except ToolBudgetExceeded as error:
                 await self._mark_attempt_outcome(task_id, attempt_id, "budget_exceeded", str(error))
                 if meter is not None:
-                    await self._record_session_metrics(task_id, number, meter.summary("budget_exceeded"))
+                    await self._record_session_metrics(task_id, current_number, meter.summary("budget_exceeded"))
                 history.append(AttemptSignal("tool_budget_exceeded", await workspace.diff_hash(worktree), strategy))
                 focused_retry = True
+                consecutive_budget_overruns += 1
+                if consecutive_budget_overruns >= 3:
+                    break
                 continue
             except ContextLimitError as error:
+                productive_attempts_left -= 1
                 was_recovery = recovery_checkpoint is not None
                 recovery_checkpoint = await workspace.checkpoint(
-                    worktree, f"attempt {number} reached context limit"
+                    worktree, f"attempt {current_number} reached context limit"
                 )
                 await self._record_context_limit(
-                    task_id, attempt_id, number, recovery_checkpoint, error
+                    task_id, attempt_id, current_number, recovery_checkpoint, error
                 )
                 if meter is not None:
-                    await self._record_session_metrics(task_id, number, meter.summary("failed"))
+                    await self._record_session_metrics(task_id, current_number, meter.summary("failed"))
                 if was_recovery:
                     return "failed"
                 continue
             except Exception:
                 if meter is not None:
-                    await self._record_session_metrics(task_id, number, meter.summary("failed"))
+                    await self._record_session_metrics(task_id, current_number, meter.summary("failed"))
                 raise
+            productive_attempts_left -= 1
+            consecutive_budget_overruns = 0
             recovery_checkpoint = None
             focused_retry = False
             retry_feedback = None
-            await self._record_provider_result(task_id, attempt_id, number, result)
+            await self._record_provider_result(task_id, attempt_id, current_number, result)
             deviation = major_deviation(result.output)
             if deviation:
                 await self._block_for_amendment(
                     task_id, plan, attempt_id, deviation
                 )
                 if meter is not None:
-                    await self._record_session_metrics(task_id, number, meter.summary("escalated"))
+                    await self._record_session_metrics(task_id, current_number, meter.summary("escalated"))
                 return "blocked"
             if (
                 task.parent_task_id is not None
@@ -648,21 +696,21 @@ class ImplementationPipeline:
                     task_id, attempt_id, "no_progress", "provider completed without repository changes"
                 )
                 if meter is not None:
-                    await self._record_session_metrics(task_id, number, meter.summary("no_progress"))
+                    await self._record_session_metrics(task_id, current_number, meter.summary("no_progress"))
                 history.append(AttemptSignal("no_repository_changes", EMPTY_DIFF_HASH, strategy))
                 focused_retry = True
                 continue
             await self._set_stage(task_id, TaskStage.VALIDATING)
-            batch = await self._validate(task, plan, worktree, attempt_id, number)
+            batch = await self._validate(task, plan, worktree, attempt_id, current_number)
             if batch.passed:
                 checkpoint = await workspace.checkpoint(
-                    worktree, f"attempt {number} validated"
+                    worktree, f"attempt {current_number} validated"
                 )
                 await self._finish_attempt(
                     task_id, attempt_id, "verified", checkpoint, None, batch
                 )
                 if meter is not None:
-                    await self._record_session_metrics(task_id, number, meter.summary("done"))
+                    await self._record_session_metrics(task_id, current_number, meter.summary("done"))
                 return "validated"
 
             diff_hash = await workspace.diff_hash(worktree)
@@ -672,10 +720,10 @@ class ImplementationPipeline:
                 task_id, attempt_id, "validation_failed", None, diff_hash, batch
             )
             if meter is not None:
-                await self._record_session_metrics(task_id, number, meter.summary("failed"))
+                await self._record_session_metrics(task_id, current_number, meter.summary("failed"))
             if previous and assess_progress(previous, batch.snapshot).is_progress:
                 checkpoint = await workspace.checkpoint(
-                    worktree, f"attempt {number} improved validation"
+                    worktree, f"attempt {current_number} improved validation"
                 )
                 await self._set_checkpoint(task_id, checkpoint)
             previous = batch.snapshot
@@ -696,7 +744,9 @@ class ImplementationPipeline:
                     batch,
                 )
             await self._set_stage(task_id, TaskStage.IMPLEMENTING)
-        if task.parent_task_id is not None and attempts_left > 0:
+        if task.parent_task_id is not None and (
+            had_attempt_capacity or productive_attempts_used or consecutive_budget_overruns
+        ):
             count = await self._work_package_escalation_count(task_id)
             if count < self.max_escalations:
                 outcome = await self._escalate_work_package(
@@ -771,7 +821,7 @@ class ImplementationPipeline:
                 "reason": reason,
                 "diff": diff[:16_000],
                 "git_status": status[:2_000],
-                "test_errors": [run.summary[:2_000] for run in validations],
+                "test_errors": [run.summary[-4_000:] for run in validations],
                 "outside_reads": [event.payload.get("path") for event in outside[-40:]],
                 "history": [asdict(item) for item in history],
             }
@@ -786,6 +836,10 @@ class ImplementationPipeline:
             "for revise include one complete package under \"package\"; for split include two or more "
             "complete packages under \"packages\"; include diagnosis. Preserve the approved objective, "
             "interfaces, constraints, verification, and file scope unless human approval is needed. "
+            "Existing uncommitted changes were generated by earlier attempts and may be corrected or "
+            "reverted without human approval, including removing their out-of-scope additions. "
+            "Failing tests are not a human blocker. Use blocked only for a missing product decision, "
+            "credential, external dependency, or required scope expansion. "
             "A revised or split package may not raise max_tool_calls above the original package budget. "
             "Every package (revise or split) must match exactly this shape, with no other fields:\n"
             + json.dumps(package_example)
@@ -918,6 +972,9 @@ class ImplementationPipeline:
             revision = int(await session.scalar(select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
                 PlanRevision.task_id == task.id,
             )) or 1)
+            previous_attempt = int(await session.scalar(select(func.coalesce(func.max(Attempt.number), 0)).where(
+                Attempt.task_id == task.id,
+            )) or 0)
             metadata = {**plan.metadata_json, "implementation_tasks": [revised] if revised else output.get("packages", []), "escalation_source": escalation_id}
             amendment = PlanRevision(
                 task=current, revision=revision, brief_markdown=plan.brief_markdown,
@@ -933,10 +990,11 @@ class ImplementationPipeline:
                 type="escalation.package_revised" if automatic else "escalation.approval_required",
                 payload={
                     "revision": revision, "action": action, "automatic": automatic,
+                    "previous_attempt": previous_attempt,
                     **({} if automatic else {"rejected_reason": automatic_rejected_reason}),
                 },
             )])
-            if automatic and escalation_count >= 1 and coder_expert is not None:
+            if automatic and coder_expert is not None:
                 await session.flush()
                 if coder_expert.available_model_id is not None and current.available_model_id != coder_expert.available_model_id:
                     current.available_model_id = coder_expert.available_model_id
