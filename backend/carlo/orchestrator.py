@@ -574,7 +574,7 @@ class ImplementationPipeline:
                 meter = ExecutionTelemetry(
                     worktree.path,
                     {file["path"] for file in package["files"]},
-                    package.get("budget", {}).get("max_tool_calls", 20),
+                    package.get("budget", {}).get("max_tool_calls", 30),
                 )
             step_handler = self._pi_step_handler(task_id)
 
@@ -761,13 +761,16 @@ class ImplementationPipeline:
             session.add_all([record, Event(task_id=task.id, type="escalation.started", payload={"reason": reason})])
             await session.commit()
             escalation_id = record.id
+        package_example = work_package_example()
+        package_example["budget"]["max_tool_calls"] = package.get("budget", {}).get("max_tool_calls", 30)
         instruction = (
             "Diagnose this failed work package. Return JSON with action revise, split, or blocked; "
             "for revise include one complete package under \"package\"; for split include two or more "
             "complete packages under \"packages\"; include diagnosis. Preserve the approved objective, "
             "interfaces, constraints, verification, and file scope unless human approval is needed. "
+            "A revised or split package may not raise max_tool_calls above the original package budget. "
             "Every package (revise or split) must match exactly this shape, with no other fields:\n"
-            + json.dumps(work_package_example())
+            + json.dumps(package_example)
             + "\n"
             + json.dumps(evidence)
         )

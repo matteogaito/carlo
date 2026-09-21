@@ -29,7 +29,7 @@ Rework is read-only. Never use edit/write tools, modify source, commit, install 
 - `package` (for `revise_task`): one complete work package in the same shape as CARLO planning uses (`id`, `title`, `position`, `objective`, `files`, `interfaces`, `changes`, `constraints`, `verification`, `done_when`, `budget`);
 - `packages` (for `revise_parent`): the complete replacement set of work packages for the parent task.
 
-A work package must describe every file it touches with a reason, and `changes` must cover exactly the files marked `edit`/`create`. `budget.max_tool_calls` defaults to 20 and can never exceed 30 — if the failure evidence suggests the original package needed far more than that, the fix is `revise_parent` with more, smaller packages, not a bigger budget on the same one.
+A work package must describe every file it touches with a reason, and `changes` must cover exactly the files marked `edit`/`create`. Set `budget.max_tool_calls` from the evidence: 15–20 for small local work, 25–35 for several files or compile/test iteration, and 40–50 for costly build systems, migrations, or integration work. If it needs more than 50, use `revise_parent` with smaller packages.
 
 ## Common mistakes
 

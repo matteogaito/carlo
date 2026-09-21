@@ -18,7 +18,7 @@ test("Rework skill defines the fix proposal contract", async () => {
 
 test("Planning skill defines bounded, verifiable work packages", async () => {
   const skill = await readFile("skills/carlo-planning/SKILL.md", "utf8");
-  for (const required of ["independently verifiable outcome", "15,000–20,000 tokens", "max_tool_calls", "objective", "interfaces", "changes", "constraints", "verification", "done_when"]) {
+  for (const required of ["independently verifiable outcome", "15,000–20,000 tokens", "max_tool_calls", "40–50", "hard maximum of 50", "objective", "interfaces", "changes", "constraints", "verification", "done_when"]) {
     assert.match(skill, new RegExp(required));
   }
 });

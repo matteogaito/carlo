@@ -30,6 +30,12 @@ def test_work_package_accepts_complete_contract() -> None:
     item = ImplementationTask.model_validate(package())
     assert item.files[0].ranges[0].start == 10
     assert item.budget.max_tool_calls == 20
+    assert ImplementationTask.model_validate(
+        {**package(), "budget": {"max_tool_calls": 50}}
+    ).budget.max_tool_calls == 50
+    without_budget = package()
+    without_budget.pop("budget")
+    assert ImplementationTask.model_validate(without_budget).budget.max_tool_calls == 30
 
 
 @pytest.mark.parametrize("change", [
@@ -39,6 +45,7 @@ def test_work_package_accepts_complete_contract() -> None:
     lambda p: p["files"][0].update(path="../outside.py"),
     lambda p: p["files"][0].update(ranges=[{"start": 30, "end": 10}]),
     lambda p: p.update(budget={"max_tool_calls": 0}),
+    lambda p: p.update(budget={"max_tool_calls": 51}),
 ])
 def test_work_package_rejects_incomplete_or_unsafe_contract(change) -> None:
     item = package()

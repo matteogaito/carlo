@@ -202,6 +202,7 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
 
     class Provider:
         async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            assert "may not raise max_tool_calls above the original package budget" in instruction
             return AgentResult(session_id, json.dumps({"action": "revise", "diagnosis": "Missing empty case", "package": revised}), (), 0)
 
     pipeline = ImplementationPipeline(factory, Provider(), tmp_path / "artifacts")

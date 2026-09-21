@@ -33,7 +33,7 @@ const ImplementationTask = Type.Object({
     success: Type.String(),
   }),
   done_when: Type.Array(Type.String()),
-  budget: Type.Object({ max_tool_calls: Type.Integer({ minimum: 1, maximum: 30 }) }),
+  budget: Type.Object({ max_tool_calls: Type.Integer({ minimum: 1, maximum: 50 }) }),
 });
 
 export default function (pi) {

@@ -162,7 +162,7 @@ class PackageVerification(BaseModel):
 class PackageBudget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_tool_calls: int = Field(default=20, ge=1, le=30)
+    max_tool_calls: int = Field(default=30, ge=1, le=50)
 
 
 class ImplementationTask(BaseModel):
@@ -220,7 +220,7 @@ def work_package_example() -> dict[str, Any]:
         "constraints": [],
         "verification": {"commands": [], "success": "success criterion"},
         "done_when": [],
-        "budget": {"max_tool_calls": 20},
+        "budget": {"max_tool_calls": 30},
     }
 
 
@@ -260,6 +260,9 @@ def planning_instruction(request: PlanningRequest, *, fresh_rework: bool = False
         "If one high-impact answer is still required, return only "
         '{"question":"the single focused question"}. Ask no low-risk implementation questions. '
         "A parent plan must have runnable final integration validation commands, from its metadata or the project configuration. "
+        "Estimate budget.max_tool_calls per package: use 15-20 for a small local edit with fast tests, "
+        "25-35 for several files or compile/test iteration, and 40-50 for costly build systems, migrations, "
+        "or integration work. Do not copy one value across every package; split work estimated above 50. "
         "Return only JSON matching this shape:\n"
         f"{json.dumps(contract)}"
         + (f"\nDiscovery handoff:\n{request.handoff}" if request.handoff else "")

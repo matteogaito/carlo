@@ -68,9 +68,10 @@ Put executable detail in `metadata.implementation_tasks`. Each task contains:
 - `constraints`: prohibited changes, dependencies, or out-of-scope files;
 - `verification`: exact quiet commands that print failures and a success criterion;
 - `done_when`: checks an implementation agent can verify;
-- `budget.max_tool_calls`: default 20, hard maximum 30. If a package seems to
-  need more, it is not one independently verifiable outcome — split it into
-  more packages instead of raising this number.
+- `budget.max_tool_calls`: estimate the work instead of copying one default.
+  Use 15–20 for a small local edit with fast tests, 25–35 for several files or
+  compile/test iteration, and 40–50 for costly build systems, migrations, or
+  integration work. Split packages estimated above the hard maximum of 50.
 
 Tasks remain internal parts of the CARLO Task, not separate Kanban cards. Order
 them by dependency. Use as many packages as independent verification and context boundaries require; do not minimize the count as a goal.
@@ -146,7 +147,7 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
         "constraints": ["Do not add dependencies"],
         "verification": {"commands": ["pytest -q tests/test_target.py --tb=short"], "success": "All targeted tests pass"},
         "done_when": ["Observable behavior and targeted tests pass"],
-        "budget": {"max_tool_calls": 20}
+        "budget": {"max_tool_calls": 30}
       }
     ],
     "skills": [],
