@@ -345,6 +345,8 @@ async def _materialize_plan_subtasks(
     task: Task,
     plan: PlanRevision,
     items: list[dict[str, Any]],
+    *,
+    start_position: int = 0,
 ) -> list[Task]:
     project = await session.scalar(
         select(Project).where(Project.id == task.project_id).with_for_update()
@@ -352,7 +354,7 @@ async def _materialize_plan_subtasks(
     if project is None:
         raise HTTPException(404, "project not found")
     children: list[Task] = []
-    for position, item in enumerate(items):
+    for position, item in enumerate(items, start=start_position):
         sequence = project.next_task_sequence
         project.next_task_sequence += 1
         child = Task(

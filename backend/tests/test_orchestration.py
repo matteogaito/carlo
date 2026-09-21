@@ -188,14 +188,16 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
     repository = repository_at(tmp_path / "repo")
     engine, factory = await empty_orchestration_store()
     original = escalation_package()
+    followup = {**original, "id": "wp-2", "title": "Ship parser", "position": 1}
     revised = {**original, "changes": {"src/parser.py": "Handle empty input too"}}
     async with factory() as session:
-        project = Project(name="Test", key="TST", repository_path=str(repository), next_task_sequence=3)
+        project = Project(name="Test", key="TST", repository_path=str(repository), next_task_sequence=4)
         parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Parse", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
         child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Parse", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        sibling = Task(id="TST-3", project=project, sequence=3, title="Ship parser", goal="Ship", parent=parent, subtask_position=1, status=TaskStatus.READY, stage=TaskStage.QUEUED, approved_plan_revision=1)
         plan = PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={"implementation_tasks": [original]})
-        parent_plan = PlanRevision(task=parent, revision=1, brief_markdown="Parent brief", plan_markdown="Parent plan", metadata_json={"implementation_tasks": [original]}, approved_at=datetime.now(UTC))
-        session.add_all([project, parent, child, plan, parent_plan])
+        parent_plan = PlanRevision(task=parent, revision=1, brief_markdown="Parent brief", plan_markdown="Parent plan", metadata_json={"implementation_tasks": [original, followup]}, approved_at=datetime.now(UTC))
+        session.add_all([project, parent, child, sibling, plan, parent_plan])
         await session.commit()
 
     class Provider:
@@ -233,11 +235,20 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
         parent_revision = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == "TST-1", PlanRevision.revision == 2))
         assert parent_revision is not None
         assert parent_revision.approved_at is not None
-        assert parent_revision.metadata_json["implementation_tasks"] == [split_a, split_b]
+        assert parent_revision.metadata_json["implementation_tasks"] == [
+            split_a,
+            {**split_b, "position": 1},
+            {**followup, "position": 2},
+        ]
         updated_parent = await session.get(Task, "TST-1")
         assert updated_parent.approved_plan_revision == 2
         new_children = (await session.scalars(select(Task).where(Task.parent_task_id == "TST-1", Task.superseded_at.is_(None)))).all()
-        assert sorted(child.title for child in new_children) == ["Fix parser", "Fix parser part 2"]
+        assert [(child.title, child.subtask_position) for child in new_children] == [
+            ("Fix parser", 0),
+            ("Fix parser part 2", 1),
+            ("Ship parser", 2),
+        ]
+        assert (await session.get(Task, "TST-3")).superseded_at is None
 
     out_of_scope_a = {**original, "id": "wp-2a", "files": [*original["files"], {"path": "src/new.py", "mode": "create", "reason": "New"}],
                        "changes": {**original["changes"], "src/new.py": "Create"}}

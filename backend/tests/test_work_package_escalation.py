@@ -39,6 +39,9 @@ def test_split_into_same_file_packages_stays_in_scope() -> None:
     ok, reason = within_approved_scope_split(original, [first, second])
     assert ok
     assert reason is None
+    ok, reason = within_approved_scope_split(original, [first, {**second, "id": first["id"]}])
+    assert not ok
+    assert reason == "proposed packages have duplicate ids"
 
 
 def test_split_touching_new_file_or_raising_budget_requires_approval() -> None:

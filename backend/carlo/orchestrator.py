@@ -823,13 +823,36 @@ class ImplementationPipeline:
                     PlanRevision.task_id == parent.id,
                     PlanRevision.revision == parent.approved_plan_revision,
                 ))
+                parent_packages = (
+                    parent_plan.metadata_json.get("implementation_tasks", [])
+                    if parent_plan else []
+                )
+                position = current.subtask_position
+                if not isinstance(parent_packages, list) or position is None or position >= len(parent_packages):
+                    split_automatic = False
+                    split_rejected_reason = "parent plan no longer contains the failed work package"
+                    replacement_packages = proposed
+                else:
+                    replacement_packages = [
+                        *parent_packages[:position],
+                        *proposed,
+                        *parent_packages[position + 1:],
+                    ]
+                    replacement_packages = [
+                        {**item, "position": index}
+                        for index, item in enumerate(replacement_packages)
+                    ]
+                    ids = [item.get("id") for item in replacement_packages]
+                    if len(set(ids)) != len(ids):
+                        split_automatic = False
+                        split_rejected_reason = "replacement plan has duplicate package ids"
                 revision = int(await session.scalar(select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
                     PlanRevision.task_id == parent.id,
                 )) or 1)
                 parent_metadata = {
                     **(parent_plan.metadata_json if parent_plan else {}),
                     "replan": True,
-                    "implementation_tasks": proposed,
+                    "implementation_tasks": replacement_packages,
                     "escalation_source": escalation_id,
                 }
                 amendment = PlanRevision(
@@ -845,8 +868,13 @@ class ImplementationPipeline:
                 if split_automatic:
                     old_children = await _active_children(session, parent.id, lock=True)
                     for child in old_children:
-                        child.superseded_at = amendment.approved_at
-                    new_children = await _materialize_plan_subtasks(session, parent, amendment, proposed)
+                        if child.id == current.id:
+                            child.superseded_at = amendment.approved_at
+                        elif child.subtask_position is not None and child.subtask_position > position:
+                            child.subtask_position += len(proposed) - 1
+                    new_children = await _materialize_plan_subtasks(
+                        session, parent, amendment, proposed, start_position=position
+                    )
                     if parent.stage == TaskStage.BLOCKED:
                         action_name = "approve_fix" if parent.status == TaskStatus.FAILED else "approve_amendment"
                         parent.status, parent.stage = transition(parent.status, parent.stage, action_name)

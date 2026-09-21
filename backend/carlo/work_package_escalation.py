@@ -46,6 +46,8 @@ def within_approved_scope_split(
         return False, f"one or more proposed packages do not match the work package schema: {error}"
     if not afters:
         return False, "no packages were proposed"
+    if len({package.id for package in afters}) != len(afters):
+        return False, "proposed packages have duplicate ids"
     permitted = {item.path: item.mode for item in before.files}
     for after in afters:
         if after.budget.max_tool_calls > before.budget.max_tool_calls:
