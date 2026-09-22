@@ -5,18 +5,25 @@ import pytest
 from carlo.execution_telemetry import ExecutionTelemetry, ToolBudgetExceeded, summarize_sessions
 
 
-def test_tool_budget_stops_at_limit_and_records_outside_reads(tmp_path: Path) -> None:
-    telemetry = ExecutionTelemetry(tmp_path, {"src/owned.py"}, max_tool_calls=2)
+def test_tool_budget_warns_softly_and_stops_only_at_hard_limit(tmp_path: Path) -> None:
+    telemetry = ExecutionTelemetry(
+        tmp_path, {"src/owned.py"}, estimated_tool_calls=2, soft_tool_calls=3, hard_tool_calls=5
+    )
     telemetry.observe({"type": "tool_execution_start", "toolName": "read", "args": {"path": "src/owned.py"}})
     telemetry.observe({"type": "tool_execution_start", "toolName": "read", "args": {"path": "src/other.py"}})
+    telemetry.observe({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "true"}})
+    telemetry.observe({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "true"}})
     assert telemetry.outside_reads == ["src/other.py"]
+    assert telemetry.soft_budget_exceeded is True
+    assert telemetry.tool_calls == 4
+    telemetry.observe({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "true"}})
     with pytest.raises(ToolBudgetExceeded):
         telemetry.observe({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "true"}})
-    assert telemetry.tool_calls == 3
+    assert telemetry.tool_calls == 6
 
 
 def test_session_usage_counts_model_calls_and_compactions(tmp_path: Path) -> None:
-    telemetry = ExecutionTelemetry(tmp_path, set(), max_tool_calls=20)
+    telemetry = ExecutionTelemetry(tmp_path, set(), estimated_tool_calls=20)
     telemetry.observe({"type": "message_end", "message": {"role": "assistant", "usage": {"input": 100, "output": 12}}})
     telemetry.observe({"type": "message_end", "message": {"role": "assistant", "usage": {"input": 80, "output": 8}}})
     telemetry.observe({"type": "session_compact"})
