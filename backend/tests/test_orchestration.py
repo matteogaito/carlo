@@ -205,7 +205,7 @@ async def test_feature_child_is_technically_planned_on_current_checkout_before_l
         "budget": {"max_tool_calls": 20},
     }
     if planner_result == "drift":
-        package["objective"] = "Create an unrelated output"
+        package["constraints"] = []
     async with factory() as session:
         await add_managed_profiles(session, "plan", "implementation", "escalation")
         project = Project(name="Test", key="TST", repository_path=str(repository))
@@ -276,6 +276,130 @@ async def test_feature_child_is_technically_planned_on_current_checkout_before_l
 
 
 @pytest.mark.asyncio
+async def test_technical_planner_can_split_one_child_into_internal_slices(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    engine, factory = await empty_orchestration_store()
+    feature = {
+        "id": "feature-1",
+        "title": "Create output",
+        "position": 0,
+        "objective": "Create feature.txt with done content",
+        "interfaces": ["feature.txt is available to the next child"],
+        "constraints": ["Do not modify README.md"],
+        "done_when": ["feature.txt contains done"],
+    }
+    slices = [
+        {
+            "id": "feature-1:prepare",
+            "title": "Prepare marker",
+            "position": 0,
+            "objective": "Create first.txt as a verified prerequisite.",
+            "files": [{"path": "first.txt", "mode": "create", "reason": "Verified prerequisite"}],
+            "interfaces": [],
+            "changes": {"first.txt": "Write one"},
+            "constraints": ["Do not modify README.md"],
+            "verification": {"commands": ["grep -q one first.txt"], "success": "Marker exists"},
+            "done_when": ["first marker exists"],
+            "budget": {"max_tool_calls": 20},
+        },
+        {
+            "id": "feature-1:finish",
+            "title": "Finish output",
+            "position": 1,
+            "objective": "Create the approved final feature output.",
+            "files": [{"path": "feature.txt", "mode": "create", "reason": "Approved output"}],
+            "interfaces": ["feature.txt is available to the next child"],
+            "changes": {"feature.txt": "Write done"},
+            "constraints": ["Do not modify README.md"],
+            "verification": {"commands": ["grep -q done feature.txt"], "success": "Output exists"},
+            "done_when": ["feature.txt contains done"],
+            "budget": {"max_tool_calls": 25},
+        },
+    ]
+    async with factory() as session:
+        await add_managed_profiles(session, "plan", "implementation", "escalation")
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(
+            id="TST-1", project=project, sequence=1, title="Parent", goal="Build feature",
+            status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1,
+        )
+        child = Task(
+            id="TST-2", project=project, sequence=2, title=feature["title"], goal=feature["objective"],
+            parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS,
+            stage=TaskStage.IMPLEMENTING, approved_plan_revision=1,
+        )
+        session.add_all([
+            project,
+            parent,
+            child,
+            PlanRevision(
+                task=parent, revision=1, brief_markdown="Shared architecture",
+                plan_markdown="Feature plan",
+                metadata_json={"implementation_tasks": [feature], "validation_commands": ["grep -q done feature.txt"]},
+                approved_at=datetime.now(UTC),
+            ),
+            PlanRevision(
+                task=child, revision=1, brief_markdown="Shared architecture",
+                plan_markdown=feature["objective"], metadata_json={"implementation_tasks": [feature]},
+                approved_at=datetime.now(UTC),
+            ),
+        ])
+        await session.commit()
+
+    class Provider:
+        calls = []
+
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            self.calls.append(profile.name)
+            if profile.name == "plan":
+                return AgentResult(session_id, json.dumps({
+                    "brief_markdown": "Technical evidence",
+                    "plan_markdown": "Prepare then finish the approved output.",
+                    "metadata": {
+                        "skills": [],
+                        "validation_commands": [],
+                        "implementation_tasks": slices,
+                        "browser_validation": False,
+                        "build_required": False,
+                        "run_required": False,
+                        "deployment_expected": False,
+                        "risk_flags": [],
+                        "affected_areas": [],
+                    },
+                }), (), 0)
+            if "first.txt" in instruction:
+                Path(cwd, "first.txt").write_text("one\n")
+            elif "feature.txt" in instruction:
+                assert Path(cwd, "first.txt").read_text() == "one\n"
+                Path(cwd, "feature.txt").write_text("done\n")
+            else:
+                raise AssertionError("implementation did not receive a technical slice")
+            return AgentResult(session_id, "implemented", (), 0)
+
+    provider = Provider()
+    outcome = await ImplementationPipeline(factory, provider, tmp_path / "artifacts").run("TST-2")
+    assert outcome == "validated"
+    assert provider.calls == ["plan", "implementation", "implementation"]
+    async with factory() as session:
+        child = await session.get(Task, "TST-2")
+        assert child.approved_plan_revision == 3
+        assert int(await session.scalar(select(func.count(Task.id)).where(Task.parent_task_id == "TST-1"))) == 1
+        first_revision = await session.scalar(select(PlanRevision).where(
+            PlanRevision.task_id == "TST-2", PlanRevision.revision == 2
+        ))
+        final_revision = await session.scalar(select(PlanRevision).where(
+            PlanRevision.task_id == "TST-2", PlanRevision.revision == 3
+        ))
+        assert len(first_revision.metadata_json["technical_packages"]) == 2
+        assert first_revision.metadata_json["technical_package_index"] == 0
+        assert final_revision.metadata_json["technical_package_index"] == 1
+        assert await session.scalar(select(Event).where(
+            Event.task_id == "TST-2", Event.type == "planning.technical.slice_advanced"
+        )) is not None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_work_package_escalation_creates_approved_revision_only_within_scope(tmp_path: Path) -> None:
     repository = repository_at(tmp_path / "repo")
     engine, factory = await empty_orchestration_store()
@@ -294,7 +418,7 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
 
     class Provider:
         async def run(self, profile, instruction, cwd, session_id, on_event=None):
-            assert "may not raise max_tool_calls above the original package budget" in instruction
+            assert "may not raise its planning estimate above the original slice estimate" in instruction
             assert "may be corrected or reverted without human approval" in instruction
             assert "Failing tests are not a human blocker" in instruction
             return AgentResult(session_id, json.dumps({"action": "revise", "diagnosis": "Missing empty case", "package": revised}), (), 0)
@@ -312,12 +436,19 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
         assert revision.approved_at is not None
         assert revision.metadata_json["implementation_tasks"] == [revised]
 
-    split_a = {**original, "id": "wp-1a", "budget": {"max_tool_calls": 10}}
-    split_b = {**original, "id": "wp-1b", "title": "Fix parser part 2", "budget": {"max_tool_calls": 10}}
-
     class SplitProvider:
         async def run(self, profile, instruction, cwd, session_id, on_event=None):
-            return AgentResult(session_id, json.dumps({"action": "split", "diagnosis": "Need two smaller packages", "packages": [split_a, split_b]}), (), 0)
+            assert "Never split this slice" in instruction
+            return AgentResult(
+                session_id,
+                json.dumps({
+                    "action": "split",
+                    "diagnosis": "This slice was undersized and would need another split",
+                    "packages": [],
+                }),
+                (),
+                0,
+            )
 
     pipeline.provider = SplitProvider()
     assert await pipeline._escalate_work_package(
@@ -325,47 +456,10 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
         Checkout("main", repository), original, "validation_failed", [],
     ) == "failed"
     async with factory() as session:
-        superseded = await session.get(Task, "TST-2")
-        assert superseded.superseded_at is not None
-        parent_revision = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == "TST-1", PlanRevision.revision == 2))
-        assert parent_revision is not None
-        assert parent_revision.approved_at is not None
-        assert parent_revision.metadata_json["implementation_tasks"] == [
-            split_a,
-            {**split_b, "position": 1},
-            {**followup, "position": 2},
-        ]
-        updated_parent = await session.get(Task, "TST-1")
-        assert updated_parent.approved_plan_revision == 2
-        new_children = (await session.scalars(select(Task).where(
-            Task.parent_task_id == "TST-1", Task.superseded_at.is_(None)
-        ).order_by(Task.subtask_position))).all()
-        assert [(child.title, child.subtask_position) for child in new_children] == [
-            ("Fix parser", 0),
-            ("Fix parser part 2", 1),
-            ("Ship parser", 2),
-        ]
-        assert (await session.get(Task, "TST-3")).superseded_at is None
-
-    out_of_scope_a = {**original, "id": "wp-2a", "files": [*original["files"], {"path": "src/new.py", "mode": "create", "reason": "New"}],
-                       "changes": {**original["changes"], "src/new.py": "Create"}}
-
-    class OutOfScopeSplitProvider:
-        async def run(self, profile, instruction, cwd, session_id, on_event=None):
-            return AgentResult(session_id, json.dumps({"action": "split", "diagnosis": "Needs a new file", "packages": [out_of_scope_a]}), (), 0)
-
-    pipeline.provider = OutOfScopeSplitProvider()
-    assert await pipeline._escalate_work_package(
-        child, plan, AgentProfile("escalation", None, None, (), ()),
-        Checkout("main", repository), original, "validation_failed", [],
-    ) == "blocked"
-    async with factory() as session:
-        blocked_parent = await session.get(Task, "TST-1")
-        assert blocked_parent.stage == TaskStage.BLOCKED
-        assert blocked_parent.approved_plan_revision == 2
-        pending_revision = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == "TST-1", PlanRevision.revision == 3))
-        assert pending_revision is not None
-        assert pending_revision.approved_at is None
+        unchanged_parent = await session.get(Task, "TST-1")
+        unchanged_child = await session.get(Task, "TST-2")
+        assert unchanged_parent.approved_plan_revision == 1
+        assert unchanged_child.superseded_at is None
 
     expanded = {**original, "files": [*original["files"], {"path": "src/new.py", "mode": "create", "reason": "New scope"}],
                 "changes": {**original["changes"], "src/new.py": "Create"}}

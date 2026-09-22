@@ -71,7 +71,7 @@ async def test_technical_planner_uses_current_checkout_and_requires_a_complete_p
     provider = FakeProvider(technical.model_dump_json())
     result = await Planner(provider, None).plan(PlanningRequest(
         project, "Import by date", "Place by metadata date", "technical-1",
-        handoff="Parent brief and verified predecessor contract", one_package=True,
+        handoff="Parent brief and verified predecessor contract", technical_plan=True,
         repository_path=str(tmp_path),
     ))
     assert result == technical

@@ -72,9 +72,14 @@ Do not prescribe files, edits, or tool budgets for future children; their
 technical planner will inspect the verified checkout when they become ready.
 Put final integration checks in `validation_commands`.
 
-For technical planning of one child, return exactly one full work package in
-`metadata.implementation_tasks`. Preserve the approved child's id, position,
-objective, interfaces, constraints, and acceptance criteria. Add:
+For technical planning of one child, return one or more ordered full work
+packages in `metadata.implementation_tasks`. These are internal execution
+slices of the same approved child, not additional CARLO Tasks. Split the child
+during this technical planning step whenever one package would be too large.
+Do not rely on splitting a slice later during execution: needing a sub-split
+means the technical plan was wrong and must be replanned. Together, the slices
+must preserve the approved child's objective, interfaces, constraints, and
+acceptance criteria. Add:
 
 - a stable `id`, concise `title`, and zero-based `position` matching array order;
 - `objective`: one to three sentences describing the observable outcome;
@@ -85,19 +90,21 @@ objective, interfaces, constraints, and acceptance criteria. Add:
 - `constraints`: prohibited changes, dependencies, or out-of-scope files;
 - `verification`: exact quiet commands that print failures and a success criterion;
 - `done_when`: checks an implementation agent can verify;
-- `budget.max_tool_calls`: estimate the work instead of copying one default.
-  Use 15–20 for a small local edit with fast tests, 25–35 for several files or
-  compile/test iteration, and 40–50 for costly build systems, migrations, or
-  integration work. Split packages estimated above the hard maximum of 50.
+- `budget.max_tool_calls`: estimate the expected implementation effort; it is
+  a planning signal, not an execution kill limit. Use 15–20 for a small local
+  edit with fast tests, 25–35 for several files or compile/test iteration, and
+  40–50 for costly build systems, migrations, or integration work. A slice
+  estimated above 50 must be split now by the technical planner.
 
 Tasks remain internal parts of the CARLO Task, not separate Kanban cards.
-The technical work package must use exact locations discovered in the current
-checkout; never invent paths.
+Each technical work package must use exact locations discovered in the current
+checkout; never invent paths. Slice boundaries must be independently verifiable
+and ordered so each slice consumes only verified output from earlier slices.
 
 For technical planning, read the code required before naming files and ranges.
-Keep the context pack of instructions and selected file content below
-15,000–20,000 estimated tokens. If the approved child cannot fit, report the
-need to split it; do not return a placeholder package.
+Keep each slice's context pack of instructions and selected file content below
+15,000–20,000 estimated tokens. If the approved child cannot fit in one slice,
+split it in this technical plan; do not return a placeholder package.
 
 Leave freedom only over low-risk details such as variable names and equivalent
 local structures. Use precise ranges or symbols when only part of a large file
@@ -174,7 +181,7 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
 ```
 
 The example above is the parent feature plan. For technical planning of one
-child, use the full work-package shape supplied by CARLO in the instruction:
+child, use one or more entries in the full work-package shape supplied by CARLO:
 `files`, `changes`, `verification`, and `budget.max_tool_calls` are required.
 
 `implementation_phases` mirrors the ordered task titles for compatibility.

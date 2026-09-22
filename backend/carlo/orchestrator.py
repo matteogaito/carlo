@@ -42,8 +42,8 @@ from .context_pack import ContextPackBudgetExceeded, ContextPackError, build_con
 from .execution_telemetry import ExecutionTelemetry, ToolBudgetExceeded
 from .provider import PiProvider
 from .planning import FeatureTask, ImplementationTask, Planner, PlanningError, PlanningQuestion, PlanningRequest
-from .work_package_escalation import within_approved_scope, within_approved_scope_split
-from .api import _active_children, _materialize_plan_subtasks, work_package_example
+from .work_package_escalation import within_approved_scope
+from .api import work_package_example
 
 IMPLEMENTATION_LOCK = 1_128_352_847
 MAX_INTERRUPTS = 3
@@ -535,6 +535,12 @@ class ImplementationPipeline:
                     None,
                     recovered,
                 )
+                next_plan = (
+                    await self._advance_technical_slice(task_id, plan, interrupted.number)
+                    if task.parent_task_id is not None else None
+                )
+                if next_plan is not None:
+                    return await self.run(task_id, [])
                 return "validated"
             previous = recovered.snapshot
             retry_feedback = recovered.summary[-6_000:]
@@ -548,7 +554,7 @@ class ImplementationPipeline:
                 select(Event)
                 .where(
                     Event.task_id == task_id,
-                    Event.type == "escalation.package_revised",
+                    Event.type.in_(("escalation.package_revised", "planning.technical.slice_advanced")),
                 )
                 .order_by(Event.sequence.desc())
                 .limit(1)
@@ -650,7 +656,12 @@ class ImplementationPipeline:
             async def on_event(event: dict[str, Any]) -> None:
                 if meter is not None:
                     old_reads = len(meter.outside_reads)
+                    was_soft = meter.soft_budget_exceeded
                     meter.observe(event)
+                    if not was_soft and meter.soft_budget_exceeded:
+                        await self._record_soft_tool_budget(
+                            task_id, current_number, meter.tool_calls, meter.estimated_tool_calls
+                        )
                     for path in meter.outside_reads[old_reads:]:
                         await self._record_outside_read(task_id, current_number, path)
                 await step_handler(event)
@@ -660,7 +671,7 @@ class ImplementationPipeline:
                 if meter is not None and isinstance(self.provider, PiProvider):
                     result = await self.provider.run(
                         *args, on_event=on_event,
-                        max_tool_calls=meter.max_tool_calls,
+                        max_tool_calls=meter.hard_tool_calls,
                         request_diagnostics=self.request_diagnostics,
                     )
                 else:
@@ -711,7 +722,6 @@ class ImplementationPipeline:
                 task.parent_task_id is not None
                 and packages[0].get("changes")
                 and not is_recovery_attempt
-                and task.checkpoint_sha is None
                 and await workspace.diff_hash(worktree) == EMPTY_DIFF_HASH
             ):
                 await self._mark_attempt_outcome(
@@ -731,6 +741,14 @@ class ImplementationPipeline:
                 await self._finish_attempt(
                     task_id, attempt_id, "verified", checkpoint, None, batch
                 )
+                next_plan = (
+                    await self._advance_technical_slice(task_id, plan, current_number)
+                    if task.parent_task_id is not None else None
+                )
+                if next_plan is not None:
+                    if meter is not None:
+                        await self._record_session_metrics(task_id, current_number, meter.summary("slice_done"))
+                    return await self.run(task_id, [])
                 if meter is not None:
                     await self._record_session_metrics(task_id, current_number, meter.summary("done"))
                 return "validated"
@@ -778,6 +796,11 @@ class ImplementationPipeline:
                 )
                 if outcome == "retry":
                     return await self.run(task_id, history)
+                if outcome == "replan":
+                    replanned = await self._prepare_technical_plan(task, plan, worktree)
+                    if isinstance(replanned, PlanRevision):
+                        return await self.run(task_id, [])
+                    return "blocked" if replanned == "blocked" else "failed"
                 if outcome == "blocked":
                     return "blocked"
         return "failed"
@@ -785,8 +808,12 @@ class ImplementationPipeline:
     async def _prepare_technical_plan(
         self, task: Task, feature_plan: PlanRevision, worktree: Checkout,
     ) -> PlanRevision | str | None:
-        """Resolve a feature outcome into one executable package on its actual checkout."""
-        feature = FeatureTask.model_validate(feature_plan.metadata_json["implementation_tasks"][0])
+        """Resolve a feature outcome into ordered internal execution slices."""
+        feature_source = (
+            feature_plan.metadata_json.get("feature_task")
+            or feature_plan.metadata_json["implementation_tasks"][0]
+        )
+        feature = FeatureTask.model_validate(feature_source)
         async with self.session_factory() as session:
             record = await session.scalar(select(AgentProfileRecord).where(AgentProfileRecord.name == "plan"))
             answer = await session.scalar(select(Event).where(
@@ -811,7 +838,12 @@ class ImplementationPipeline:
             "approved_feature": feature.model_dump(),
             "verified_predecessors": verified_predecessors,
             "user_answer": answer.payload if answer else None,
-            "instruction": "Plan only this feature on the current checkout. Keep its id, objective, interfaces, constraints, and acceptance criteria. Set the sole package position to zero.",
+            "instruction": (
+                "Plan only this approved feature on the current checkout. Return one or more ordered technical "
+                "execution slices. Split now if necessary; slices are internal to this child Task and must not "
+                "need later sub-splitting. Together they must preserve the approved objective, interfaces, "
+                "constraints, and acceptance criteria."
+            ),
         }, ensure_ascii=False)
         async with self.session_factory() as session:
             session.add(Event(task_id=task.id, type="planning.technical.started", payload={"feature_id": feature.id}))
@@ -820,7 +852,7 @@ class ImplementationPipeline:
             result = await Planner(self.provider, profile).plan(PlanningRequest(
                 task.project, task.title, task.goal,
                 f"{task.id}-technical-plan-{feature_plan.revision}",
-                handoff=handoff, one_package=True, repository_path=str(worktree.path),
+                handoff=handoff, technical_plan=True, repository_path=str(worktree.path),
             ))
             if isinstance(result, PlanningQuestion):
                 async with self.session_factory() as session:
@@ -829,15 +861,17 @@ class ImplementationPipeline:
                     session.add(Event(task=current, type="planning.technical.question", payload={"question": result.text}))
                     await session.commit()
                 return "blocked"
-            package = result.metadata.implementation_tasks[0]
-            if not isinstance(package, ImplementationTask) or (
-                package.id != feature.id or package.position != 0
-                or package.objective != feature.objective
-                or not set(feature.interfaces).issubset(package.interfaces)
-                or not set(feature.constraints).issubset(package.constraints)
-                or not set(feature.done_when).issubset(package.done_when)
-            ):
-                raise PlanningError("technical plan changed the approved feature outcome or acceptance criteria")
+            packages = result.metadata.implementation_tasks
+            if not packages or any(not isinstance(package, ImplementationTask) for package in packages):
+                raise PlanningError("technical plan did not return complete execution slices")
+            if [package.position for package in packages] != list(range(len(packages))):
+                raise PlanningError("technical slices are not zero-based and ordered")
+            if any(not set(feature.constraints).issubset(package.constraints) for package in packages):
+                raise PlanningError("technical slice weakened approved feature constraints")
+            inherited_interfaces = {item for package in packages for item in package.interfaces}
+            inherited_done_when = {item for package in packages for item in package.done_when}
+            if not set(feature.interfaces).issubset(inherited_interfaces) or not set(feature.done_when).issubset(inherited_done_when):
+                raise PlanningError("technical slices do not preserve approved interfaces or acceptance criteria")
         except (PlanningError, ValueError) as error:
             async with self.session_factory() as session:
                 session.add(Event(task_id=task.id, type="planning.technical.failed", payload={"error": str(error)[:1000]}))
@@ -845,14 +879,21 @@ class ImplementationPipeline:
             return None
         async with self.session_factory() as session:
             current = await session.get(Task, task.id)
+            revision_number = int(await session.scalar(
+                select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
+                    PlanRevision.task_id == task.id
+                )
+            ) or 1)
             revision = PlanRevision(
                 task=current,
-                revision=feature_plan.revision + 1,
+                revision=revision_number,
                 brief_markdown=feature_plan.brief_markdown,
                 plan_markdown=result.plan_markdown,
                 metadata_json={
                     **feature_plan.metadata_json,
-                    "implementation_tasks": [package.model_dump()],
+                    "implementation_tasks": [packages[0].model_dump()],
+                    "technical_packages": [package.model_dump() for package in packages],
+                    "technical_package_index": 0,
                     "skills": result.metadata.skills,
                     "packages": result.metadata.packages,
                     "feature_task": feature.model_dump(),
@@ -863,7 +904,59 @@ class ImplementationPipeline:
             )
             current.approved_plan_revision = revision.revision
             current.version += 1
-            session.add_all([revision, Event(task=current, type="planning.technical.completed", payload={"revision": revision.revision})])
+            session.add_all([revision, Event(
+                task=current,
+                type="planning.technical.completed",
+                payload={"revision": revision.revision, "slices": len(packages)},
+            )])
+            await session.commit()
+            return revision
+
+    async def _advance_technical_slice(
+        self, task_id: str, plan: PlanRevision, previous_attempt: int,
+    ) -> PlanRevision | None:
+        slices = plan.metadata_json.get("technical_packages") or []
+        index = int(plan.metadata_json.get("technical_package_index", 0))
+        next_index = index + 1
+        if not isinstance(slices, list) or next_index >= len(slices):
+            return None
+        async with self.session_factory() as session:
+            current = await session.get(Task, task_id)
+            if current is None:
+                raise RuntimeError("task disappeared while advancing technical slice")
+            revision_number = int(await session.scalar(
+                select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
+                    PlanRevision.task_id == task_id
+                )
+            ) or 1)
+            revision = PlanRevision(
+                task=current,
+                revision=revision_number,
+                brief_markdown=plan.brief_markdown,
+                plan_markdown=plan.plan_markdown,
+                metadata_json={
+                    **plan.metadata_json,
+                    "implementation_tasks": [slices[next_index]],
+                    "technical_package_index": next_index,
+                },
+                approved_at=datetime.now(UTC),
+            )
+            current.approved_plan_revision = revision_number
+            current.stage = TaskStage.IMPLEMENTING
+            current.version += 1
+            session.add_all([
+                revision,
+                Event(
+                    task=current,
+                    type="planning.technical.slice_advanced",
+                    payload={
+                        "revision": revision_number,
+                        "slice": next_index,
+                        "total_slices": len(slices),
+                        "previous_attempt": previous_attempt,
+                    },
+                ),
+            ])
             await session.commit()
             return revision
 
@@ -948,15 +1041,17 @@ class ImplementationPipeline:
         package_example = work_package_example()
         package_example["budget"]["max_tool_calls"] = package.get("budget", {}).get("max_tool_calls", 30)
         instruction = (
-            "Diagnose this failed work package. Return JSON with action revise, split, or blocked; "
-            "for revise include one complete package under \"package\"; for split include two or more "
-            "complete packages under \"packages\"; include diagnosis. Preserve the approved objective, "
+            "Diagnose this failed technical slice. Return JSON with action revise, replan, or blocked; "
+            "for revise include one complete package under \"package\"; include diagnosis. "
+            "Use replan when this slice was undersized or would need to be split. "
+            "Never split this slice: a replan must regenerate the technical plan for the whole approved child. "
+            "Preserve the approved objective, "
             "interfaces, constraints, verification, and file scope unless human approval is needed. "
             "Existing uncommitted changes were generated by earlier attempts and may be corrected or "
             "reverted without human approval, including removing their out-of-scope additions. "
             "Failing tests are not a human blocker. Use blocked only for a missing product decision, "
             "credential, external dependency, or required scope expansion. "
-            "A revised or split package may not raise max_tool_calls above the original package budget. "
+            "A revised slice may not raise its planning estimate above the original slice estimate. "
             "Every package (revise or split) must match exactly this shape, with no other fields:\n"
             + json.dumps(package_example)
             + "\n"
@@ -967,7 +1062,7 @@ class ImplementationPipeline:
                 profile, instruction, str(checkout.path), f"{task.id}-work-package-escalation-{escalation_id}"
             )
             output = json.loads(result.output)
-            if not isinstance(output, dict) or output.get("action") not in {"revise", "split", "blocked"}:
+            if not isinstance(output, dict) or output.get("action") not in {"revise", "replan", "blocked"}:
                 raise ValueError("planner returned no valid escalation action")
         except (ValueError, RuntimeError) as error:
             async with self.session_factory() as session:
@@ -978,6 +1073,19 @@ class ImplementationPipeline:
                 await session.commit()
             return "failed"
         action = output["action"]
+        if action == "replan":
+            async with self.session_factory() as session:
+                record = await session.get(Escalation, escalation_id)
+                record.status = "completed"
+                record.diagnosis = str(output.get("diagnosis", ""))[:2_000]
+                record.strategy = action
+                session.add(Event(
+                    task_id=task.id,
+                    type="planning.technical.replan_requested",
+                    payload={"reason": record.diagnosis},
+                ))
+                await session.commit()
+            return "replan"
         revised = output.get("package") if action == "revise" else None
         automatic, automatic_rejected_reason = (
             within_approved_scope(package, revised)
@@ -994,97 +1102,6 @@ class ImplementationPipeline:
                 session.add(Event(task=current, type="escalation.human_required", payload={"reason": record.diagnosis}))
                 await session.commit()
                 return "blocked"
-            if action == "split":
-                proposed = output.get("packages", [])
-                proposed = proposed if isinstance(proposed, list) else []
-                parent = (
-                    await session.get(Task, task.parent_task_id)
-                    if task.parent_task_id else None
-                )
-                if not proposed or parent is None:
-                    session.add(Event(task=current, type="escalation.split_requested", payload={
-                        "reason": record.diagnosis,
-                        "packages": proposed,
-                        "next_action": "replan parent or rework this subtask",
-                    }))
-                    await session.commit()
-                    return "failed"
-                split_automatic, split_rejected_reason = within_approved_scope_split(package, proposed)
-                parent_plan = await session.scalar(select(PlanRevision).where(
-                    PlanRevision.task_id == parent.id,
-                    PlanRevision.revision == parent.approved_plan_revision,
-                ))
-                parent_packages = (
-                    parent_plan.metadata_json.get("implementation_tasks", [])
-                    if parent_plan else []
-                )
-                position = current.subtask_position
-                if not isinstance(parent_packages, list) or position is None or position >= len(parent_packages):
-                    split_automatic = False
-                    split_rejected_reason = "parent plan no longer contains the failed work package"
-                    replacement_packages = proposed
-                else:
-                    replacement_packages = [
-                        *parent_packages[:position],
-                        *proposed,
-                        *parent_packages[position + 1:],
-                    ]
-                    replacement_packages = [
-                        {**item, "position": index}
-                        for index, item in enumerate(replacement_packages)
-                    ]
-                    ids = [item.get("id") for item in replacement_packages]
-                    if len(set(ids)) != len(ids):
-                        split_automatic = False
-                        split_rejected_reason = "replacement plan has duplicate package ids"
-                revision = int(await session.scalar(select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
-                    PlanRevision.task_id == parent.id,
-                )) or 1)
-                parent_metadata = {
-                    **(parent_plan.metadata_json if parent_plan else {}),
-                    "replan": True,
-                    "implementation_tasks": replacement_packages,
-                    "escalation_source": escalation_id,
-                }
-                amendment = PlanRevision(
-                    task=parent, revision=revision,
-                    brief_markdown=parent_plan.brief_markdown if parent_plan else plan.brief_markdown,
-                    plan_markdown=parent_plan.plan_markdown if parent_plan else plan.plan_markdown,
-                    metadata_json=parent_metadata,
-                    approved_at=datetime.now(UTC) if split_automatic else None,
-                )
-                session.add(amendment)
-                await session.flush()
-                new_children: list[Task] = []
-                if split_automatic:
-                    old_children = await _active_children(session, parent.id, lock=True)
-                    for child in old_children:
-                        if child.id == current.id:
-                            child.superseded_at = amendment.approved_at
-                        elif child.subtask_position is not None and child.subtask_position > position:
-                            child.subtask_position += len(proposed) - 1
-                    new_children = await _materialize_plan_subtasks(
-                        session, parent, amendment, proposed, start_position=position
-                    )
-                    if parent.stage == TaskStage.BLOCKED:
-                        action_name = "approve_fix" if parent.status == TaskStatus.FAILED else "approve_amendment"
-                        parent.status, parent.stage = transition(parent.status, parent.stage, action_name)
-                    parent.approved_plan_revision = revision
-                    parent.version += 1
-                else:
-                    parent.stage = TaskStage.BLOCKED
-                    parent.version += 1
-                session.add(Event(
-                    task=parent,
-                    type="escalation.package_revised" if split_automatic else "escalation.approval_required",
-                    payload={
-                        "revision": revision, "action": "split", "automatic": split_automatic,
-                        "new_children": [child.id for child in new_children],
-                        **({} if split_automatic else {"rejected_reason": split_rejected_reason}),
-                    },
-                ))
-                await session.commit()
-                return "failed" if split_automatic else "blocked"
             revision = int(await session.scalar(select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
                 PlanRevision.task_id == task.id,
             )) or 1)
@@ -1124,6 +1141,22 @@ class ImplementationPipeline:
     async def _record_outside_read(self, task_id: str, attempt: int, path: str) -> None:
         async with self.session_factory() as session:
             session.add(Event(task_id=task_id, type="execution.outside_package_read", payload={"attempt": attempt, "path": path}))
+            await session.commit()
+
+    async def _record_soft_tool_budget(
+        self, task_id: str, attempt: int, tool_calls: int, estimated_tool_calls: int,
+    ) -> None:
+        async with self.session_factory() as session:
+            session.add(Event(
+                task_id=task_id,
+                type="execution.soft_tool_budget_exceeded",
+                payload={
+                    "attempt": attempt,
+                    "tool_calls": tool_calls,
+                    "soft_limit": 50,
+                    "estimated_tool_calls": estimated_tool_calls,
+                },
+            ))
             await session.commit()
 
     async def _record_session_metrics(self, task_id: str, attempt: int, summary: dict[str, Any]) -> None:
@@ -1318,13 +1351,16 @@ class ImplementationPipeline:
         else:
             packages = plan.metadata_json.get("implementation_tasks") or []
             commands = list(packages[0].get("verification", {}).get("commands", [])) if len(packages) == 1 else []
+            technical_packages = plan.metadata_json.get("technical_packages") or []
+            technical_index = int(plan.metadata_json.get("technical_package_index", 0))
+            final_technical_slice = not technical_packages or technical_index >= len(technical_packages) - 1
             async with self.session_factory() as session:
                 later = await session.scalar(select(func.count(Task.id)).where(
                     Task.parent_task_id == task.parent_task_id,
                     Task.superseded_at.is_(None),
                     Task.subtask_position > task.subtask_position,
                 ))
-                if not later:
+                if not later and final_technical_slice:
                     parent = await session.get(Task, task.parent_task_id)
                     parent_plan = await session.scalar(select(PlanRevision).where(
                         PlanRevision.task_id == parent.id,

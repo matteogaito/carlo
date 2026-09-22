@@ -19,7 +19,7 @@ test("Rework skill defines the fix proposal contract", async () => {
 
 test("Planning skill distinguishes feature outcomes from technical packages", async () => {
   const skill = await readFile("skills/carlo-planning/SKILL.md", "utf8");
-  for (const required of ["feature plan", "technical plan", "Do not prescribe files", "current checkout", "15,000–20,000", "max_tool_calls", "objective", "interfaces", "changes", "constraints", "verification", "done_when"]) {
+  for (const required of ["feature plan", "technical plan", "Do not prescribe files", "current checkout", "15,000–20,000", "max_tool_calls", "planning signal", "must never require a later sub-split", "objective", "interfaces", "changes", "constraints", "verification", "done_when"]) {
     assert.match(skill, new RegExp(required));
   }
 });

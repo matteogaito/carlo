@@ -2364,7 +2364,7 @@ def create_app(
                 PlanningRequest(
                     task.project, task.title, task.goal, session_id,
                     prompt_path=task.prompt_path, model_id=task.available_model_id,
-                    instruction=instruction, one_package=task.parent_task_id is not None,
+                    instruction=instruction, technical_plan=task.parent_task_id is not None,
                 ),
                 on_event=publish, on_retry=retry,
             )

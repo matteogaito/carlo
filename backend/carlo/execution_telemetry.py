@@ -10,10 +10,23 @@ class ToolBudgetExceeded(RuntimeError):
 
 
 class ExecutionTelemetry:
-    def __init__(self, repository: Path, package_files: set[str], max_tool_calls: int) -> None:
+    def __init__(
+        self,
+        repository: Path,
+        package_files: set[str],
+        estimated_tool_calls: int,
+        *,
+        soft_tool_calls: int = 50,
+        hard_tool_calls: int = 120,
+    ) -> None:
+        if not 1 <= estimated_tool_calls <= soft_tool_calls < hard_tool_calls:
+            raise ValueError("tool-call thresholds must satisfy 1 <= estimate <= soft < hard")
         self.repository = repository.resolve()
         self.package_files = package_files
-        self.max_tool_calls = max_tool_calls
+        self.estimated_tool_calls = estimated_tool_calls
+        self.soft_tool_calls = soft_tool_calls
+        self.hard_tool_calls = hard_tool_calls
+        self.soft_budget_exceeded = False
         self.started = time.monotonic()
         self.tool_calls = 0
         self.model_calls = 0
@@ -34,8 +47,10 @@ class ExecutionTelemetry:
                     relative = str(path.relative_to(self.repository)) if path.is_relative_to(self.repository) else str(path)
                     if relative not in self.package_files:
                         self.outside_reads.append(relative)
-            if self.tool_calls > self.max_tool_calls:
-                raise ToolBudgetExceeded(f"tool-call budget exceeded ({self.max_tool_calls})")
+            if self.tool_calls > self.soft_tool_calls:
+                self.soft_budget_exceeded = True
+            if self.tool_calls > self.hard_tool_calls:
+                raise ToolBudgetExceeded(f"hard tool-call safety limit exceeded ({self.hard_tool_calls})")
         elif kind in {"session_compact", "context_compaction_retry"}:
             self.compactions += 1
         elif kind == "message_end":
@@ -54,6 +69,10 @@ class ExecutionTelemetry:
             "duration_seconds": round(time.monotonic() - self.started, 3),
             "model_calls": self.model_calls,
             "tool_calls": self.tool_calls,
+            "estimated_tool_calls": self.estimated_tool_calls,
+            "soft_tool_calls": self.soft_tool_calls,
+            "hard_tool_calls": self.hard_tool_calls,
+            "soft_budget_exceeded": self.soft_budget_exceeded,
             "outside_reads": self.outside_reads,
             "compactions": self.compactions,
             "peak_prompt_tokens": self.peak_prompt_tokens,
