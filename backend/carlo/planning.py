@@ -25,7 +25,7 @@ class PlanningRequest:
     handoff: str = ""
     model_id: int | None = None
     instruction: str | None = None
-    one_package: bool = False
+    technical_plan: bool = False
     repository_path: str | None = None
 
 
@@ -78,15 +78,15 @@ class Planner:
                 output = PlanPayload.model_validate(raw)
                 if not output.metadata.implementation_tasks:
                     raise ValueError("metadata.implementation_tasks must contain at least one complete work package")
-                if request.one_package and len(output.metadata.implementation_tasks) != 1:
-                    raise ValueError("a subtask regeneration must contain exactly one complete work package")
-                if request.one_package and not isinstance(output.metadata.implementation_tasks[0], ImplementationTask):
-                    raise ValueError("technical planning must return one complete work package")
-                if not request.one_package and any(
+                if request.technical_plan and any(
+                    not isinstance(item, ImplementationTask) for item in output.metadata.implementation_tasks
+                ):
+                    raise ValueError("technical planning must return one or more complete work packages")
+                if not request.technical_plan and any(
                     not isinstance(item, FeatureTask) for item in output.metadata.implementation_tasks
                 ):
                     raise ValueError("parent planning must return feature-level children without file scopes")
-                if not request.one_package and not (output.metadata.validation_commands or request.project.validation_commands):
+                if not request.technical_plan and not (output.metadata.validation_commands or request.project.validation_commands):
                     raise ValueError("parent plan needs final integration validation commands")
                 return output
             except ProviderError as error:
@@ -98,7 +98,7 @@ class Planner:
                     await on_retry({"attempt": attempt + 1, "error": str(error)})
                 instruction = original_instruction + "\n" + (
                     "The previous plan is invalid. Regenerate the entire JSON plan with "
-                    + ("one complete technical work package" if request.one_package else "feature-level child outcomes without file lists or edits")
+                    + ("one or more complete technical work packages" if request.technical_plan else "feature-level child outcomes without file lists or edits")
                     + "; do not return a partial patch. "
                     f"Validation errors:\n{error}"
                 )
@@ -267,7 +267,7 @@ def planning_instruction(request: PlanningRequest, *, fresh_rework: bool = False
             "title": "short implementation title",
             "description": "concise description of the approved approach",
             "key_points": [],
-            "implementation_tasks": [work_package_example() if request.one_package else feature_task_example()],
+            "implementation_tasks": [work_package_example() if request.technical_plan else feature_task_example()],
             "skills": [],
             "implementation_phases": [],
             "validation_commands": [],
@@ -289,12 +289,13 @@ def planning_instruction(request: PlanningRequest, *, fresh_rework: bool = False
     prompt = f"Original Markdown request: {request.prompt_path}\n" if request.prompt_path else ""
     guidance = (
         "This is technical planning for one approved child on its current checkout. Inspect the actual code, "
-        "choose the files and concrete changes, then return exactly one complete work package. "
-        "Preserve the approved id, objective, interfaces, constraints, and acceptance criteria. "
-        "The sole technical package position is zero even when the feature's parent sequence position is later. "
-        "Use runnable focused verification commands. Estimate max_tool_calls between 1 and 50. "
-        "Planning is read-only; the executor will implement this package. "
-        if request.one_package else
+        "choose the files and concrete changes, then return one or more ordered technical work packages. "
+        "Split the approved child now when one package would be too large; these packages are internal execution slices, "
+        "not child Tasks, and they must never require a later sub-split. "
+        "Together the packages must preserve the approved objective, interfaces, constraints, and acceptance criteria. "
+        "Use zero-based package positions, runnable focused verification commands, and estimate max_tool_calls between 1 and 50. "
+        "Planning is read-only; the executor will implement the slices in order. "
+        if request.technical_plan else
         "A parent feature plan must have runnable final integration validation commands, from its metadata "
         "or the project configuration. Plan the full dependency chain under one parent, with as many ordered "
         "child outcomes as independent verification requires. Describe behavior, contracts, constraints, and "
