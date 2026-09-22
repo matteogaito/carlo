@@ -535,6 +535,12 @@ class ImplementationPipeline:
                     None,
                     recovered,
                 )
+                next_plan = (
+                    await self._advance_technical_slice(task_id, plan, interrupted.number)
+                    if task.parent_task_id is not None else None
+                )
+                if next_plan is not None:
+                    return await self.run(task_id, [])
                 return "validated"
             previous = recovered.snapshot
             retry_feedback = recovered.summary[-6_000:]
