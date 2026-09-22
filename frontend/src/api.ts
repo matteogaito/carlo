@@ -29,6 +29,16 @@ export interface ImplementationTask {
   budget: { max_tool_calls: number }
 }
 
+export interface FeatureTask {
+  id: string
+  title: string
+  position: number
+  objective: string
+  interfaces: string[]
+  constraints: string[]
+  done_when: string[]
+}
+
 export interface PlannerProfile {
   name: string
   provider: string
@@ -56,7 +66,7 @@ export interface Plan {
     title?: string
     description?: string
     key_points?: string[]
-    implementation_tasks?: ImplementationTask[]
+    implementation_tasks?: (ImplementationTask | FeatureTask)[]
     planner_profile?: PlannerProfile
     amendment?: { summary: string; reason: string }
     validation_commands?: string[]

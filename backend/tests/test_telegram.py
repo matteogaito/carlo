@@ -347,8 +347,8 @@ async def test_explicit_system_notifications_ignore_blocking_filter(factory) -> 
     assert await notifier.deliver_next() is True
     assert await notifier.deliver_next() is True
     assert len(transport.messages) == 5
-    assert "CARLO started" in transport.messages[0][2]
-    assert "CARLO worker started" in transport.messages[1][2]
+    assert "CARLO — API server started (web interface)" in transport.messages[0][2]
+    assert "CARLO — Task worker started (background execution)" in transport.messages[1][2]
     assert "Pi weekly update completed" in transport.messages[2][2]
     assert "Pi skills updated" in transport.messages[3][2]
     assert "superpowers@abc1234" in transport.messages[3][2]

@@ -48,16 +48,33 @@ reasoning. Keep it concise and evidence-oriented. Include:
 
 ## Plan contract
 
-Write a technical implementation plan, not a management checklist. Prefer the
-smallest change consistent with the repository. Avoid speculative abstractions,
-new dependencies, and unrelated refactors.
+For a parent Task, write a feature plan: divide the approved outcome into
+ordered, independently verifiable child outcomes. For one child immediately
+before execution, write a technical plan against its current checkout. Prefer
+the smallest change consistent with the repository. Avoid speculative
+abstractions, new dependencies, and unrelated refactors.
 
 Make `plan_markdown` an approval-oriented overview: one title, a two-to-four
 sentence description, and a short list of the decisions, constraints, and
 validation strategy that matter most. Do not repeat the Brief or expand every
 implementation step in this Markdown.
 
-Put executable detail in `metadata.implementation_tasks`. Each task contains:
+For a parent plan, each `metadata.implementation_tasks` entry contains only:
+
+- a stable `id`, concise `title`, and zero-based `position`;
+- `objective`: the observable child outcome;
+- `interfaces`: contracts with earlier or later children;
+- `constraints`: approved limits;
+- `done_when`: testable acceptance criteria.
+
+Plan the full dependency chain now. Use as many children as the work needs.
+Do not prescribe files, edits, or tool budgets for future children; their
+technical planner will inspect the verified checkout when they become ready.
+Put final integration checks in `validation_commands`.
+
+For technical planning of one child, return exactly one full work package in
+`metadata.implementation_tasks`. Preserve the approved child's id, position,
+objective, interfaces, constraints, and acceptance criteria. Add:
 
 - a stable `id`, concise `title`, and zero-based `position` matching array order;
 - `objective`: one to three sentences describing the observable outcome;
@@ -73,18 +90,14 @@ Put executable detail in `metadata.implementation_tasks`. Each task contains:
   compile/test iteration, and 40–50 for costly build systems, migrations, or
   integration work. Split packages estimated above the hard maximum of 50.
 
-Tasks remain internal parts of the CARLO Task, not separate Kanban cards. Order
-them by dependency. Use as many packages as independent verification and context boundaries require; do not minimize the count as a goal.
-State in each package's `interfaces` or `constraints` which verified output from an earlier package it consumes. A package's checks must be runnable before later packages start; put integration checks that need the whole tree in `validation_commands`.
-Use exact locations discovered in the repository; never invent paths.
+Tasks remain internal parts of the CARLO Task, not separate Kanban cards.
+The technical work package must use exact locations discovered in the current
+checkout; never invent paths.
 
-Read the code required for each package yourself before naming its files and
-ranges. Each item must be an independently verifiable outcome. Keep packages small: prefer
-few files, and split when the estimated context pack of instructions and
-selected file content would exceed 15,000–20,000 tokens. Keep tightly coupled
-files together only when the resulting pack stays within that budget. Never
-invent a path or range. If the package is incomplete, inspect more repository
-evidence and regenerate the complete JSON; do not return a placeholder.
+For technical planning, read the code required before naming files and ranges.
+Keep the context pack of instructions and selected file content below
+15,000–20,000 estimated tokens. If the approved child cannot fit, report the
+need to split it; do not return a placeholder package.
 
 Leave freedom only over low-risk details such as variable names and equivalent
 local structures. Use precise ranges or symbols when only part of a large file
@@ -141,13 +154,9 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
         "title": "Coherent implementation outcome",
         "position": 0,
         "objective": "Observable outcome in one to three sentences.",
-        "files": [{"path": "path/to/file.py", "mode": "edit", "ranges": [{"start": 10, "end": 40}], "symbols": ["relevant_symbol"], "reason": "Why this file matters"}],
         "interfaces": ["function(arg: Type) -> Result preserves contract"],
-        "changes": {"path/to/file.py": "Concrete change to make in this file"},
         "constraints": ["Do not add dependencies"],
-        "verification": {"commands": ["pytest -q tests/test_target.py --tb=short"], "success": "All targeted tests pass"},
-        "done_when": ["Observable behavior and targeted tests pass"],
-        "budget": {"max_tool_calls": 30}
+        "done_when": ["Observable behavior and targeted tests pass"]
       }
     ],
     "skills": [],
@@ -163,6 +172,10 @@ Return exactly one JSON object, without a Markdown fence or surrounding prose:
   }
 }
 ```
+
+The example above is the parent feature plan. For technical planning of one
+child, use the full work-package shape supplied by CARLO in the instruction:
+`files`, `changes`, `verification`, and `budget.max_tool_calls` are required.
 
 `implementation_phases` mirrors the ordered task titles for compatibility.
 `validation_commands` contains only commands verified from repository evidence.

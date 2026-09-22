@@ -26,6 +26,7 @@ class PlanningRequest:
     model_id: int | None = None
     instruction: str | None = None
     one_package: bool = False
+    repository_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,10 +64,11 @@ class Planner:
         instruction = request.instruction or planning_instruction(request)
         if self.profile is not None and "carlo-planning" in self.profile.skills:
             instruction = f"/skill:carlo-planning {instruction}"
+        original_instruction = instruction
         for attempt in range(3):
             try:
                 self.last_result = await self.provider.run(
-                    self.profile, instruction, request.project.repository_path,
+                    self.profile, instruction, request.repository_path or request.project.repository_path,
                     request.session_id, on_event=on_event,
                 )
                 raw = json.loads(self.last_result.output)
@@ -78,6 +80,12 @@ class Planner:
                     raise ValueError("metadata.implementation_tasks must contain at least one complete work package")
                 if request.one_package and len(output.metadata.implementation_tasks) != 1:
                     raise ValueError("a subtask regeneration must contain exactly one complete work package")
+                if request.one_package and not isinstance(output.metadata.implementation_tasks[0], ImplementationTask):
+                    raise ValueError("technical planning must return one complete work package")
+                if not request.one_package and any(
+                    not isinstance(item, FeatureTask) for item in output.metadata.implementation_tasks
+                ):
+                    raise ValueError("parent planning must return feature-level children without file scopes")
                 if not request.one_package and not (output.metadata.validation_commands or request.project.validation_commands):
                     raise ValueError("parent plan needs final integration validation commands")
                 return output
@@ -88,9 +96,10 @@ class Planner:
                     raise PlanningError(f"planner returned incomplete work packages: {error}") from error
                 if on_retry:
                     await on_retry({"attempt": attempt + 1, "error": str(error)})
-                instruction = (
-                    "The previous plan is invalid. Regenerate the entire JSON plan with complete "
-                    "metadata.implementation_tasks work packages; do not return a partial patch. "
+                instruction = original_instruction + "\n" + (
+                    "The previous plan is invalid. Regenerate the entire JSON plan with "
+                    + ("one complete technical work package" if request.one_package else "feature-level child outcomes without file lists or edits")
+                    + "; do not return a partial patch. "
                     f"Validation errors:\n{error}"
                 )
         raise AssertionError("unreachable")
@@ -100,7 +109,7 @@ class PlanMetadata(BaseModel):
     title: str | None = None
     description: str | None = None
     key_points: list[str] = Field(default_factory=list)
-    implementation_tasks: list["ImplementationTask"] = Field(default_factory=list)
+    implementation_tasks: list["ImplementationTask | FeatureTask"] = Field(default_factory=list)
     skills: list[str]
     packages: list[str] = Field(default_factory=list)
     implementation_phases: list[str] = Field(default_factory=list)
@@ -188,6 +197,20 @@ class ImplementationTask(BaseModel):
         return self
 
 
+class FeatureTask(BaseModel):
+    """Approved feature outcome; technical file choices are made at execution time."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    position: int = Field(ge=0)
+    objective: str = Field(min_length=1)
+    interfaces: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    done_when: list[str] = Field(min_length=1)
+
+
 class PlanPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -215,12 +238,24 @@ def work_package_example() -> dict[str, Any]:
                 "reason": "why this file is needed",
             }
         ],
-        "interfaces": [],
+        "interfaces": ["approved interface or behavioral contract"],
         "changes": {"project-relative path": "concrete instruction"},
         "constraints": [],
-        "verification": {"commands": [], "success": "success criterion"},
-        "done_when": [],
+        "verification": {"commands": ["runnable focused test command"], "success": "success criterion"},
+        "done_when": ["observable acceptance criterion"],
         "budget": {"max_tool_calls": 30},
+    }
+
+
+def feature_task_example() -> dict[str, Any]:
+    return {
+        "id": "stable id",
+        "title": "observable feature outcome",
+        "position": 0,
+        "objective": "what this child must deliver",
+        "interfaces": ["contract with earlier or later children"],
+        "constraints": [],
+        "done_when": ["observable acceptance criterion"],
     }
 
 
@@ -232,7 +267,7 @@ def planning_instruction(request: PlanningRequest, *, fresh_rework: bool = False
             "title": "short implementation title",
             "description": "concise description of the approved approach",
             "key_points": [],
-            "implementation_tasks": [work_package_example()],
+            "implementation_tasks": [work_package_example() if request.one_package else feature_task_example()],
             "skills": [],
             "implementation_phases": [],
             "validation_commands": [],
@@ -252,6 +287,20 @@ def planning_instruction(request: PlanningRequest, *, fresh_rework: bool = False
         else ""
     )
     prompt = f"Original Markdown request: {request.prompt_path}\n" if request.prompt_path else ""
+    guidance = (
+        "This is technical planning for one approved child on its current checkout. Inspect the actual code, "
+        "choose the files and concrete changes, then return exactly one complete work package. "
+        "Preserve the approved id, objective, interfaces, constraints, and acceptance criteria. "
+        "The sole technical package position is zero even when the feature's parent sequence position is later. "
+        "Use runnable focused verification commands. Estimate max_tool_calls between 1 and 50. "
+        "Planning is read-only; the executor will implement this package. "
+        if request.one_package else
+        "A parent feature plan must have runnable final integration validation commands, from its metadata "
+        "or the project configuration. Plan the full dependency chain under one parent, with as many ordered "
+        "child outcomes as independent verification requires. Describe behavior, contracts, constraints, and "
+        "acceptance criteria. Do not choose files, edits, or tool budgets for children yet; a technical planner "
+        "will inspect the actual checkout immediately before each child executes. "
+    )
     return (
         rework + f"Inspect the repository and plan task {request.title}: {request.goal}\n"
         f"{prompt}"
@@ -259,11 +308,9 @@ def planning_instruction(request: PlanningRequest, *, fresh_rework: bool = False
         f"Project validation commands: {json.dumps(request.project.validation_commands)}\n"
         "If one high-impact answer is still required, return only "
         '{"question":"the single focused question"}. Ask no low-risk implementation questions. '
-        "A parent plan must have runnable final integration validation commands, from its metadata or the project configuration. "
-        "Estimate budget.max_tool_calls per package: use 15-20 for a small local edit with fast tests, "
-        "25-35 for several files or compile/test iteration, and 40-50 for costly build systems, migrations, "
-        "or integration work. Do not copy one value across every package; split work estimated above 50. "
+        + guidance
+        +
         "Return only JSON matching this shape:\n"
         f"{json.dumps(contract)}"
-        + (f"\nDiscovery handoff:\n{request.handoff}" if request.handoff else "")
+        + (f"\nPlanning handoff:\n{request.handoff}" if request.handoff else "")
     )

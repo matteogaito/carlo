@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from carlo.api import ImplementationTask, PlanMetadata, _proposal_implementation_tasks
+from carlo.planning import FeatureTask
 
 
 def package(position: int = 0) -> dict:
@@ -71,3 +72,21 @@ def test_discovery_does_not_invent_packages_from_phase_titles() -> None:
         {"megaprompt": "Build importer"},
         {"implementation_phases": ["Build importer"], "affected_areas": ["src/importer.py"]},
     ) == []
+
+
+def test_feature_plan_accepts_outcomes_without_premature_file_scope() -> None:
+    metadata = PlanMetadata.model_validate({
+        "skills": [], "validation_commands": ["pytest -q"],
+        "browser_validation": False, "build_required": False,
+        "run_required": False, "deployment_expected": False,
+        "risk_flags": [], "affected_areas": [],
+        "implementation_tasks": [{
+            "id": "feature-1", "title": "Import by date", "position": 0,
+            "objective": "Imported photos appear under their metadata date.",
+            "interfaces": ["The destination selector consumes the imported path."],
+            "constraints": ["Preserve existing imports."],
+            "done_when": ["Date placement and collision behavior pass tests."],
+        }],
+    })
+    assert isinstance(metadata.implementation_tasks[0], FeatureTask)
+    assert "files" not in metadata.implementation_tasks[0].model_dump()

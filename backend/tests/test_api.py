@@ -30,7 +30,7 @@ def planning_output(
             "metadata": {
                 "skills": ["testing"],
                 "implementation_tasks": implementation_tasks if implementation_tasks is not None else [
-                    work_package("Implement task", "Complete the approved goal.")
+                    feature_task("Implement task", "Complete the approved goal.")
                 ],
                 "validation_commands": ["pytest -q"],
                 "browser_validation": False,
@@ -56,6 +56,49 @@ def work_package(title: str, objective: str, position: int = 0) -> dict[str, obj
         "done_when": ["The endpoint behavior is covered by tests."],
         "budget": {"max_tool_calls": 20},
     }
+
+
+def feature_task(title: str, objective: str, position: int = 0) -> dict[str, object]:
+    return {
+        "id": f"feature-{position + 1}", "title": title, "position": position,
+        "objective": objective, "interfaces": ["Preserve the existing API contract."],
+        "constraints": [], "done_when": ["Relevant tests pass."],
+    }
+
+
+@pytest.mark.asyncio
+async def test_answer_to_technical_planner_requeues_the_blocked_child(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(text(
+            "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+            "user_sessions, project_memberships, users, events, validation_runs, "
+            "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+            "RESTART IDENTITY CASCADE"
+        ))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    async with factory() as session:
+        project = Project(name="Test", key="TST", repository_path=str(tmp_path))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.BLOCKED)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Create output", parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS, stage=TaskStage.BLOCKED, approved_plan_revision=1, planning_question={"text": "Which format?"})
+        session.add_all([project, parent, child])
+        await session.commit()
+    app = create_app(factory, FakeProvider(""), Settings(app_origin="http://test"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        client.headers["Origin"] = "http://test"
+        response = await client.post("/api/tasks/TST-2/plan/answer", json={"answer": "UTF-8 text"})
+        assert response.status_code == 200
+    async with factory() as session:
+        child = await session.get(Task, "TST-2")
+        parent = await session.get(Task, "TST-1")
+        assert (child.status, child.stage, child.planning_question) == (TaskStatus.READY, TaskStage.QUEUED, None)
+        assert (parent.status, parent.stage) == (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING)
+        answer = await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "planning.technical.answer"))
+        assert answer.payload == {"question": "Which format?", "answer": "UTF-8 text"}
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -118,7 +161,7 @@ async def test_parent_replan_uses_child_failure_evidence_without_changing_childr
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
     replacement_tasks = [
-        work_package(f"Replacement {number}", f"Implement replacement {number}", number - 1)
+        feature_task(f"Replacement {number}", f"Implement replacement {number}", number - 1)
         for number in range(1, 4)
     ]
     provider = FakeProvider(
@@ -532,7 +575,13 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
                     "description": "Reuse the existing API boundary and session storage.",
                     "key_points": ["Preserve the current error envelope"],
                     "implementation_tasks": [
-                        work_package("Add the login endpoint", "Implement the endpoint using the existing auth service.")
+                        {
+                            "id": "login", "title": "Add the login endpoint", "position": 0,
+                            "objective": "Implement login using the existing auth service.",
+                            "interfaces": ["Preserve the API error envelope."],
+                            "constraints": [],
+                            "done_when": ["Login succeeds and invalid credentials are rejected by tests."],
+                        }
                     ],
                     "skills": ["testing"],
                     "validation_commands": ["pytest -q"],
@@ -656,6 +705,8 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
             "queued",
         )
         assert child["parent_title"] == "Login"
+        child_detail = (await client.get(f'/api/tasks/{child["id"]}')).json()
+        assert "files" not in child_detail["plan"]["metadata"]["implementation_tasks"][0]
 
         async with factory() as session:
             parent_record = await session.get(Task, task["id"])

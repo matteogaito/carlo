@@ -184,6 +184,98 @@ async def empty_orchestration_store():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("position", [0, 1])
+@pytest.mark.parametrize("planner_result", ["valid", "drift", "question"])
+async def test_feature_child_is_technically_planned_on_current_checkout_before_local_execution(tmp_path: Path, position: int, planner_result: str) -> None:
+    repository = repository_at(tmp_path / "repo")
+    engine, factory = await empty_orchestration_store()
+    feature = {
+        "id": "feature-1", "title": "Create output", "position": position,
+        "objective": "Create feature.txt with done content",
+        "interfaces": ["feature.txt is available to the next child"],
+        "constraints": ["Do not modify README.md"],
+        "done_when": ["feature.txt contains done"],
+    }
+    package = {
+        **feature,
+        "position": 0,
+        "files": [{"path": "feature.txt", "mode": "create", "reason": "Feature output"}],
+        "changes": {"feature.txt": "Write done"},
+        "verification": {"commands": ["grep -q done feature.txt"], "success": "Exit zero"},
+        "budget": {"max_tool_calls": 20},
+    }
+    if planner_result == "drift":
+        package["objective"] = "Create an unrelated output"
+    async with factory() as session:
+        await add_managed_profiles(session, "plan", "implementation", "escalation")
+        project = Project(name="Test", key="TST", repository_path=str(repository))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build feature", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        child = Task(id="TST-2", project=project, sequence=2, title=feature["title"], goal=feature["objective"], parent=parent, subtask_position=position, status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        if position:
+            session.add(Task(id="TST-3", project=project, sequence=3, title="Previous", goal="Previous", parent=parent, subtask_position=0, status=TaskStatus.DONE, stage=TaskStage.COMPLETE, checkpoint_sha=git(repository, "rev-parse", "HEAD")))
+            session.add(Event(task=child, type="planning.technical.answer", payload={"question": "Which format?", "answer": "UTF-8 text"}))
+        session.add_all([
+            project, parent, child,
+            PlanRevision(task=parent, revision=1, brief_markdown="Shared architecture", plan_markdown="Feature plan", metadata_json={"implementation_tasks": ([{"id": "previous", "title": "Previous", "position": 0, "objective": "Previous", "interfaces": [], "constraints": [], "done_when": ["Verified"]}] if position else []) + [feature], "validation_commands": ["grep -q done feature.txt"]}, approved_at=datetime.now(UTC)),
+            PlanRevision(task=child, revision=1, brief_markdown="Shared architecture", plan_markdown=feature["objective"], metadata_json={"implementation_tasks": [feature]}, approved_at=datetime.now(UTC)),
+        ])
+        await session.commit()
+
+    class Provider:
+        calls = []
+
+        async def run(self, profile, instruction, cwd, session_id, on_event=None):
+            self.calls.append((profile.name, instruction, cwd))
+            if profile.name == "plan":
+                assert set(profile.tools).isdisjoint({"write", "edit", "bash"})
+                assert "Shared architecture" in instruction
+                if position:
+                    assert "UTF-8 text" in instruction
+                    assert '"verified_predecessors"' in instruction
+                    assert '"title": "Previous"' in instruction
+                assert not Path(cwd, "feature.txt").exists()
+                if planner_result == "question":
+                    return AgentResult(session_id, json.dumps({"question": "Which format should the output use?"}), (), 0)
+                return AgentResult(session_id, json.dumps({
+                    "brief_markdown": "Technical evidence", "plan_markdown": "Create and verify feature.txt",
+                    "metadata": {
+                        "skills": [], "validation_commands": [], "implementation_tasks": [package],
+                        "browser_validation": False, "build_required": False,
+                        "run_required": False, "deployment_expected": False,
+                        "risk_flags": [], "affected_areas": [],
+                    },
+                }), (), 0)
+            Path(cwd, "feature.txt").write_text("done\n")
+            assert "Write done" in instruction
+            if position:
+                assert "Verified predecessors" in instruction
+            return AgentResult(session_id, "implemented", (), 0)
+
+    provider = Provider()
+    outcome = await ImplementationPipeline(factory, provider, tmp_path / "artifacts").run("TST-2")
+    if planner_result != "valid":
+        assert outcome == ("blocked" if planner_result == "question" else "failed")
+        assert [call[0] for call in provider.calls] == ["plan"]
+        async with factory() as session:
+            child = await session.get(Task, "TST-2")
+            assert child.approved_plan_revision == 1
+            assert await session.scalar(select(Attempt).where(Attempt.task_id == "TST-2")) is None
+            expected_event = "planning.technical.question" if planner_result == "question" else "planning.technical.failed"
+            assert await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == expected_event)) is not None
+        await engine.dispose()
+        return
+    assert outcome == "validated"
+    assert [call[0] for call in provider.calls] == ["plan", "implementation"]
+    async with factory() as session:
+        child = await session.get(Task, "TST-2")
+        assert child.approved_plan_revision == 2
+        revision = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == "TST-2", PlanRevision.revision == 2))
+        assert revision.metadata_json["implementation_tasks"][0]["changes"] == {"feature.txt": "Write done"}
+        assert await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "planning.technical.completed")) is not None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_work_package_escalation_creates_approved_revision_only_within_scope(tmp_path: Path) -> None:
     repository = repository_at(tmp_path / "repo")
     engine, factory = await empty_orchestration_store()
@@ -328,6 +420,32 @@ async def test_revise_escalation_upgrades_model_for_expert_retry(tmp_path: Path)
         upgrade_event = await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "escalation.model_upgraded"))
         assert upgrade_event is not None
         assert upgrade_event.payload["profile"] == "coder-expert"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_manual_retry_resets_work_package_escalation_limit(tmp_path: Path) -> None:
+    engine, factory = await empty_orchestration_store()
+    async with factory() as session:
+        project = Project(name="Test", key="TST", repository_path=str(tmp_path))
+        task = Task(id="TST-1", project=project, sequence=1, title="Task", goal="Done")
+        session.add_all([project, task])
+        await session.flush()
+        session.add_all([
+            Escalation(task_id=task.id, reason="work_package", evidence={}),
+            Escalation(task_id=task.id, reason="work_package", evidence={}),
+        ])
+        await session.commit()
+    pipeline = ImplementationPipeline(factory, object(), tmp_path / "artifacts", max_escalations=2)
+    assert await pipeline._work_package_escalation_count("TST-1") == 2
+    async with factory() as session:
+        session.add(Event(task_id="TST-1", type="task.retry.started", payload={"previous_attempt": 3}))
+        await session.commit()
+    assert await pipeline._work_package_escalation_count("TST-1") == 0
+    async with factory() as session:
+        session.add(Escalation(task_id="TST-1", reason="work_package", evidence={}))
+        await session.commit()
+    assert await pipeline._work_package_escalation_count("TST-1") == 1
     await engine.dispose()
 
 

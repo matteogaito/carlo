@@ -7,6 +7,7 @@ test("Discovery skill defines the state and task handoff contracts", async () =>
   for (const required of ["discovery_state", "findings", "decisions", "unresolved_questions", "task_proposals", "megaprompt", "depends_on", "canonical planning profile", "child tree"]) {
     assert.match(skill, new RegExp(required));
   }
+  assert.match(skill, /dependent outcomes.*one parent/i);
 });
 
 test("Rework skill defines the fix proposal contract", async () => {
@@ -16,9 +17,9 @@ test("Rework skill defines the fix proposal contract", async () => {
   }
 });
 
-test("Planning skill defines bounded, verifiable work packages", async () => {
+test("Planning skill distinguishes feature outcomes from technical packages", async () => {
   const skill = await readFile("skills/carlo-planning/SKILL.md", "utf8");
-  for (const required of ["independently verifiable outcome", "15,000–20,000 tokens", "max_tool_calls", "40–50", "hard maximum of 50", "objective", "interfaces", "changes", "constraints", "verification", "done_when"]) {
+  for (const required of ["feature plan", "technical plan", "Do not prescribe files", "current checkout", "15,000–20,000", "max_tool_calls", "objective", "interfaces", "changes", "constraints", "verification", "done_when"]) {
     assert.match(skill, new RegExp(required));
   }
 });

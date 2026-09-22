@@ -35,7 +35,7 @@ Do not use memory as a substitute for the transcript. Correct stale state when l
 
 When a concrete change emerges, identify distinct Tasks and ask only for missing high-impact information. Once sufficient:
 
-1. Identify the parent Task boundaries from the approved outcome and repository evidence. A proposal is one parent candidate; use as many as the work requires.
+1. Identify the parent Task boundaries from the approved outcome and repository evidence. A proposal is one parent candidate. Multiple proposals are allowed only when their outcomes can be planned, implemented, and validated independently.
 2. Clearly propose each candidate in chat and put it in `task_proposals`.
 3. CARLO runs its canonical planning profile for each candidate and shows the resulting Brief, Plan, and child tree for review before Create.
 4. Wait for user confirmation; CARLO creates and approves exactly the reviewed plans.
@@ -45,15 +45,16 @@ Each candidate contains:
 - `id`: stable identifier across turns;
 - `title`: concise parent goal;
 - `megaprompt`: self-contained implementation input with goal, scope, relevant findings and decisions, evidence, files/symbols, acceptance criteria, constraints, and validation commands;
-- `depends_on`: IDs of parent candidates that must finish first.
+- `depends_on`: IDs of parent candidates that must finish first. Use this only when a separate parent can be planned concretely from a stable interface already known during Discovery. If its child plan needs code or decisions from an earlier parent, combine both outcomes into one parent proposal so the canonical planner can design the complete ordered child tree.
 
-Discovery supplies decisions and evidence, not hand-authored Briefs or work packages. Ask high-impact questions before proposing a candidate. The canonical planner decides the ordered, independently verifiable child packages and reviews the tree for omitted work.
+Discovery supplies decisions and evidence, not hand-authored Briefs or technical work packages. Ask high-impact questions before proposing a candidate. The canonical feature planner decides the ordered, independently verifiable child outcomes and reviews the tree for omitted work. A technical planner chooses files and changes for each child on its verified checkout immediately before execution.
 
 Only emit a proposal after high-impact questions are resolved. The plan should
 shift costly decisions upstream without brittle line-by-line pseudocode. The
 user's Create action approves the displayed canonical plans. Candidates awaiting planning remain visible but cannot be created.
 
 Do not create placeholder candidates, split work merely for organizational neatness, or include unrelated Discovery history. A Discovery may create zero, one, or many Tasks and remain open afterward.
+Dependent outcomes belong in one parent even when this creates many children. Use several parents only for work that does not need another proposal's future code or implementation decisions.
 
 ## Common mistakes
 

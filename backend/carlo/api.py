@@ -2447,6 +2447,21 @@ def create_app(
         session: AsyncSession = Depends(get_session),
     ) -> dict[str, Any]:
         task = await _task_or_404(session, task_id)
+        if task.parent_task_id is not None and task.stage == TaskStage.BLOCKED and task.planning_question:
+            parent = await session.scalar(select(Task).where(Task.id == task.parent_task_id).with_for_update())
+            if parent is None:
+                raise HTTPException(409, "subtask parent is missing")
+            question = task.planning_question["text"]
+            task.planning_question = None
+            task.status, task.stage = TaskStatus.READY, TaskStage.QUEUED
+            task.version += 1
+            parent.status, parent.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
+            parent.version += 1
+            session.add(Event(task=task, type="planning.technical.answer", payload={
+                "question": question, "answer": payload.answer,
+            }))
+            await session.commit()
+            return await _task_view(session, task)
         if task.stage != TaskStage.PLANNING or not task.planning_question:
             raise HTTPException(409, "task is not waiting for a planning answer")
         question = task.planning_question["text"]

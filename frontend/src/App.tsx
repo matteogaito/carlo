@@ -720,13 +720,13 @@ function StructuredPlan({ plan }: { plan: Plan }) {
       </details>}
     </section>
     <section className="plan-task-list">
-      <h3>Implementation tasks</h3>
+      <h3>{tasks.some((item) => 'files' in item) ? 'Implementation tasks' : 'Feature tasks'}</h3>
       {tasks.map((item, index) => <details className="plan-task" key={item.id || `${index}-${item.title}`}>
         <summary><span>{index + 1}</span><strong>{item.title}</strong></summary>
         <div className="plan-task-body">
           <h4>Objective</h4>
           <TaskMarkdown>{item.objective}</TaskMarkdown>
-          {!!item.files?.length && <>
+          {'files' in item && !!item.files.length && <>
             <h4>Files</h4>
             <ul>{item.files.map((file) => <li key={file.path}><code>{file.path}</code> · {file.mode}{file.reason ? ` — ${file.reason}` : ''}</li>)}</ul>
           </>}
@@ -738,7 +738,7 @@ function StructuredPlan({ plan }: { plan: Plan }) {
             <h4>Done when</h4>
             <ul>{item.done_when.map((point) => <li key={point}>{point}</li>)}</ul>
           </>}
-          {!!item.verification?.commands?.length && <>
+          {'verification' in item && !!item.verification.commands.length && <>
             <h4>Verification</h4>
             <ul>{item.verification.commands.map((command) => <li key={command}><code>{command}</code></li>)}</ul>
             <p>{item.verification.success}</p>
@@ -748,7 +748,7 @@ function StructuredPlan({ plan }: { plan: Plan }) {
     </section>
     <section className="plan-source-material">
       <details><summary>Repository Brief</summary><TaskMarkdown>{plan.brief_markdown}</TaskMarkdown></details>
-      <details><summary>Full technical plan</summary><TaskMarkdown>{plan.plan_markdown}</TaskMarkdown></details>
+      <details><summary>{tasks.some((item) => 'files' in item) ? 'Full technical plan' : 'Full feature plan'}</summary><TaskMarkdown>{plan.plan_markdown}</TaskMarkdown></details>
     </section>
   </>
 }

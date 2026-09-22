@@ -76,6 +76,18 @@ def test_pack_budget_is_rejected_not_truncated(tmp_path: Path) -> None:
     assert error.value.estimated_tokens > 100
 
 
+def test_oversized_source_falls_back_to_file_manifest(tmp_path: Path) -> None:
+    (tmp_path / "large.py").write_text("private implementation\n" * 1_000)
+    result = build_context_pack(
+        tmp_path,
+        package([{"path": "large.py", "mode": "edit", "reason": "Parser"}]),
+        max_tokens=1_000,
+    )
+    assert "File: large.py (edit; content omitted" in result
+    assert "private implementation" not in result
+    assert "Verification commands:" in result
+
+
 def test_compact_retry_pack_keeps_contract_but_omits_file_contents(tmp_path: Path) -> None:
     (tmp_path / "large.py").write_text("private implementation\n" * 1_000)
     result = build_context_pack(

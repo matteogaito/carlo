@@ -69,7 +69,7 @@ def build_context_pack(
     repository: Path,
     package: dict[str, Any],
     *,
-    max_tokens: int = 18_000,
+    max_tokens: int = 32_000,
     brief: str = "",
     include_file_contents: bool = True,
 ) -> str:
@@ -108,7 +108,7 @@ def build_context_pack(
         if not path.is_relative_to(root):
             raise ContextPackError(f"file is outside the project: {entry.path}")
         if not include_file_contents:
-            parts.append(f"File: {entry.path} ({entry.mode}; content omitted for retry; reason: {entry.reason})")
+            parts.append(f"File: {entry.path} ({entry.mode}; content omitted; read relevant sections as needed; reason: {entry.reason})")
             continue
         if not path.exists():
             if entry.mode != "create":
@@ -138,5 +138,10 @@ def build_context_pack(
     pack = "\n".join(parts) + "\n"
     estimated_tokens = (len(pack.encode("utf-8")) + 2) // 3
     if estimated_tokens > max_tokens:
+        if include_file_contents:
+            return build_context_pack(
+                repository, package, max_tokens=max_tokens,
+                brief=brief, include_file_contents=False,
+            )
         raise ContextPackBudgetExceeded(estimated_tokens, max_tokens)
     return pack

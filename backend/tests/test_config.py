@@ -7,7 +7,9 @@ from carlo.config import Settings
 
 def test_default_database_url_is_a_string(monkeypatch) -> None:
     monkeypatch.delenv("CARLO_DATABASE_URL", raising=False)
+    monkeypatch.delenv("CARLO_CONTEXT_PACK_BUDGET_TOKENS", raising=False)
     assert Settings.from_env().database_url == "postgresql+psycopg:///carlov3"
+    assert Settings.from_env().context_pack_budget_tokens == 32_000
 
 
 def test_worker_settings_are_loaded_from_environment(monkeypatch) -> None:

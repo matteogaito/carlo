@@ -960,8 +960,8 @@ describe('CARLO board', () => {
       id: 'csv', title: 'Add CSV import', megaprompt: 'Implement CSV import.', depends_on: [],
       draft_source: 'current',
       plan_draft: { brief_markdown: 'Reuse the **existing ingestion service**.', plan_markdown: 'Implement parsing and preserve the error envelope.', metadata: { implementation_tasks: [
-        { id: 'parser', title: 'Implement parsing', position: 0, objective: 'Parse CSV.', files: [{ path: 'src/ingest.py', mode: 'edit' as const, ranges: [], symbols: [], reason: 'Parser' }], interfaces: [], changes: {}, constraints: [], verification: { commands: ['pytest -q'], success: 'Pass' }, done_when: [], budget: { max_tool_calls: 20 } },
-        { id: 'tests', title: 'Validate imports', position: 1, objective: 'Run parser tests.', files: [{ path: 'tests/test_ingest.py', mode: 'edit' as const, ranges: [], symbols: [], reason: 'Tests' }], interfaces: [], changes: {}, constraints: [], verification: { commands: ['pytest -q tests/test_ingest.py'], success: 'Pass' }, done_when: [], budget: { max_tool_calls: 20 } },
+        { id: 'parser', title: 'Parse CSV', position: 0, objective: 'Parse CSV rows.', interfaces: ['Produce parsed records'], constraints: [], done_when: ['Valid CSV rows are imported'] },
+        { id: 'validation', title: 'Validate imports', position: 1, objective: 'Reject invalid CSV rows.', interfaces: ['Consume parsed records'], constraints: [], done_when: ['Invalid rows produce useful errors'] },
       ] } },
     }
     const discovery: Discovery = {
@@ -976,7 +976,10 @@ describe('CARLO board', () => {
     const chat = document.querySelector<HTMLElement>('.message-stream')!
     expect(within(chat).getByText('Add CSV import')).toBeTruthy()
     expect(within(chat).getByText('2 subtasks')).toBeTruthy()
-    expect(within(chat).getByText('Implement parsing')).toBeTruthy()
+    expect(within(chat).getByText('Parse CSV')).toBeTruthy()
+    const parser = within(chat).getByText('Parse CSV').closest('details')!
+    await userEvent.click(within(parser).getByText('Parse CSV'))
+    expect(within(parser).getByText('Done when: Valid CSV rows are imported')).toBeTruthy()
     await userEvent.click(within(chat).getByRole('button', { name: 'Create all Ready tasks' }))
     expect(createDiscoveryTasks).toHaveBeenCalledWith(9, undefined)
   })

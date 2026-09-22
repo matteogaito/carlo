@@ -113,10 +113,8 @@ async def test_discovery_candidates_use_canonical_planner_and_keep_unchanged_dra
         "skills": [], "validation_commands": ["pytest -q"], "browser_validation": False,
         "build_required": False, "run_required": False, "deployment_expected": False,
         "risk_flags": [], "affected_areas": [], "implementation_tasks": [{
-            "id": "one", "title": "Implement", "position": 0, "objective": "Deliver", "files": [
-                {"path": "app.py", "mode": "edit", "reason": "Implementation"}],
-            "interfaces": ["Preserve API"], "changes": {"app.py": "Implement"},
-            "constraints": [], "verification": {"commands": ["pytest -q"], "success": "Pass"},
+            "id": "one", "title": "Implement", "position": 0, "objective": "Deliver",
+            "interfaces": ["Preserve API"], "constraints": [],
             "done_when": ["Tests pass"],
         }],
     }}

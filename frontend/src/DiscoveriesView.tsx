@@ -249,10 +249,11 @@ function ProposalTree({ proposal, proposals }: { proposal: DiscoveryProposal; pr
     <ol>{children.map((child) => <li key={child.id}><details>
       <summary>{child.title}</summary>
       <p>{child.objective}</p>
-      <p>Files: {child.files.map((file) => file.path).join(', ')}</p>
+      {'files' in child && <p>Files: {child.files.map((file) => file.path).join(', ')}</p>}
       <p>Interfaces: {child.interfaces.join(', ')}</p>
       {!!child.constraints.length && <p>Constraints: {child.constraints.join(', ')}</p>}
-      <p>Checks: {child.verification.commands.join(', ')}</p>
+      <p>Done when: {child.done_when.join('; ')}</p>
+      {'verification' in child && <p>Checks: {child.verification.commands.join(', ')}</p>}
     </details></li>)}</ol>
   </details>
 }
