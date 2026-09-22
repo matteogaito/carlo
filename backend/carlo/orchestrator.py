@@ -42,8 +42,8 @@ from .context_pack import ContextPackBudgetExceeded, ContextPackError, build_con
 from .execution_telemetry import ExecutionTelemetry, ToolBudgetExceeded
 from .provider import PiProvider
 from .planning import FeatureTask, ImplementationTask, Planner, PlanningError, PlanningQuestion, PlanningRequest
-from .work_package_escalation import within_approved_scope, within_approved_scope_split
-from .api import _active_children, _materialize_plan_subtasks, work_package_example
+from .work_package_escalation import within_approved_scope
+from .api import work_package_example
 
 IMPLEMENTATION_LOCK = 1_128_352_847
 MAX_INTERRUPTS = 3
