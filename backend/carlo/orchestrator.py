@@ -1036,7 +1036,7 @@ class ImplementationPipeline:
             "reverted without human approval, including removing their out-of-scope additions. "
             "Failing tests are not a human blocker. Use blocked only for a missing product decision, "
             "credential, external dependency, or required scope expansion. "
-            "A revised or split package may not raise max_tool_calls above the original package budget. "
+            "A revised slice may not raise its planning estimate above the original slice estimate. "
             "Every package (revise or split) must match exactly this shape, with no other fields:\n"
             + json.dumps(package_example)
             + "\n"
@@ -1074,97 +1074,6 @@ class ImplementationPipeline:
                 session.add(Event(task=current, type="escalation.human_required", payload={"reason": record.diagnosis}))
                 await session.commit()
                 return "blocked"
-            if action == "split":
-                proposed = output.get("packages", [])
-                proposed = proposed if isinstance(proposed, list) else []
-                parent = (
-                    await session.get(Task, task.parent_task_id)
-                    if task.parent_task_id else None
-                )
-                if not proposed or parent is None:
-                    session.add(Event(task=current, type="escalation.split_requested", payload={
-                        "reason": record.diagnosis,
-                        "packages": proposed,
-                        "next_action": "replan parent or rework this subtask",
-                    }))
-                    await session.commit()
-                    return "failed"
-                split_automatic, split_rejected_reason = within_approved_scope_split(package, proposed)
-                parent_plan = await session.scalar(select(PlanRevision).where(
-                    PlanRevision.task_id == parent.id,
-                    PlanRevision.revision == parent.approved_plan_revision,
-                ))
-                parent_packages = (
-                    parent_plan.metadata_json.get("implementation_tasks", [])
-                    if parent_plan else []
-                )
-                position = current.subtask_position
-                if not isinstance(parent_packages, list) or position is None or position >= len(parent_packages):
-                    split_automatic = False
-                    split_rejected_reason = "parent plan no longer contains the failed work package"
-                    replacement_packages = proposed
-                else:
-                    replacement_packages = [
-                        *parent_packages[:position],
-                        *proposed,
-                        *parent_packages[position + 1:],
-                    ]
-                    replacement_packages = [
-                        {**item, "position": index}
-                        for index, item in enumerate(replacement_packages)
-                    ]
-                    ids = [item.get("id") for item in replacement_packages]
-                    if len(set(ids)) != len(ids):
-                        split_automatic = False
-                        split_rejected_reason = "replacement plan has duplicate package ids"
-                revision = int(await session.scalar(select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
-                    PlanRevision.task_id == parent.id,
-                )) or 1)
-                parent_metadata = {
-                    **(parent_plan.metadata_json if parent_plan else {}),
-                    "replan": True,
-                    "implementation_tasks": replacement_packages,
-                    "escalation_source": escalation_id,
-                }
-                amendment = PlanRevision(
-                    task=parent, revision=revision,
-                    brief_markdown=parent_plan.brief_markdown if parent_plan else plan.brief_markdown,
-                    plan_markdown=parent_plan.plan_markdown if parent_plan else plan.plan_markdown,
-                    metadata_json=parent_metadata,
-                    approved_at=datetime.now(UTC) if split_automatic else None,
-                )
-                session.add(amendment)
-                await session.flush()
-                new_children: list[Task] = []
-                if split_automatic:
-                    old_children = await _active_children(session, parent.id, lock=True)
-                    for child in old_children:
-                        if child.id == current.id:
-                            child.superseded_at = amendment.approved_at
-                        elif child.subtask_position is not None and child.subtask_position > position:
-                            child.subtask_position += len(proposed) - 1
-                    new_children = await _materialize_plan_subtasks(
-                        session, parent, amendment, proposed, start_position=position
-                    )
-                    if parent.stage == TaskStage.BLOCKED:
-                        action_name = "approve_fix" if parent.status == TaskStatus.FAILED else "approve_amendment"
-                        parent.status, parent.stage = transition(parent.status, parent.stage, action_name)
-                    parent.approved_plan_revision = revision
-                    parent.version += 1
-                else:
-                    parent.stage = TaskStage.BLOCKED
-                    parent.version += 1
-                session.add(Event(
-                    task=parent,
-                    type="escalation.package_revised" if split_automatic else "escalation.approval_required",
-                    payload={
-                        "revision": revision, "action": "split", "automatic": split_automatic,
-                        "new_children": [child.id for child in new_children],
-                        **({} if split_automatic else {"rejected_reason": split_rejected_reason}),
-                    },
-                ))
-                await session.commit()
-                return "failed" if split_automatic else "blocked"
             revision = int(await session.scalar(select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
                 PlanRevision.task_id == task.id,
             )) or 1)
