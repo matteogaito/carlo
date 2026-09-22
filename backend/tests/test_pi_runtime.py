@@ -241,6 +241,65 @@ def test_pi_runtime_sandboxes_to_absolute_project_and_reads_gitconfig(
     assert filesystem["allowWrite"] == [str(project.resolve()), str(user_temp.resolve())]
 
 
+def test_pi_runtime_grants_xcode_paths_only_for_macos_xcode_projects(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    runtime = importlib.import_module("carlo.pi_runtime")
+    provider = importlib.import_module("carlo.provider")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "PhotoDigger.xcodeproj").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    user_temp = tmp_path / "user-temp"
+    user_temp.mkdir()
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime.Path, "home", lambda: home)
+    monkeypatch.setattr(runtime.tempfile, "gettempdir", lambda: str(user_temp))
+    model = provider.ResolvedModel(
+        model_provider_id=1,
+        available_model_id=2,
+        provider_slug="omlx",
+        base_url="http://127.0.0.1:11435/v1",
+        api="openai-completions",
+        external_id="qwen",
+        display_name="Qwen",
+        api_key=None,
+        compatibility={},
+        input_modalities=("text",),
+        reasoning=True,
+        context_window=65_536,
+        max_tokens=16_384,
+        compaction_enabled=True,
+        reserve_tokens=16_384,
+        keep_recent_tokens=13_107,
+    )
+
+    snapshot = runtime.PiRuntimeSnapshotBuilder(tmp_path / "runtime").materialize(
+        "CAR-1-implementation-1", model, project=project
+    )
+    filesystem = json.loads((snapshot.agent_dir / "sandbox.json").read_text())[
+        "filesystem"
+    ]
+
+    developer = home / "Library" / "Developer"
+    core_simulator_logs = home / "Library" / "Logs" / "CoreSimulator"
+    assert filesystem["allowRead"] == [
+        str(project.resolve()),
+        str(home / ".gitconfig"),
+        "/Applications/Xcode.app",
+        str(developer),
+        str(core_simulator_logs),
+    ]
+    assert filesystem["allowWrite"] == [
+        str(project.resolve()),
+        str(user_temp.resolve()),
+        str(developer / "Xcode" / "DerivedData"),
+        str(developer / "CoreSimulator"),
+        str(core_simulator_logs),
+    ]
+
+
 def test_pi_runtime_allows_extra_paths_read_only(tmp_path: Path) -> None:
     runtime = importlib.import_module("carlo.pi_runtime")
     provider = importlib.import_module("carlo.provider")
