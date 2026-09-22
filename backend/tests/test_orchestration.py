@@ -418,7 +418,7 @@ async def test_work_package_escalation_creates_approved_revision_only_within_sco
 
     class Provider:
         async def run(self, profile, instruction, cwd, session_id, on_event=None):
-            assert "may not raise max_tool_calls above the original package budget" in instruction
+            assert "may not raise its planning estimate above the original slice estimate" in instruction
             assert "may be corrected or reverted without human approval" in instruction
             assert "Failing tests are not a human blocker" in instruction
             return AgentResult(session_id, json.dumps({"action": "revise", "diagnosis": "Missing empty case", "package": revised}), (), 0)
