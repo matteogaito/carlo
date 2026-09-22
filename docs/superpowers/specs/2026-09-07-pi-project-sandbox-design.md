@@ -18,8 +18,9 @@ The generated configuration:
 
 - sets `enabled` and `sandboxUserShell` to `true`;
 - sets a short permission timeout so unattended denied operations abort promptly;
-- sets `filesystem.allowRead` and `filesystem.allowWrite` to `["."]`;
-- denies reads from `/Users`, `/home`, and Carlo's worktree root, with `.` re-allowing only the current project;
+- scopes `filesystem.allowRead` and `filesystem.allowWrite` to the current project by default;
+- on macOS, when the current project contains a top-level `.xcodeproj` or `.xcworkspace`, additionally grants read access to `/Applications/Xcode.app`, `~/Library/Developer`, and `~/Library/Logs/CoreSimulator`, and write access only to Xcode DerivedData, CoreSimulator state, and CoreSimulator logs;
+- denies reads from `/Users`, `/home`, and Carlo's worktree root, with narrower allow rules re-opening only the current project and approved toolchain paths;
 - hard-denies writes to `.pi/sandbox.json` so Pi cannot change its own policy;
 - sets `network.allowedDomains` to `["*"]` and `network.deniedDomains` to `[]`;
 - leaves Apple Events and browser-process launching disabled;
