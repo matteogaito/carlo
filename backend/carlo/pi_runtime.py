@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,30 @@ from typing import Any
 from .provider import ResolvedModel, ResolvedPiPackage
 
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_.-]{1,200}\Z")
+
+
+def _xcode_sandbox_paths(project: Path | None) -> tuple[list[str], list[str]]:
+    if project is None or sys.platform != "darwin":
+        return [], []
+    root = project.resolve(strict=True)
+    if not any(root.glob("*.xcodeproj")) and not any(root.glob("*.xcworkspace")):
+        return [], []
+
+    home = Path.home()
+    developer = home / "Library" / "Developer"
+    logs = home / "Library" / "Logs" / "CoreSimulator"
+    return (
+        [
+            "/Applications/Xcode.app",
+            str(developer),
+            str(logs),
+        ],
+        [
+            str(developer / "Xcode" / "DerivedData"),
+            str(developer / "CoreSimulator"),
+            str(logs),
+        ],
+    )
 
 
 def runtime_context_window(
@@ -158,6 +183,7 @@ class PiRuntimeSnapshotBuilder:
         project_path = str(project.resolve(strict=True)) if project else "."
         gitconfig_paths = [str(Path.home() / ".gitconfig")] if project else []
         temporary_paths = [str(Path(tempfile.gettempdir()).resolve())] if project else []
+        xcode_read_paths, xcode_write_paths = _xcode_sandbox_paths(project)
         self._write_json(
             agent_dir / "sandbox.json",
             {
@@ -178,10 +204,11 @@ class PiRuntimeSnapshotBuilder:
                     "allowRead": [
                         project_path,
                         *gitconfig_paths,
+                        *xcode_read_paths,
                         *(str(path.resolve()) for path in read_paths),
                         *(str(Path(package.artifact_path).resolve()) for package in packages),
                     ],
-                    "allowWrite": [project_path, *temporary_paths],
+                    "allowWrite": [project_path, *temporary_paths, *xcode_write_paths],
                     "denyWrite": [".pi/sandbox.json"],
                 },
             },
