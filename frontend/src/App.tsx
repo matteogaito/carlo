@@ -17,6 +17,7 @@ import {
 import { ActionsView } from './ActionsView'
 import { DiscoveriesView } from './DiscoveriesView'
 import { SettingsView } from './SettingsView'
+import { ProjectView } from './ProjectView'
 import './styles.css'
 
 const columns: { status: TaskStatus; label: string; code: string }[] = [
@@ -66,7 +67,7 @@ export function App({ api = httpApi }: { api?: Api }) {
   const [selected, setSelected] = useState<Task | null>(null)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
-  const [view, setView] = useState<'board' | 'discoveries' | 'actions' | 'settings'>('board')
+  const [view, setView] = useState<'board' | 'project' | 'discoveries' | 'actions' | 'settings'>('board')
   const [openDiscoveryId, setOpenDiscoveryId] = useState<number | null>(null)
   const [boardLevel, setBoardLevel] = useState<'execution' | 'goals'>('execution')
   const [lastEvent, setLastEvent] = useState<Event | null>(null)
@@ -206,6 +207,12 @@ export function App({ api = httpApi }: { api?: Api }) {
     }
   }
 
+  useEffect(() => {
+    if (!user) return
+    const taskId = new URLSearchParams(window.location.search).get('task')
+    if (taskId) void openTask(taskId)
+  }, [user])
+
   async function openReworkChat(taskId: string) {
     try {
       const discovery = await api.reworkChat(taskId)
@@ -262,6 +269,7 @@ export function App({ api = httpApi }: { api?: Api }) {
 
       <nav className="view-tabs" aria-label="Main views">
         <button className={view === 'board' ? 'active' : ''} onClick={() => { setView('board'); setSelected(null) }}>Board</button>
+        <button className={view === 'project' ? 'active' : ''} onClick={() => { setView('project'); setSelected(null) }}>Project</button>
         <button className={view === 'discoveries' ? 'active' : ''} onClick={() => { setView('discoveries'); setSelected(null) }}>Discoveries</button>
         <button className={view === 'actions' ? 'active' : ''} onClick={() => { setView('actions'); setSelected(null) }}>Actions</button>
         <button className={view === 'settings' ? 'active' : ''} onClick={() => { setView('settings'); setSelected(null) }}>Settings</button>
@@ -335,6 +343,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             close={() => setSelected(null)}
             startPlanning={() => void act(() => api.startPlanning(selected.id))}
             replan={() => void act(() => api.replanTask(selected.id))}
+            replanTechnical={() => void act(() => api.replanTechnicalTask(selected.id))}
             rework={() => void act(() => api.reworkTask(selected.id))}
             reworkChat={() => void openReworkChat(selected.id)}
             retry={() => void act(() => api.retrySubtask(selected.id))}
@@ -353,7 +362,7 @@ export function App({ api = httpApi }: { api?: Api }) {
             resize={setDetailWidth}
           />
         )}
-      </main> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} openDiscoveryId={openDiscoveryId} onOpenedDiscovery={() => setOpenDiscoveryId(null)} /> : view === 'actions' ? <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} /> : <SettingsView api={api} event={lastEvent} setError={setError} />}
+      </main> : view === 'project' ? <ProjectView api={api} projects={projects} /> : view === 'discoveries' ? <DiscoveriesView api={api} projects={projects} event={lastEvent} setError={setError} openDiscoveryId={openDiscoveryId} onOpenedDiscovery={() => setOpenDiscoveryId(null)} /> : view === 'actions' ? <ActionsView api={api} projects={projects} event={lastEvent} setError={setError} /> : <SettingsView api={api} event={lastEvent} setError={setError} />}
       </ErrorBoundary>
     </div>
   )
@@ -514,11 +523,12 @@ function CreateStrip({ api, projects, refresh, setError, onTaskCreated }: {
   )
 }
 
-function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, retry, stop, hold, resume, deleteTask, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
+function TaskDetail({ task, close, startPlanning, replan, replanTechnical, rework, reworkChat, retry, stop, hold, resume, deleteTask, onOpenParent, approve, answerPlanning, models, setModel, width, resize }: {
   task: Task
   close: () => void
   startPlanning: () => void
   replan: () => void
+  replanTechnical: () => void
   rework: () => void
   reworkChat: () => void
   retry: () => void
@@ -544,6 +554,20 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
   const [resizing, setResizing] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   useEffect(() => setConfirmDelete(false), [task.id])
+  const [clock, setClock] = useState(Date.now())
+  const technicalStart = (task.events || []).find((event) => event.type === 'planning.technical.started')
+  const technicalFinished = (task.events || []).some((event) =>
+    technicalStart && event.sequence > technicalStart.sequence
+    && ['planning.technical.completed', 'planning.technical.failed', 'planning.technical.question'].includes(event.type))
+  const technicalActive = Boolean(task.parent_task_id && task.status === 'IN_PROGRESS' && technicalStart && !technicalFinished)
+  useEffect(() => {
+    if (!technicalActive) return
+    const interval = window.setInterval(() => setClock(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [technicalActive, task.id, technicalStart?.sequence])
+  const technicalActivity = (task.events || []).filter((event) =>
+    technicalStart && event.sequence > technicalStart.sequence && event.type.startsWith('planning.technical.'))
+  const lastPiActivity = technicalActivity[0]
   const planningActivity = (task.events || [])
     .filter((event) => event.type.startsWith('planning.'))
     .slice(0, 8)
@@ -592,12 +616,14 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
           {task.stage === 'created' && <button onClick={startPlanning}>Build Brief & Plan</button>}
           {task.stage === 'awaiting_approval' && task.plan && <button onClick={approve}>{task.plan.metadata.replan ? 'Approve replan → Replace subtasks' : 'Approve Plan → Ready'}</button>}
           {task.replan_allowed && <button onClick={replan}>Replan subtasks</button>}
+          {task.technical_replan_allowed &&
+            <button onClick={replanTechnical} title="Stop this attempt, archive unverified changes, and replan from the last checkpoint">Replan technical plan</button>}
           {task.status === 'IN_PROGRESS' && task.stage === 'blocked' && Boolean(task.plan?.metadata.amendment) && <button onClick={approve}>Approve amendment</button>}
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && <button className="danger" onClick={stop}>Stop → Ready</button>}
           {task.status === 'IN_PROGRESS' && task.stage !== 'blocked' && !task.parent_task_id && <button onClick={hold}>Put in Not Ready</button>}
           {task.status === 'FAILED' && !task.parent_task_id && <button onClick={hold}>Put in Not Ready</button>}
-          {task.status === 'READY' && Boolean(task.subtask_count) && <button onClick={resume}>Resume execution</button>}
-          {task.status === 'FAILED' && task.parent_task_id && task.approved_plan_revision
+          {task.status === 'READY' && (Boolean(task.subtask_count) || Boolean(task.parent_task_id && task.approved_plan_revision)) && <button onClick={resume}>Resume execution</button>}
+          {(task.status === 'FAILED' || (task.status === 'IN_PROGRESS' && task.stage === 'blocked')) && task.parent_task_id && task.approved_plan_revision
             ? <button onClick={retry}>Retry subtask</button>
             : task.status === 'FAILED' && <button onClick={rework}>Rework from original request</button>}
           {(task.status === 'FAILED' || (task.status === 'IN_PROGRESS' && task.stage === 'blocked')) && <button onClick={reworkChat}>Discuti e correggi</button>}
@@ -614,6 +640,16 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
         <h3>Pi is planning</h3>
         <div className="thinking"><i aria-hidden="true" />Repository-aware planning is active</div>
         {planningActivity.map((event) => <p className="timeline-row" key={event.sequence}>
+          <time>{new Date(event.created_at).toLocaleTimeString()}</time>
+          {planningEventLabel(event)}
+        </p>)}
+      </section>}
+      {technicalActive && technicalStart && <section className="planning-live" aria-live="polite">
+        <h3>Pi is preparing technical plan</h3>
+        <div className="thinking"><i aria-hidden="true" />{formatElapsed(clock - Date.parse(technicalStart.created_at))} elapsed · {lastPiActivity
+          ? `Last Pi activity ${formatElapsed(clock - Date.parse(lastPiActivity.created_at))} ago`
+          : 'No Pi activity reported yet'}</div>
+        {technicalActivity.slice(0, 8).reverse().map((event) => <p className="timeline-row" key={event.sequence}>
           <time>{new Date(event.created_at).toLocaleTimeString()}</time>
           {planningEventLabel(event)}
         </p>)}
@@ -654,7 +690,7 @@ function TaskDetail({ task, close, startPlanning, replan, rework, reworkChat, re
         )) : <p>No checks declared yet.</p>}
       </section>
       {!!task.attempts?.length && <section><h3>Attempts</h3>{task.attempts.map((attempt) => (
-        <p className="timeline-row" key={attempt.number}><b>#{attempt.number}</b> {attempt.outcome || 'running'}</p>
+        <p className="timeline-row attempt-row" key={attempt.number}><time dateTime={attempt.created_at}>{new Date(attempt.created_at).toLocaleString()}</time> · <b>#{attempt.number}</b> {attempt.outcome || 'running'}</p>
       ))}</section>}
       {!!task.escalations?.length && <section><h3>Escalations</h3>{task.escalations.map((item) => (
         <article className="evidence-row" key={item.created_at}><b>{item.reason}</b><p>{item.diagnosis || item.status}</p></article>
@@ -690,7 +726,8 @@ function TaskGoal({ task }: { task: Task }) {
 
 function StructuredPlan({ plan }: { plan: Plan }) {
   const metadata = plan.metadata
-  const tasks = metadata.implementation_tasks || []
+  const slices = metadata.technical_packages || []
+  const tasks = slices.length ? slices : metadata.implementation_tasks || []
   const planner = metadata.planner_profile
   return <>
     <section className="plan-summary">
@@ -720,9 +757,9 @@ function StructuredPlan({ plan }: { plan: Plan }) {
       </details>}
     </section>
     <section className="plan-task-list">
-      <h3>{tasks.some((item) => 'files' in item) ? 'Implementation tasks' : 'Feature tasks'}</h3>
+      <h3>{slices.length ? 'Technical slices' : tasks.some((item) => 'files' in item) ? 'Implementation tasks' : 'Feature tasks'}</h3>
       {tasks.map((item, index) => <details className="plan-task" key={item.id || `${index}-${item.title}`}>
-        <summary><span>{index + 1}</span><strong>{item.title}</strong></summary>
+        <summary><span>{index + 1}</span><strong>{item.title}</strong>{slices.length > 0 && index === metadata.technical_package_index && <small>Current</small>}</summary>
         <div className="plan-task-body">
           <h4>Objective</h4>
           <TaskMarkdown>{item.objective}</TaskMarkdown>
@@ -766,11 +803,19 @@ function TaskMarkdown({ children }: { children: string }) {
 }
 
 function planningEventLabel(event: Event): string {
+  const type = event.type.replace('planning.technical.', 'planning.')
   const tool = String(event.payload.tool || 'Tool')
   const detail = String(event.payload.detail || '')
-  if (event.type === 'planning.exploring') return 'Exploring repository'
-  if (event.type === 'planning.tool.started') return `${tool}${detail ? ` · ${detail}` : ''}`
-  if (event.type === 'planning.tool.completed') return `${tool} ${event.payload.failed ? 'failed' : 'completed'}`
-  if (event.type === 'planning.drafting') return 'Drafting Brief and Plan'
+  if (type === 'planning.exploring') return 'Exploring repository'
+  if (type === 'planning.tool.started') return `${tool}${detail ? ` · ${detail}` : ''}`
+  if (type === 'planning.tool.completed') return `${tool} ${event.payload.failed ? 'failed' : 'completed'}`
+  if (type === 'planning.drafting') return 'Drafting Brief and Plan'
+  if (type === 'planning.responding') return 'Model responding'
+  if (type === 'planning.package_retry') return 'Revising technical plan'
   return event.type.replaceAll('.', ' ')
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }

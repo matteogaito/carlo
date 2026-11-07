@@ -67,6 +67,8 @@ export interface Plan {
     description?: string
     key_points?: string[]
     implementation_tasks?: (ImplementationTask | FeatureTask)[]
+    technical_packages?: ImplementationTask[]
+    technical_package_index?: number
     planner_profile?: PlannerProfile
     amendment?: { summary: string; reason: string }
     validation_commands?: string[]
@@ -100,6 +102,7 @@ export interface Task {
   subtask_count?: number
   superseded_at?: string | null
   replan_allowed?: boolean
+  technical_replan_allowed?: boolean
   delete_allowed?: boolean
   available_model_id?: number | null
   used_skills?: string[]
@@ -154,7 +157,7 @@ export interface FixProposal {
   brief_markdown: string
   plan_markdown: string
   package: ImplementationTask | null
-  packages: ImplementationTask[]
+  packages: FeatureTask[]
   validation_error?: string
 }
 
@@ -334,6 +337,15 @@ export interface AgentProfileSettings {
   default_packages: string[]
   required_skills: string[]
   context_policy: Record<string, unknown>
+  context_limits?: {
+    model_context_window: number
+    context_window: number
+    output_tokens: number
+    reserve_tokens: number
+    keep_recent_tokens: number
+    usable_input_tokens: number
+    context_pack_budget_tokens: number | null
+  } | null
   active: boolean
   available_model_id: number | null
 }
@@ -364,6 +376,8 @@ export interface Api {
   login(username: string, password: string): Promise<User>
   logout(): Promise<void>
   listProjects(): Promise<Project[]>
+  listProjectFiles(projectId: number): Promise<string[]>
+  getProjectFile(projectId: number, path: string): Promise<{ path: string; content: string }>
   listTasks(): Promise<Task[]>
   listDiscoveries(projectId?: number): Promise<Discovery[]>
   getDiscovery(id: number): Promise<Discovery>
@@ -382,6 +396,7 @@ export interface Api {
   createTask(input: Pick<Task, 'project_id' | 'title' | 'goal'> & { prompt_filename?: string }): Promise<Task>
   startPlanning(id: string): Promise<Task>
   replanTask(id: string): Promise<Task>
+  replanTechnicalTask(id: string): Promise<Task>
   reworkTask(id: string): Promise<Task>
   retrySubtask(id: string): Promise<Task>
   stopTask(id: string): Promise<Task>
@@ -449,6 +464,8 @@ export const httpApi: Api = {
   }, false),
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   listProjects: () => request('/api/projects'),
+  listProjectFiles: (id) => request(`/api/projects/${id}/files`),
+  getProjectFile: (id, path) => request(`/api/projects/${id}/file?path=${encodeURIComponent(path)}`),
   listTasks: () => request('/api/tasks'),
   listDiscoveries: (projectId) => request(`/api/discoveries${projectId ? `?project_id=${projectId}` : ''}`),
   getDiscovery: (id) => request(`/api/discoveries/${id}`),
@@ -489,6 +506,7 @@ export const httpApi: Api = {
   createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
   startPlanning: (id) => request(`/api/tasks/${id}/plan`, { method: 'POST' }),
   replanTask: (id) => request(`/api/tasks/${id}/replan`, { method: 'POST' }),
+  replanTechnicalTask: (id) => request(`/api/tasks/${id}/replan-technical`, { method: 'POST' }),
   reworkTask: (id) => request(`/api/tasks/${id}/rework`, { method: 'POST' }),
   retrySubtask: (id) => request(`/api/tasks/${id}/retry`, { method: 'POST' }),
   stopTask: (id) => request(`/api/tasks/${id}/stop`, { method: 'POST' }),

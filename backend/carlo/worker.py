@@ -2,10 +2,14 @@ import asyncio
 import logging
 from contextlib import suppress
 from pathlib import Path
+from typing import Awaitable, Callable
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .action_runner import ActionExecutor, ActionOrchestrator
 from .config import Settings
 from .db import make_engine, make_session_factory
+from .domain import TaskStatus
 from .discovery_runtime import DiscoveryRuntime
 from .maintenance import (
     ensure_managed_pi_packages,
@@ -17,7 +21,8 @@ from .model_providers import CredentialCipher
 from .logging_config import configure_logging
 from .pi_runtime import PiRuntimeSnapshotBuilder
 from .pi_packages import PiPackageManager
-from .orchestrator import ImplementationPipeline, Orchestrator
+from .models import Task
+from .orchestrator import ImplementationPipeline, Orchestrator, TaskStopRequested
 from .provider import PiProvider
 from .ssh import SshTransport
 from .telegram import (
@@ -30,6 +35,53 @@ from .telegram import (
 )
 
 logger = logging.getLogger("carlo.worker")
+
+
+async def _run_implementation_with_stop(
+    factory: async_sessionmaker[AsyncSession],
+    provider: PiProvider,
+    runner: Callable[[str], Awaitable[str]],
+    task_id: str,
+    *,
+    poll_seconds: float = 0.5,
+) -> str:
+    stopped = asyncio.Event()
+    running = asyncio.create_task(runner(task_id))
+
+    async def watch_stop() -> None:
+        while not running.done():
+            await asyncio.sleep(poll_seconds)
+            try:
+                async with factory() as session:
+                    task = await session.get(Task, task_id)
+                    if task is not None and task.status == TaskStatus.IN_PROGRESS:
+                        continue
+                    task_ids = (task_id, task.parent_task_id) if task and task.parent_task_id else (task_id,)
+                stopped.set()
+                try:
+                    await provider.stop_tasks(task_ids)
+                except Exception:
+                    logger.exception("could not stop Pi sessions for %s", task_id)
+            except Exception:
+                logger.exception("could not check stop state for %s", task_id)
+
+    watcher = asyncio.create_task(watch_stop())
+    try:
+        try:
+            result = await running
+        except BaseException:
+            if not stopped.is_set():
+                raise
+            result = None
+        if stopped.is_set():
+            await watcher
+            raise TaskStopRequested()
+        return result
+    finally:
+        if not stopped.is_set() and not watcher.done():
+            watcher.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher
 
 
 async def run() -> None:
@@ -61,6 +113,7 @@ async def run() -> None:
         managed_skills={"frontend-design": "skills/frontend-design"},
         resource_manifest=resource_root / "revisions.json",
         debug=settings.log_level == "DEBUG",
+        idle_timeout_seconds=settings.pi_idle_timeout_seconds,
     )
     pipeline = ImplementationPipeline(
         factory,
@@ -68,11 +121,13 @@ async def run() -> None:
         Path(settings.artifact_root),
         settings.max_attempts,
         cipher,
-        settings.context_pack_budget_tokens,
         settings.pi_request_diagnostics,
         settings.max_escalations,
     )
-    orchestrator = Orchestrator(engine, factory, pipeline.run)
+    orchestrator = Orchestrator(
+        engine, factory,
+        lambda task_id: _run_implementation_with_stop(factory, provider, pipeline.run, task_id),
+    )
     action_executor = ActionExecutor(
         factory,
         Path(settings.artifact_root),
@@ -102,6 +157,7 @@ async def run() -> None:
             settings.telegram_bot_token,
             settings.telegram_chat_id,
             settings.telegram_level,
+            app_origin=settings.app_origin,
         )
         await notifier.initialize_cursor()
         command_task = asyncio.create_task(

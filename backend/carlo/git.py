@@ -150,12 +150,54 @@ class GitWorkspace:
         diff = await self._git("diff", "--cached", "--binary", cwd=checkout.path)
         return hashlib.sha256(diff.encode()).hexdigest()
 
+    async def changed_paths(self, checkout: Checkout) -> set[str]:
+        await self._validate(checkout)
+        await self._git("add", "-A", cwd=checkout.path)
+        output = await self._git(
+            "diff", "--cached", "--name-only", "-z", cwd=checkout.path
+        )
+        return {path for path in output.split("\0") if path}
+
     async def restore(self, checkout: Checkout, checkpoint: str) -> None:
         await self._validate(checkout)
         if not re.fullmatch(r"[0-9a-fA-F]{7,64}", checkpoint):
             raise GitError("invalid checkpoint SHA")
         await self._git("cat-file", "-e", f"{checkpoint}^{{commit}}", cwd=checkout.path)
         await self._git("reset", "--hard", checkpoint, cwd=checkout.path)
+
+    async def archive_and_restore(
+        self, checkout: Checkout, checkpoint: str | None, archive: Path,
+    ) -> tuple[str, str | None]:
+        """Keep unverified edits as a patch, then return to a clean checkpoint."""
+        await self._validate(checkout)
+        head = await self._git("rev-parse", "HEAD", cwd=checkout.path)
+        target = checkpoint or head
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", target):
+            raise GitError("invalid checkpoint SHA")
+        if await self._git_status("merge-base", "--is-ancestor", target, head, cwd=checkout.path):
+            raise GitError("validated checkpoint is not an ancestor of the checkout")
+        untracked = (await self._git("ls-files", "--others", "--exclude-standard", "-z", cwd=checkout.path)).split("\0")
+        await self._git("add", "-A", cwd=checkout.path)
+        diff = await self._git("diff", "--cached", "--binary", target, cwd=checkout.path)
+        if diff:
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            patch = diff + "\n"
+            if archive.exists() and archive.read_text() != patch:
+                raise GitError("technical replan archive already contains different changes")
+            archive.write_text(patch)
+        await self.restore(checkout, target)
+        remaining_untracked = set((await self._git(
+            "ls-files", "--others", "--exclude-standard", "-z", cwd=checkout.path
+        )).split("\0"))
+        for name in filter(None, remaining_untracked.intersection(untracked)):
+            path = checkout.path / name
+            if not path.parent.resolve().is_relative_to(checkout.path.resolve()):
+                raise GitError("untracked path escaped the checkout")
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+        if await self._git("status", "--porcelain", cwd=checkout.path):
+            raise GitError("checkout is not clean after technical replan restore")
+        return head, str(archive) if archive.exists() else None
 
     async def _validate(self, checkout: Checkout) -> None:
         if checkout.path.resolve() != self.repository or not (

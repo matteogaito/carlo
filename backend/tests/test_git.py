@@ -68,6 +68,33 @@ async def test_checkout_checkpoint_restores_known_good_content(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_technical_replan_archives_dirty_work_and_restores_verified_slice(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    checkout = await workspace.prepare("CAR-1", "Login Flow")
+    (repository / "app.txt").write_text("verified\n")
+    verified = await workspace.checkpoint(checkout, "slice verified")
+    (repository / "committed.txt").write_text("unverified commit\n")
+    await workspace.checkpoint(checkout, "unverified recovery")
+    (repository / "app.txt").write_text("unverified\n")
+    (repository / "scratch.sh").write_text("echo draft\n")
+    archive = tmp_path / "artifacts" / "replan.patch"
+
+    previous_head, patch = await workspace.archive_and_restore(checkout, verified, archive)
+
+    assert previous_head != verified
+    assert patch == str(archive)
+    assert "unverified" in archive.read_text()
+    assert "committed.txt" in archive.read_text()
+    assert not (repository / "committed.txt").exists()
+    assert "scratch.sh" in archive.read_text()
+    assert git(repository, "apply", "--check", str(archive)) == ""
+    assert git(repository, "status", "--porcelain") == ""
+    assert (repository / "app.txt").read_text() == "verified\n"
+    assert not (repository / "scratch.sh").exists()
+
+
+@pytest.mark.asyncio
 async def test_prepare_rejects_dirty_checkout_without_switching(tmp_path: Path) -> None:
     repository = repository_at(tmp_path / "repo")
     (repository / "user-note.txt").write_text("mine\n")
@@ -155,6 +182,17 @@ async def test_promote_is_idempotent(tmp_path: Path) -> None:
 
     assert await workspace.promote(checkpoint) == checkpoint
     assert await workspace.promote(checkpoint) == checkpoint
+
+
+@pytest.mark.asyncio
+async def test_changed_paths_reports_staged_and_untracked_files(tmp_path: Path) -> None:
+    repository = repository_at(tmp_path / "repo")
+    workspace = GitWorkspace(repository, "carlo-Dev")
+    checkout = await workspace.prepare("CAR-1", "Feature")
+    (repository / "README.md").write_text("changed\n")
+    (repository / "new.txt").write_text("new\n")
+
+    assert await workspace.changed_paths(checkout) == {"README.md", "new.txt"}
 
 
 @pytest.mark.asyncio

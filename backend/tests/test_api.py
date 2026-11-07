@@ -1,12 +1,14 @@
 import asyncio
 import json
 import subprocess
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from carlo.admin import bootstrap_admin
@@ -16,7 +18,32 @@ from carlo.models import AgentProfile as AgentProfileRecord
 from carlo.domain import TaskStage, TaskStatus
 from carlo.models import Attempt, Base, Event, PlanRevision, Project, Task, ValidationRun
 from carlo.provider import AgentProfile, AgentResult, ProviderError
+from carlo.orchestrator import ImplementationPipeline, TaskStopRequested
+from carlo.worker import _run_implementation_with_stop
 from tests.fakes import FakeProvider, add_managed_profiles
+
+
+@pytest.mark.asyncio
+async def test_health_checks_database_without_authentication() -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    app = create_app(factory, FakeProvider(""), Settings(app_origin="http://test"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+    @asynccontextmanager
+    async def unavailable_database():
+        raise SQLAlchemyError("connection details stay private")
+        yield
+
+    unavailable_app = create_app(unavailable_database, FakeProvider(""), Settings(app_origin="http://test"))
+    async with AsyncClient(transport=ASGITransport(app=unavailable_app), base_url="http://test") as client:
+        response = await client.get("/api/health")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "database unavailable"}
+    await engine.dispose()
 
 
 def planning_output(
@@ -64,6 +91,76 @@ def feature_task(title: str, objective: str, position: int = 0) -> dict[str, obj
         "objective": objective, "interfaces": ["Preserve the existing API contract."],
         "constraints": [], "done_when": ["Relevant tests pass."],
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,pending_revision", [
+    (TaskStage.IMPLEMENTING, False),
+    (TaskStage.PREPARING_GIT, False),
+    (TaskStage.BLOCKED, True),
+])
+async def test_technical_replan_stops_active_child_and_queues_fresh_planning(
+    tmp_path: Path, stage: TaskStage, pending_revision: bool,
+) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(text(
+            "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+            "user_sessions, project_memberships, users, events, validation_runs, "
+            "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+            "RESTART IDENTITY CASCADE"
+        ))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    async with factory() as session:
+        project = Project(name="Test", key="TST", repository_path=str(tmp_path))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build",
+                      status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Implement",
+                     parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS,
+                     stage=stage, approved_plan_revision=2)
+        feature = feature_task("Implement", "Complete feature")
+        package = work_package("Code", "Write feature")
+        session.add_all([project, parent, child,
+            PlanRevision(task=child, revision=1, brief_markdown="Brief", plan_markdown="Feature",
+                         metadata_json={"implementation_tasks": [feature]}, approved_at=datetime.now(UTC)),
+            PlanRevision(task=child, revision=2, brief_markdown="Brief", plan_markdown="Technical",
+                         metadata_json={"implementation_tasks": [package], "technical_packages": [package], "technical_package_index": 0},
+                         approved_at=datetime.now(UTC)),
+        ])
+        await session.commit()
+        if pending_revision:
+            session.add(PlanRevision(task=child, revision=3, brief_markdown="Brief", plan_markdown="Pending correction",
+                         metadata_json={"implementation_tasks": [package], "technical_packages": [package], "technical_package_index": 0}))
+        session.add(Attempt(task_id=child.id, number=1, instruction="Implement", outcome=None))
+        await session.commit()
+    app = create_app(factory, FakeProvider(""), Settings(app_origin="http://test"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        client.headers["Origin"] = "http://test"
+        before = await client.get("/api/tasks/TST-2")
+        assert before.status_code == 200
+        assert before.json()["technical_replan_allowed"] is True
+        if pending_revision:
+            assert before.json()["plan"]["revision"] == 3
+        assert (await client.post("/api/tasks/TST-1/replan-technical")).status_code == 409
+        response = await client.post("/api/tasks/TST-2/replan-technical")
+        assert response.status_code == 200
+        assert (response.json()["status"], response.json()["stage"], response.json()["approved_plan_revision"]) == (
+            "READY", "queued", 1,
+        )
+        assert response.json()["technical_replan_allowed"] is False
+        assert (await client.post("/api/tasks/TST-2/replan-technical")).status_code == 409
+    async with factory() as session:
+        child = await session.get(Task, "TST-2")
+        attempt = await session.scalar(select(Attempt).where(Attempt.task_id == "TST-2"))
+        event = await session.scalar(select(Event).where(Event.task_id == "TST-2", Event.type == "task.technical_replan.requested"))
+        assert child is not None and child.status == TaskStatus.READY
+        assert attempt is not None and attempt.outcome == "interrupted"
+        assert event is not None and event.payload["previous_revision"] == 2
+        assert event.payload["superseded_revisions"] == ([3] if pending_revision else [])
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -115,7 +212,7 @@ async def test_legacy_child_can_regenerate_without_touching_done_sibling(tmp_pat
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
     async with factory() as session:
-        await add_managed_profiles(session, "plan")
+        await add_managed_profiles(session, "plan", "technical-plan")
         project = Project(name="Test", key="TST", repository_path=str(tmp_path))
         parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build", status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
         done = Task(id="TST-2", project=project, sequence=2, title="Done", goal="Done", parent=parent, subtask_position=0, status=TaskStatus.DONE, stage=TaskStage.COMPLETE)
@@ -623,7 +720,7 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await bootstrap_admin(factory, "admin", "admin-password")
     async with factory() as session:
-        profile = (await add_managed_profiles(session, "plan"))["plan"]
+        profile = (await add_managed_profiles(session, "plan", "technical-plan"))["plan"]
         profile.effort = "high"
         profile.permissions = {"tools": ["read", "grep", "find", "ls", "bash"]}
         profile.default_skills = ["carlo-planning", "carlo-ui-design"]
@@ -748,11 +845,24 @@ async def test_task_stays_not_ready_until_plan_is_approved(tmp_path: Path) -> No
 
         profiles = (await client.get("/api/agent-profiles")).json()
         assert any(profile["name"] == "plan" for profile in profiles)
+        assert any(profile["name"] == "technical-plan" for profile in profiles)
+        technical = await client.patch(
+            "/api/agent-profiles/technical-plan",
+            json={"effort": "low"},
+        )
+        assert technical.status_code == 200
+        assert technical.json()["effort"] == "low"
         updated = await client.patch(
             "/api/agent-profiles/plan",
             json={"effort": "high"},
         )
         assert updated.status_code == 200
+        assert updated.json()["effort"] == "high"
+        invalid_effort = await client.patch(
+            "/api/agent-profiles/plan",
+            json={"effort": "unlimited"},
+        )
+        assert invalid_effort.status_code == 422
         assert "model" not in updated.json()
         invalid_policy = await client.patch(
             "/api/agent-profiles/plan",
@@ -887,6 +997,105 @@ async def test_failed_task_rework_replans_original_goal_and_preserves_history(
 
 
 @pytest.mark.asyncio
+async def test_stop_and_resume_pause_parent_and_child_together(tmp_path: Path) -> None:
+    engine = create_async_engine("postgresql+psycopg:///carlo_test")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(text(
+            "TRUNCATE notification_deliveries, notification_cursors, login_failures, "
+            "user_sessions, project_memberships, users, events, validation_runs, "
+            "escalations, attempts, plan_revisions, tasks, projects, agent_profiles "
+            "RESTART IDENTITY CASCADE"
+        ))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await bootstrap_admin(factory, "admin", "admin-password")
+    async with factory() as session:
+        project = Project(name="Test", key="TST", repository_path=str(tmp_path))
+        parent = Task(id="TST-1", project=project, sequence=1, title="Parent", goal="Build",
+                      status=TaskStatus.IN_PROGRESS, stage=TaskStage.IMPLEMENTING)
+        child = Task(id="TST-2", project=project, sequence=2, title="Child", goal="Build",
+                     parent=parent, subtask_position=0, status=TaskStatus.IN_PROGRESS,
+                     stage=TaskStage.IMPLEMENTING, approved_plan_revision=1)
+        session.add_all([project, parent, child, PlanRevision(
+            task=child, revision=1, brief_markdown="Brief", plan_markdown="Plan", metadata_json={}
+        )])
+        await session.flush()
+        session.add(Attempt(task_id=child.id, number=1, instruction="Running"))
+        await session.commit()
+    app = create_app(factory, FakeProvider(""), Settings(app_origin="http://test"))
+    class RunningPi:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.killed = asyncio.Event()
+            self.stopped_ids: tuple[str, ...] = ()
+
+        async def stop_tasks(self, task_ids: tuple[str, ...]) -> None:
+            self.stopped_ids = task_ids
+            self.killed.set()
+
+    running_pi = RunningPi()
+
+    async def silent_runner(task_id: str) -> str:
+        running_pi.started.set()
+        await running_pi.killed.wait()
+        raise ProviderError("Pi terminated")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        client.headers["Origin"] = "http://test"
+        running = asyncio.create_task(_run_implementation_with_stop(
+            factory, running_pi, silent_runner, "TST-2", poll_seconds=0.01
+        ))
+        await running_pi.started.wait()
+        stopped = await client.post("/api/tasks/TST-2/stop")
+        assert stopped.status_code == 200
+        with pytest.raises(TaskStopRequested):
+            await asyncio.wait_for(running, 1)
+        assert set(running_pi.stopped_ids) == {"TST-1", "TST-2"}
+        async with factory() as session:
+            parent = await session.get(Task, "TST-1")
+            child = await session.get(Task, "TST-2")
+            attempt = await session.scalar(select(Attempt).where(Attempt.task_id == child.id))
+            assert (parent.status, parent.stage) == (TaskStatus.READY, TaskStage.QUEUED)
+            assert (child.status, child.stage) == (TaskStatus.READY, TaskStage.QUEUED)
+            assert attempt.outcome == "interrupted"
+            attempt_id = attempt.id
+        with pytest.raises(TaskStopRequested):
+            await ImplementationPipeline(factory, FakeProvider(""), tmp_path)._mark_attempt_outcome(
+                "TST-2", attempt_id, "failed", "Pi terminated after stop"
+            )
+        async with factory() as session:
+            assert (await session.get(Attempt, attempt_id)).outcome == "interrupted"
+        resumed = await client.post("/api/tasks/TST-2/resume")
+        assert (resumed.status_code, resumed.json()["stage"]) == (200, "queued")
+        async with factory() as session:
+            parent = await session.get(Task, "TST-1")
+            child = await session.get(Task, "TST-2")
+            assert (parent.status, parent.stage) == (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING)
+            child.status, child.stage = TaskStatus.READY, TaskStage.IMPLEMENTING
+            session.add(Attempt(task_id=child.id, number=2, instruction="Stale attempt"))
+            await session.commit()
+        recovered = await client.post("/api/tasks/TST-2/resume")
+        assert (recovered.status_code, recovered.json()["stage"]) == (200, "queued")
+        async with factory() as session:
+            child = await session.get(Task, "TST-2")
+            stale = await session.scalar(select(Attempt).where(
+                Attempt.task_id == child.id, Attempt.number == 2
+            ))
+            assert stale.outcome == "interrupted"
+            child.status, child.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
+            await session.commit()
+        stopped_parent = await client.post("/api/tasks/TST-1/stop")
+        assert stopped_parent.status_code == 200
+        async with factory() as session:
+            parent = await session.get(Task, "TST-1")
+            child = await session.get(Task, "TST-2")
+            assert (parent.status, parent.stage) == (TaskStatus.READY, TaskStage.QUEUED)
+            assert (child.status, child.stage) == (TaskStatus.READY, TaskStage.QUEUED)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_failed_subtask_retry_resets_legacy_checkout_without_planning(
     tmp_path: Path,
 ) -> None:
@@ -974,6 +1183,30 @@ async def test_failed_subtask_retry_resets_legacy_checkout_without_planning(
             failed_again.checkpoint_sha = None
             await session.commit()
         second_retry = await client.post("/api/tasks/CAR-2/retry")
+        async with factory() as session:
+            blocked = await session.get(Task, "CAR-2")
+            assert blocked is not None
+            blocked.status = TaskStatus.IN_PROGRESS
+            blocked.stage = TaskStage.BLOCKED
+            blocked.branch_name = "CAR-1_parent"
+            blocked.worktree_path = str(tmp_path / "repo")
+            await session.commit()
+        blocked_retry = await client.post("/api/tasks/CAR-2/retry")
+        async with factory() as session:
+            blocked = await session.get(Task, "CAR-2")
+            assert blocked is not None
+            blocked.status = TaskStatus.FAILED
+            blocked.stage = TaskStage.BLOCKED
+            session.add(PlanRevision(
+                task=blocked,
+                revision=2,
+                brief_markdown="Brief",
+                plan_markdown="Needs approval",
+                metadata_json={},
+                approved_at=None,
+            ))
+            await session.commit()
+        pending_retry = await client.post("/api/tasks/CAR-2/retry")
 
     assert response.status_code == 200
     retried = response.json()
@@ -984,6 +1217,11 @@ async def test_failed_subtask_retry_resets_legacy_checkout_without_planning(
     assert retried["worktree_path"] is None
     assert retried["checkpoint_sha"] is None
     assert second_retry.status_code == 200
+    assert blocked_retry.status_code == 200
+    assert blocked_retry.json()["branch_name"] == "CAR-1_parent"
+    assert blocked_retry.json()["worktree_path"] == str(tmp_path / "repo")
+    assert pending_retry.status_code == 409
+    assert pending_retry.json()["detail"] == "plan revision 2 requires approval before retry"
     assert provider.calls == []
     async with factory() as session:
         parent = await session.get(Task, "CAR-1")

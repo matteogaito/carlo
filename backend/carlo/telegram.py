@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -138,7 +139,7 @@ def telegram_enabled(token: str, chat_id: str) -> bool:
     )
 
 
-def format_event(event: Event) -> tuple[str, str]:
+def format_event(event: Event, app_origin: str = "") -> tuple[str, str]:
     severity = (
         "blocking"
         if event.type in BLOCKING_EVENTS
@@ -154,6 +155,9 @@ def format_event(event: Event) -> tuple[str, str]:
         value = event.payload[key]
         rendered = str(value).replace("\n", " ")[:240]
         lines.append(f"{key}: {rendered}")
+    if event.task_id and app_origin:
+        task_id = urllib.parse.quote(event.task_id, safe="")
+        lines.append(f"Open task: {app_origin.rstrip('/')}/?task={task_id}")
     return "\n".join(lines)[:3900], severity
 
 
@@ -166,6 +170,7 @@ class TelegramNotifier:
         chat_id: str,
         level: str,
         *,
+        app_origin: str = "",
         max_attempts: int = 5,
         retry_seconds: int = 5,
     ) -> None:
@@ -174,6 +179,7 @@ class TelegramNotifier:
         self.token = token
         self.chat_id = chat_id
         self.level = level
+        self.app_origin = app_origin
         self.max_attempts = max_attempts
         self.retry_seconds = retry_seconds
         self.destination = f"telegram:{chat_id}"
@@ -235,7 +241,7 @@ class TelegramNotifier:
                 await session.commit()
                 return True
 
-            message, severity = format_event(event)
+            message, severity = format_event(event, self.app_origin)
             if (
                 self.level == "blocking"
                 and severity != "blocking"

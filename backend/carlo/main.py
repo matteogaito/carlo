@@ -39,6 +39,7 @@ app = create_app(
         managed_skills={"frontend-design": "skills/frontend-design"},
         resource_manifest=resource_root / "revisions.json",
         debug=settings.log_level == "DEBUG",
+        idle_timeout_seconds=settings.pi_idle_timeout_seconds,
     ),
     settings,
     resource_bootstrap=bootstrap_resources,

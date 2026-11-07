@@ -56,27 +56,26 @@ def test_missing_output_limit_is_capped_to_the_discovered_context() -> None:
     assert model.effective_max_tokens == 2_048
 
 
-def test_missing_context_limit_expands_for_the_discovered_output() -> None:
+def test_missing_context_limit_requires_an_override() -> None:
     model = models.AvailableModel(
         external_id="large-output-model",
         discovered_max_tokens=32_768,
     )
 
-    assert model.effective_context_window == 131_072
+    assert model.effective_context_window is None
 
 
-def test_implementation_profile_uses_65k_window_and_compacts_near_56k() -> None:
+def test_implementation_profile_uses_model_window_and_proportional_compaction() -> None:
     from carlo.model_providers import resolve_runtime_policy
 
     window, percent, compaction, sampling = resolve_runtime_policy(
         "implementation", {}, 131_072, 8_192, 10, 20
     )
 
-    assert window == 65_536
+    assert window == 131_072
     assert percent == 100
-    assert compaction.reserve_tokens == 9_536
-    assert compaction.keep_recent_tokens == 13_107
-    assert window - compaction.reserve_tokens == 56_000
+    assert compaction.reserve_tokens == 13_107
+    assert compaction.keep_recent_tokens == 26_214
     assert sampling == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
@@ -90,16 +89,16 @@ def test_thinking_template_parameter_is_not_sent_to_responses_api() -> None:
     assert sampling is None
 
 
-def test_implementation_profile_caps_advertised_262k_model_at_65k() -> None:
+def test_implementation_profile_uses_advertised_262k_model_window() -> None:
     from carlo.model_providers import resolve_runtime_policy
 
     window, percent, compaction, _ = resolve_runtime_policy(
         "implementation", {}, 262_144, 8_192, 10, 20
     )
 
-    assert window == 65_536
+    assert window == 262_144
     assert percent == 100
-    assert compaction.keep_recent_tokens == 13_107
+    assert compaction.keep_recent_tokens == 52_428
 
 
 def test_profile_can_override_window_reserve_and_thinking() -> None:
@@ -125,6 +124,8 @@ def test_profile_can_override_window_reserve_and_thinking() -> None:
     {"reserve_tokens": 131_072},
     {"enable_thinking": "false"},
     {"context_window_tokens": 0},
+    {"context_window_tokens": None},
+    {"context_window_tokens": 48_000},
     {"unexpected": 1},
 ])
 def test_profile_runtime_policy_rejects_invalid_values(policy) -> None:
@@ -144,6 +145,7 @@ def test_openai_catalog_parser_reads_all_models_and_common_context_fields() -> N
             "data": [
                 {"id": "qwen", "max_model_len": 65_536},
                 {"id": "router-model", "context_length": 131_072, "max_tokens": 8_192},
+                {"id": "reasoning-model", "reasoning": {"supported_efforts": ["low", "high"]}},
                 {"id": "unknown-limits"},
             ],
         }
@@ -152,12 +154,61 @@ def test_openai_catalog_parser_reads_all_models_and_common_context_fields() -> N
     assert [entry.external_id for entry in entries] == [
         "qwen",
         "router-model",
+        "reasoning-model",
         "unknown-limits",
     ]
     assert entries[0].context_window == 65_536
     assert entries[1].context_window == 131_072
     assert entries[1].max_tokens == 8_192
-    assert entries[2].context_window is None
+    assert entries[2].reasoning is True
+    assert entries[3].context_window is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_effort_enables_openai_responses_reasoning_but_omlx_stays_off(model_factory) -> None:
+    from carlo.model_providers import resolve_agent_profile
+
+    async with model_factory() as session:
+        openai = models.ModelProvider(
+            name="OpenAI", slug="gpt", kind="openai-compatible",
+            base_url="https://api.openai.com/v1",
+        )
+        local = models.ModelProvider(
+            name="OMLX", slug="omlx", kind="openai-compatible",
+            base_url="http://127.0.0.1:11435/v1",
+        )
+        remote_model = models.AvailableModel(
+            model_provider=openai, external_id="gpt-6-sol", status="AVAILABLE",
+            discovered_context_window=65_536, discovered_max_tokens=16_384,
+            reasoning=False, metadata_json={"id": "gpt-6-sol"},
+        )
+        local_model = models.AvailableModel(
+            model_provider=local, external_id="qwen", status="AVAILABLE",
+            discovered_context_window=65_536, discovered_max_tokens=8_192,
+            reasoning=True,
+        )
+        session.add_all([openai, local, remote_model, local_model])
+        await session.flush()
+        remote_profile = models.AgentProfile(
+            name="plan", provider="pi", effort="high", available_model_id=remote_model.id,
+            permissions={}, default_skills=[], default_packages=[], context_policy={},
+        )
+        local_profile = models.AgentProfile(
+            name="implementation", provider="pi", effort="high", available_model_id=local_model.id,
+            permissions={}, default_skills=[], default_packages=[], context_policy={},
+        )
+        session.add_all([remote_profile, local_profile])
+        await session.flush()
+
+        remote = await resolve_agent_profile(session, remote_profile, None)
+        omlx = await resolve_agent_profile(session, local_profile, None)
+
+    assert remote.effort == "high"
+    assert remote.resolved_model.reasoning is True
+    assert remote.resolved_model.api == "openai-responses"
+    assert omlx.effort == "off"
+    assert omlx.resolved_model.reasoning is False
+    assert omlx.resolved_model.sampling_params == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 @pytest.fixture
@@ -182,6 +233,34 @@ async def model_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_planning_target_uses_configured_implementation_capacity(model_factory) -> None:
+    module = importlib.import_module("carlo.model_providers")
+    async with model_factory() as session:
+        provider = models.ModelProvider(
+            name="Local", slug="omlx", kind="openai-compatible", base_url="http://127.0.0.1:11435/v1",
+        )
+        model = models.AvailableModel(
+            model_provider=provider, external_id="qwen3-coder-next", status="AVAILABLE",
+            discovered_context_window=131_072, discovered_max_tokens=8_192,
+        )
+        session.add_all([provider, model])
+        await session.flush()
+        session.add(models.AgentProfile(
+            name="implementation", provider="pi", available_model_id=model.id,
+            permissions={}, default_skills=[], default_packages=[], context_policy={},
+        ))
+        await session.commit()
+
+        target = await module.implementation_planning_target(session)
+
+    assert target == {
+        "model": "qwen3-coder-next",
+        "usable_input_tokens": 117_965,
+        "context_pack_budget_tokens": 91_751,
+    }
 
 
 @pytest.mark.asyncio
@@ -456,8 +535,10 @@ async def test_agent_profile_resolution_uses_concrete_model_and_task_override(
             "carlo-ui-design",
         )
         assert resolved.skills[0] == "carlo-runtime"
-        assert plan_resolved.packages == ("superpowers", "ponytail")
-    assert historical.packages == ("superpowers", "ponytail")
+        assert resolved.packages == ("superpowers", "ponytail")
+        assert plan_resolved.packages == ("ponytail",)
+        assert discovery_resolved.packages == ("ponytail",)
+    assert historical.packages == ("ponytail",)
     assert "ponytail" not in historical.skills
 
 
@@ -512,9 +593,11 @@ async def test_agent_profile_resolution_uses_database_packages(
             discovered_max_tokens=16_384,
         )
         profile = models.AgentProfile(name="implementation", provider="pi")
-        session.add_all([provider, model, profile])
+        plan_profile = models.AgentProfile(name="plan", provider="pi")
+        session.add_all([provider, model, profile, plan_profile])
         await session.flush()
         profile.available_model_id = model.id
+        plan_profile.available_model_id = model.id
         default = models.PiPackage(
             source="npm:pippo",
             identity="npm:pippo",
@@ -533,7 +616,16 @@ async def test_agent_profile_resolution_uses_database_packages(
             active_artifact_path=str(profile_artifact),
             resources={"skills": ["profile-tools"]},
         )
-        session.add_all([default, selected])
+        superpowers = models.PiPackage(
+            source="git:github.com/obra/superpowers",
+            identity="superpowers",
+            enabled=True,
+            is_default=True,
+            active_version="b" * 40,
+            active_artifact_path=str(default_artifact),
+            resources={"skills": ["brainstorming"]},
+        )
+        session.add_all([default, selected, superpowers])
         await session.flush()
         session.add(
             models.AgentProfilePackage(
@@ -543,13 +635,16 @@ async def test_agent_profile_resolution_uses_database_packages(
         await session.flush()
 
         resolved = await module.resolve_agent_profile(session, profile, None)
+        resolved_plan = await module.resolve_agent_profile(session, plan_profile, None)
 
     assert [package.identity for package in resolved.packages] == [
         "git:github.com/owner/profile-tools",
         "npm:pippo",
+        "superpowers",
     ]
     assert resolved.packages[1].version == "1.5.0"
     assert resolved.packages[1].artifact_path == str(default_artifact)
+    assert [package.identity for package in resolved_plan.packages] == ["npm:pippo"]
 
 
 @pytest.mark.asyncio

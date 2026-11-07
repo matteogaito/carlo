@@ -19,6 +19,8 @@ the repository's design, and define executable proof of success.
 3. Follow references until the affected flow and its boundaries are clear. Do
    not scan the entire repository or guess when a targeted read can establish
    the fact.
+   Before changing or removing an interface, search every caller. Include each
+   affected caller in the editable file scope or preserve source compatibility.
 4. Build the Brief from concrete evidence.
 5. Resolve high-impact architecture, interface, data, migration, dependency,
    error-handling, and validation decisions that can be decided now.
@@ -68,6 +70,11 @@ For a parent plan, each `metadata.implementation_tasks` entry contains only:
 - `done_when`: testable acceptance criteria.
 
 Plan the full dependency chain now. Use as many children as the work needs.
+Use the implementation model and context-pack limits supplied by CARLO to size
+each child for a focused coding run. Split independently testable behavior,
+interfaces, or repository areas that cannot be understood and verified together.
+Do not make one broad child merely because the technical planner can split it
+into many internal slices. Do not minimize the number of children as a goal.
 Do not prescribe files, edits, or tool budgets for future children; their
 technical planner will inspect the verified checkout when they become ready.
 Put final integration checks in `validation_commands`.
@@ -96,14 +103,23 @@ acceptance criteria. Add:
   40–50 for costly build systems, migrations, or integration work. A slice
   estimated above 50 must be split now by the technical planner.
 
+When a change affects a meaningful software boundary, follow Kor's semantic
+index convention: inspect the nearest `CODE_INDEX.md` and include its update
+in the same work package's editable or create file scope. Keep the index tied
+to actual source symbols and behavior, not a file inventory.
+
 Tasks remain internal parts of the CARLO Task, not separate Kanban cards.
 Each technical work package must use exact locations discovered in the current
 checkout; never invent paths. Slice boundaries must be independently verifiable
 and ordered so each slice consumes only verified output from earlier slices.
+Reject a slice that cannot compile using only its `edit` and `create` files.
+Put baseline cleanup in its own slice when it is independently verifiable; do
+not create backup source files, debug-only tests, or implementation reports.
 
 For technical planning, read the code required before naming files and ranges.
 Keep each slice's context pack of instructions and selected file content below
-15,000–20,000 estimated tokens. If the approved child cannot fit in one slice,
+the supplied context-pack budget, with headroom for implementation and tool
+results. If the approved child cannot fit in one slice,
 split it in this technical plan; do not return a placeholder package.
 
 Leave freedom only over low-risk details such as variable names and equivalent
@@ -218,8 +234,8 @@ Before returning the result, verify:
 - the plan solves the stated goal and follows existing patterns;
 - expensive decisions and invariants are explicit;
 - the parent-child tree covers all requested work, interfaces, dependencies, and tests that depend on later packages;
-- every implementation task tells the implementation model where to intervene
-  and how to prove it;
+- every parent child has an observable outcome and verification boundary, and
+  every technical slice tells the implementation model where to intervene;
 - validation is specific, executable where possible, and honest about limits;
 - risks, browser needs, operations, migrations, deployment, and docs were considered;
 - the JSON matches the output contract exactly.

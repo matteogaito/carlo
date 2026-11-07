@@ -283,11 +283,19 @@ function AgentProfiles({ profiles, providers, models, packages, skills, defaults
   save: (name: string, input: Partial<AgentProfileSettings>) => Promise<boolean>
 }) {
   const [saved, setSaved] = useState<string | null>(null)
+  const [selectedModels, setSelectedModels] = useState<Record<string, string>>({})
+  const [selectedCaps, setSelectedCaps] = useState<Record<string, string>>({})
   return <section className="settings-section agent-settings">
     <header><div><span>PI PROFILES</span><h2>Coding agents</h2></div></header>
-    <p>Each new session receives an isolated snapshot of the selected model and proportional context policy.</p>
     <div className="profile-list">{profiles.map((profile) => {
       const initial = profile.available_model_id ? String(profile.available_model_id) : ''
+      const savedCap = typeof profile.context_policy.context_window_tokens === 'number' ? profile.context_policy.context_window_tokens : null
+      const modelId = selectedModels[profile.name] ?? initial
+      const selectedModel = models.find((model) => String(model.id) === modelId)
+      const modelWindow = selectedModel?.effective_context_window ?? null
+      const outputTokens = selectedModel?.effective_max_tokens ?? null
+      const capSelection = selectedCaps[profile.name] ?? (savedCap == null ? '' : String(savedCap))
+      const shownWindow = capSelection && modelWindow != null ? Math.min(Number(capSelection), modelWindow) : modelWindow
       const inheritedPackages = packages.filter((item) => item.is_default).map((item) => item.name)
       const inheritedSkills = defaults?.default_skills || []
       return <form key={`${profile.name}|${inheritedPackages.join(',')}|${inheritedSkills.join(',')}`} onChange={() => setSaved(null)} onSubmit={(event) => {
@@ -304,14 +312,23 @@ function AgentProfiles({ profiles, providers, models, packages, skills, defaults
           ...profile.default_skills.filter((name) => inheritedSkills.includes(name)),
           ...data.getAll('skills').map(String),
         ]))
+        const cap = optionalNumber(data.get('context_limit'))
+        const contextPolicy = { ...profile.context_policy }
+        if (cap == null) delete contextPolicy.context_window_tokens
+        else contextPolicy.context_window_tokens = cap
         void save(profile.name, {
           available_model_id: Number(selection),
+          effort: String(data.get('effort')) || null,
           default_packages: selectedPackages,
           default_skills: selectedSkills,
+          ...(cap !== savedCap ? { context_policy: contextPolicy } : {}),
         }).then((ok) => ok && setSaved(profile.name))
       }}>
         <div><span>{profile.provider}</span><h3>{profile.name}</h3><small>{profile.default_skills.join(' · ') || 'No skills'}</small></div>
-        <div className="profile-controls"><label>Model for {profile.name}<select name="model" defaultValue={initial} required>
+        <div className="profile-controls"><label>Model for {profile.name}<select name="model" value={modelId} required onChange={(event) => {
+          setSelectedModels((current) => ({ ...current, [profile.name]: event.target.value }))
+          setSelectedCaps((current) => ({ ...current, [profile.name]: '' }))
+        }}>
           <option value="">Not configured — choose a managed model</option>
           {providers.filter((provider) => provider.active).map((provider) => {
             const available = models.filter((model) => model.model_provider_id === provider.id && model.selectable)
@@ -320,6 +337,18 @@ function AgentProfiles({ profiles, providers, models, packages, skills, defaults
             </optgroup> : null
           })}
         </select></label>
+        <label>Reasoning for {profile.name}<select name="effort" defaultValue={profile.effort || ''}>
+          <option value="">Model default</option>
+          {['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((level) => <option value={level} key={level}>{level}</option>)}
+        </select></label>
+        <details className="profile-context">
+          <summary>Context window · {capSelection ? 'Override' : 'Model default'} ({contextWindowLabel(shownWindow)})</summary>
+          <label>Context window for {profile.name}<select name="context_limit" value={capSelection} onChange={(event) => setSelectedCaps((current) => ({ ...current, [profile.name]: event.target.value }))}>
+            <option value="">Model default ({contextWindowLabel(modelWindow)})</option>
+            {contextWindowOptions(modelWindow, outputTokens).map((cap) => <option value={cap} key={cap}>{contextWindowLabel(cap)}</option>)}
+          </select></label>
+          <small>Applies to new sessions.</small>
+        </details>
         <ResourceChoices legend={`Packages for ${profile.name}`} name="packages" values={packages} selected={profile.default_packages} disabled={inheritedPackages} labelPrefix={`${profile.name} package`} />
         <fieldset><legend>Skills for {profile.name}</legend><div className="profile-skills">{skills.map((skill) => {
           const required = profile.required_skills.includes(skill.name)
@@ -385,4 +414,17 @@ function optionalNumber(value: FormDataEntryValue | null): number | null {
 
 function formatTokens(value: number | null): string {
   return value == null ? 'Unknown' : value.toLocaleString()
+}
+
+function contextWindowLabel(value: number | null): string {
+  return value == null ? 'select a model' : value % 1024 === 0 ? `${value / 1024}k` : formatTokens(value)
+}
+
+function contextWindowOptions(modelWindow: number | null, outputTokens: number | null): number[] {
+  const options: number[] = []
+  if (modelWindow == null || outputTokens == null) return options
+  for (let cap = 16_384; cap <= modelWindow; cap *= 2) {
+    if (cap > outputTokens) options.push(cap)
+  }
+  return options
 }

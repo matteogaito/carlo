@@ -39,7 +39,7 @@ def test_pi_runtime_snapshot_is_isolated_atomic_and_secret_free(tmp_path: Path) 
     assert snapshot.agent_dir == tmp_path / "runtime" / "DIMMELA-1-implementation-1"
     models = json.loads((snapshot.agent_dir / "models.json").read_text())
     assert models["providers"]["omlx"]["apiKey"] == "$CARLO_PI_MODEL_API_KEY"
-    assert models["providers"]["omlx"]["models"][0]["contextWindow"] == 49_152
+    assert models["providers"]["omlx"]["models"][0]["contextWindow"] == 65_536
     settings = json.loads((snapshot.agent_dir / "settings.json").read_text())
     assert settings == {
         "compaction": {
@@ -278,9 +278,8 @@ def test_pi_runtime_grants_xcode_paths_only_for_macos_xcode_projects(
     snapshot = runtime.PiRuntimeSnapshotBuilder(tmp_path / "runtime").materialize(
         "CAR-1-implementation-1", model, project=project
     )
-    filesystem = json.loads((snapshot.agent_dir / "sandbox.json").read_text())[
-        "filesystem"
-    ]
+    sandbox = json.loads((snapshot.agent_dir / "sandbox.json").read_text())
+    filesystem = sandbox["filesystem"]
 
     developer = home / "Library" / "Developer"
     core_simulator_logs = home / "Library" / "Logs" / "CoreSimulator"
@@ -290,6 +289,7 @@ def test_pi_runtime_grants_xcode_paths_only_for_macos_xcode_projects(
         "/Applications/Xcode.app",
         str(developer),
         str(core_simulator_logs),
+        str(snapshot.agent_dir / "bin"),
     ]
     assert filesystem["allowWrite"] == [
         str(project.resolve()),
@@ -298,6 +298,16 @@ def test_pi_runtime_grants_xcode_paths_only_for_macos_xcode_projects(
         str(developer / "CoreSimulator"),
         str(core_simulator_logs),
     ]
+    assert sandbox["network"]["allowMachLookup"] == [
+        "com.apple.testmanagerd.control"
+    ]
+    assert sandbox["allowPty"] is True
+    wrapper = snapshot.agent_dir / "bin" / "xcodebuild"
+    assert wrapper.stat().st_mode & 0o111
+    assert "'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox'" in wrapper.read_text()
+    assert 'CLANG_MODULE_CACHE_PATH="$PWD/.carlo/xcode-cache/clang"' in wrapper.read_text()
+    assert 'SWIFT_MODULE_CACHE_PATH="$PWD/.carlo/xcode-cache/swift"' in wrapper.read_text()
+    assert snapshot.environment["PATH"].split(":", 1)[0] == str(wrapper.parent)
 
 
 def test_pi_runtime_allows_extra_paths_read_only(tmp_path: Path) -> None:

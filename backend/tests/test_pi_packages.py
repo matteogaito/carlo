@@ -63,6 +63,20 @@ def test_locates_nested_git_checkout_root(tmp_path: Path) -> None:
     ) == root
 
 
+def test_root_git_skill_is_a_package_resource(tmp_path: Path) -> None:
+    from carlo.pi_packages import PackageSource, PiPackageManager
+
+    root = tmp_path / "agent/git/github.com/matteogaito/kor"
+    (root / ".git").mkdir(parents=True)
+    (root / "SKILL.md").write_text("---\nname: kor\n---\n")
+
+    located = PiPackageManager._locate_package(
+        tmp_path / "agent", PackageSource("git:github.com/matteogaito/kor", False)
+    )
+    assert located == root
+    assert PiPackageManager._resources(root, PiPackageManager._manifest(root))["skills"] == ["kor"]
+
+
 @pytest.mark.asyncio
 async def test_install_uses_pi_staging_and_promotes_manifest(tmp_path: Path) -> None:
     from carlo.pi_packages import PiPackageManager

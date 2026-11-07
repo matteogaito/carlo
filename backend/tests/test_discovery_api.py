@@ -27,6 +27,14 @@ def package(title: str, path: str, position: int) -> dict:
     }
 
 
+def feature_task(title: str, position: int) -> dict:
+    return {
+        "id": f"feature-{position + 1}", "title": title, "position": position,
+        "objective": title, "interfaces": ["Preserve existing public behavior"],
+        "constraints": [], "done_when": ["The behavior is tested"],
+    }
+
+
 def full_metadata(tasks: list[dict]) -> dict:
     return {
         "implementation_tasks": tasks, "skills": [], "implementation_phases": [item["title"] for item in tasks],
@@ -142,7 +150,7 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
                         "megaprompt": "Implement CSV import using src/ingest.py.",
                         "depends_on": [], "brief_markdown": "# Brief\nReuse ingestion.",
                         "plan_markdown": "# Plan\nImplement CSV parsing, then test it.",
-                        "metadata": {"skills": [], "implementation_tasks": [package("Implement parsing", "src/ingest.py", 0), package("Validate imports", "tests/test_ingest.py", 1)], "implementation_phases": ["Implement parsing", "Validate imports"], "validation_commands": ["pytest -q"], "browser_validation": False, "build_required": False, "run_required": False, "deployment_expected": False, "risk_flags": [], "affected_areas": ["src/ingest.py"]},
+                            "metadata": {"skills": [], "implementation_tasks": [feature_task("Implement parsing", 0), feature_task("Validate imports", 1)], "implementation_phases": ["Implement parsing", "Validate imports"], "validation_commands": ["pytest -q"], "browser_validation": False, "build_required": False, "run_required": False, "deployment_expected": False, "risk_flags": [], "affected_areas": ["src/ingest.py"]},
                     },
                     {
                         "id": "ui", "title": "Add import UI",
@@ -150,7 +158,7 @@ async def test_discovery_chat_task_handoff_and_close(tmp_path: Path) -> None:
                         "depends_on": ["csv"], "brief_markdown": "# Brief\nUse the existing UI.",
                         "plan_markdown": "# Plan\nAdd and browser-test the import flow.",
                         "metadata": {"skills": [], "implementation_tasks": [
-                            package("Add import UI", "frontend/import.ts", 0),
+                                feature_task("Add import UI", 0),
                         ], "implementation_phases": ["Add import UI"], "validation_commands": ["npm test"], "browser_validation": True, "build_required": True, "run_required": True, "deployment_expected": False, "risk_flags": [], "affected_areas": ["frontend"]},
                     },
                 ],
@@ -230,14 +238,14 @@ async def test_discovery_task_creation_resolves_depends_on_by_proposal_title(tmp
                         "id": "p1", "title": "Backend import",
                         "megaprompt": "Implement backend import.",
                         "depends_on": [], "brief_markdown": "# Brief", "plan_markdown": "# Plan",
-                        "metadata": full_metadata([package("Implement parsing", "src/ingest.py", 0)]),
+                            "metadata": full_metadata([feature_task("Implement parsing", 0)]),
                     },
                     {
                         "id": "p2", "title": "Import UI",
                         "megaprompt": "Add the import UI.",
                         "depends_on": ["Backend import"],
                         "brief_markdown": "# Brief", "plan_markdown": "# Plan",
-                        "metadata": full_metadata([package("Add UI", "frontend/import.ts", 0)]),
+                            "metadata": full_metadata([feature_task("Add UI", 0)]),
                     },
                 ]
             })
@@ -554,6 +562,21 @@ async def test_rework_chat_applies_a_parent_level_split(tmp_path: Path) -> None:
             }
             await session.commit()
 
+        rejected = await client.post(f"/api/discoveries/{discovery_id}/apply-fix")
+        assert rejected.status_code == 409
+        assert "feature-level" in rejected.json()["detail"]
+        async with factory() as session:
+            old_child = await session.get(Task, "REP-2")
+            assert old_child.superseded_at is None
+            record = await session.get(Discovery, discovery_id)
+            proposal = dict(record.state["fix_proposal"])
+            proposal["packages"] = [
+                feature_task(title, position)
+                for position, title in enumerate(("Persist records", "Migrate legacy slot"))
+            ]
+            record.state = {"fix_proposal": proposal}
+            await session.commit()
+
         applied = await client.post(f"/api/discoveries/{discovery_id}/apply-fix")
         assert applied.status_code == 200
         body = applied.json()
@@ -571,6 +594,9 @@ async def test_rework_chat_applies_a_parent_level_split(tmp_path: Path) -> None:
                 )
             ).all()
             assert [child.title for child in new_children] == ["Persist records", "Migrate legacy slot"]
+            for child in new_children:
+                plan = await session.scalar(select(PlanRevision).where(PlanRevision.task_id == child.id))
+                assert "files" not in plan.metadata_json["implementation_tasks"][0]
 
     await engine.dispose()
 

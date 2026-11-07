@@ -124,6 +124,10 @@ _TRANSITIONS = {
         TaskStatus.READY,
         TaskStage.QUEUED,
     ),
+    (TaskStatus.IN_PROGRESS, TaskStage.BLOCKED, "retry"): (
+        TaskStatus.READY,
+        TaskStage.QUEUED,
+    ),
     (TaskStatus.FAILED, TaskStage.BLOCKED, "approve_fix"): (
         TaskStatus.READY,
         TaskStage.QUEUED,

@@ -50,6 +50,54 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .view-tabs button { min-width: 104px; min-height: 40px; border: 0; border-radius: 999px; padding: 8px 16px; color: #666; background: transparent; font-weight: 700; }
 .view-tabs button.active { color: var(--ink); background: var(--paper); box-shadow: 0 1px 5px rgb(0 0 0 / .08); }
 
+.project-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 24px; border-bottom: 1px solid var(--line); background: var(--paper); }
+.project-toolbar label { display: flex; align-items: center; gap: 12px; font-weight: 700; }
+.project-toolbar select { max-width: 55vw; padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); }
+.project-toolbar > span, .project-exclusions { color: #657169; font-size: 12px; }
+.project-workspace { display: grid; grid-template-columns: 280px minmax(0, 1fr); height: calc(100dvh - 152px); min-height: 400px; }
+.project-files { overflow: auto; padding: 16px; border-right: 1px solid var(--line); }
+.project-files > header, .project-document-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.project-view button { border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px; color: var(--ink); background: var(--paper); }
+.project-view button:disabled { opacity: .45; cursor: default; }
+.project-files ul { list-style: none; margin: 0; padding-left: 14px; }
+.project-files > ul { padding-left: 0; }
+.project-files li { margin-top: 3px; }
+.project-files summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
+.project-files li button { width: 100%; padding: 6px 8px; border-color: transparent; text-align: left; background: transparent; overflow-wrap: anywhere; }
+.project-files li button:hover { background: #e9eeea; }
+.project-files li button.active { color: var(--pine); background: #dbe9e1; font-weight: 700; }
+.project-document { min-width: 0; overflow: auto; padding: 0 24px 32px; background: var(--paper); }
+.project-document-header { position: sticky; top: 0; z-index: 1; justify-content: flex-start; padding: 14px 0; border-bottom: 1px solid var(--line); background: var(--paper); }
+.project-document-header code { overflow-wrap: anywhere; font-size: 13px; }
+.project-markdown { max-width: 1050px; line-height: 1.65; overflow-wrap: anywhere; }
+.project-markdown a { color: var(--pine); text-underline-offset: 3px; }
+.project-markdown :not(pre) > code { padding: 2px 4px; background: var(--fog); font-size: .9em; }
+.project-code-block { margin: 16px 0; overflow: auto; padding: 14px; background: var(--fog); border: 1px solid var(--line); border-radius: 4px; }
+.project-code-block > code { display: block; white-space: pre; }
+.project-markdown blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid var(--line); color: #657169; }
+.project-source { margin: 18px 0; font: 13px/1.7 ui-monospace, monospace; tab-size: 4; }
+.source-line { display: block; width: max-content; min-width: 100%; }
+.source-line.selected { background: #fff0c8; }
+.line-number { display: inline-block; min-width: 4em; padding-right: 16px; color: #89958c; text-align: right; user-select: none; }
+.mermaid-diagram { display: block; width: 100%; border: 0; background: white; }
+.diagram-error { color: var(--fault); }
+.diagram-error pre { color: var(--ink); white-space: pre-wrap; }
+@media (min-width: 901px) and (max-width: 1600px) {
+  .view-tabs { position: static; transform: none; width: max-content; margin: 10px auto; }
+  .project-workspace { height: calc(100dvh - 220px); }
+}
+@media (max-width: 900px) {
+  .project-workspace { height: calc(100dvh - 220px); grid-template-columns: 210px minmax(0, 1fr); }
+  .project-toolbar { padding: 12px 14px; }
+  .project-toolbar > span { display: none; }
+  .project-document { padding: 0 14px 24px; }
+}
+@media (max-width: 600px) {
+  .project-workspace { height: auto; grid-template-columns: minmax(0, 1fr); }
+  .project-files { max-height: 240px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .project-document { min-height: 50dvh; padding-bottom: 95px; }
+}
+
 .auth-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: var(--ink); }
 .auth-shell > p { color: #aebbb4; font: 600 12px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; }
 .login-panel { width: min(420px, 100%); padding: 36px; background: var(--paper); border-top: 5px solid var(--pine); box-shadow: 0 24px 70px rgb(0 0 0 / .28); }
@@ -140,6 +188,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .evidence-row pre { margin-top: 8px; max-height: 120px; overflow: auto; }
 .timeline-row { display: grid; grid-template-columns: 66px 1fr; gap: 8px; margin: 7px 0; font-size: 12px; }
 .timeline-row time { color: #69756e; font-family: ui-monospace, monospace; }
+.timeline-row.attempt-row { display: block; }
 .detail-stage { margin: 0; padding: 10px 24px; color: white; background: var(--pine); font: 650 11px ui-monospace, monospace; text-transform: uppercase; }
 .task-actions { display: flex; gap: 8px; padding: 10px 24px; border-bottom: 1px solid var(--line); background: var(--paper); }
 .task-action-menu { position: relative; padding: 0 24px 10px; border-bottom: 1px solid var(--line); }
@@ -435,6 +484,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .profile-list small { color: #748078; font-size: 11px; }
 .profile-list label { display: grid; gap: 5px; color: #657169; font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
 .profile-list select { width: 100%; border: 1px solid #98a39c; padding: 9px; color: var(--ink); background: white; text-transform: none; }
+.profile-context { align-self: end; }
+.profile-context summary { padding: 10px 0; color: var(--pine); font-size: 12px; font-weight: 700; cursor: pointer; }
+.profile-context label { margin-top: 8px; }
 .profile-list fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .profile-list legend { margin-bottom: 6px; color: #657169; font: 700 9px ui-monospace, monospace; text-transform: uppercase; }
 .profile-skills { display: flex; flex-wrap: wrap; gap: 6px; }

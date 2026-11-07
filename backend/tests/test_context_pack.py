@@ -61,6 +61,7 @@ def test_swift_symbol_lookup_ignores_commented_declarations(tmp_path: Path) -> N
     result = build_context_pack(
         tmp_path,
         package([{"path": "Runner.swift", "mode": "edit", "reason": "Caller", "symbols": ["run"]}]),
+        max_tokens=32_000,
     )
     assert "func run() {" in result
     assert "old example" not in result
@@ -93,6 +94,7 @@ def test_compact_retry_pack_keeps_contract_but_omits_file_contents(tmp_path: Pat
     result = build_context_pack(
         tmp_path,
         package([{"path": "large.py", "mode": "edit", "reason": "Parser"}]),
+        max_tokens=32_000,
         include_file_contents=False,
     )
     assert "Objective: The parser accepts quoted fields." in result
@@ -106,8 +108,8 @@ def test_siblings_share_brief_prefix_and_brief_counts_toward_budget(tmp_path: Pa
     brief = "The API contract is stable. " * 100
     first = package([{"path": "a.py", "mode": "edit", "reason": "First"}])
     second = {**first, "objective": "Implement the second outcome."}
-    one = build_context_pack(tmp_path, first, brief=brief)
-    two = build_context_pack(tmp_path, second, brief=brief)
+    one = build_context_pack(tmp_path, first, brief=brief, max_tokens=32_000)
+    two = build_context_pack(tmp_path, second, brief=brief, max_tokens=32_000)
     assert one.startswith(f"Parent Brief:\n{brief}\n")
     assert two.startswith(f"Parent Brief:\n{brief}\n")
     assert one != two
@@ -122,14 +124,16 @@ def test_pack_rejects_project_escape_and_missing_symbols(tmp_path: Path) -> None
     with pytest.raises(ContextPackError, match="outside"):
         build_context_pack(
             tmp_path, package([{"path": "link.txt", "mode": "edit", "reason": "Parser"}]),
+            max_tokens=32_000,
         )
     (tmp_path / "parser.py").write_text("def actual():\n    pass\n")
     with pytest.raises(ContextPackError, match="missing"):
         build_context_pack(
             tmp_path, package([{"path": "parser.py", "mode": "edit", "reason": "Parser", "symbols": ["unknown"]}]),
+            max_tokens=32_000,
         )
 
 
 def test_legacy_package_is_refused_with_regeneration_instruction(tmp_path: Path) -> None:
     with pytest.raises(ContextPackError, match="legacy work package.*regenerate"):
-        build_context_pack(tmp_path, {"title": "Old task", "prompt": "Implement everything"})
+        build_context_pack(tmp_path, {"title": "Old task", "prompt": "Implement everything"}, max_tokens=32_000)

@@ -24,6 +24,7 @@ def test_tool_budget_warns_softly_and_stops_only_at_hard_limit(tmp_path: Path) -
 
 def test_session_usage_counts_model_calls_and_compactions(tmp_path: Path) -> None:
     telemetry = ExecutionTelemetry(tmp_path, set(), estimated_tool_calls=20)
+    assert (telemetry.soft_tool_calls, telemetry.hard_tool_calls) == (100, 200)
     telemetry.observe({"type": "message_end", "message": {"role": "assistant", "usage": {"input": 100, "output": 12}}})
     telemetry.observe({"type": "message_end", "message": {"role": "assistant", "usage": {"input": 80, "output": 8}}})
     telemetry.observe({"type": "session_compact"})

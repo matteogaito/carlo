@@ -46,7 +46,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
         )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
-        await add_managed_profiles(session, "plan", "implementation", "escalation")
+        await add_managed_profiles(session, "plan", "technical-plan", "implementation", "escalation")
         await session.commit()
     await bootstrap_admin(factory, "admin", "admin-password")
 
@@ -65,7 +65,7 @@ async def test_goal_reaches_done_through_api_planning_worker_and_validation(
             session_id: str,
             on_event=None,
         ) -> AgentResult:
-            if profile.name == "plan":
+            if profile.name in {"plan", "technical-plan"}:
                 output = json.dumps(
                     {
                         "brief_markdown": "# Brief\nREADME.md establishes the base.",

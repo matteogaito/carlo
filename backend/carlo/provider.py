@@ -49,7 +49,7 @@ class ResolvedModel:
     compaction_enabled: bool
     reserve_tokens: int
     keep_recent_tokens: int
-    context_window_percent: int = 75
+    context_window_percent: int = 100
     sampling_params: dict[str, Any] | None = None
 
 
@@ -158,6 +158,8 @@ class PiProvider:
         managed_skills: dict[str, str] | None = None,
         resource_manifest: Path | None = None,
         debug: bool = False,
+        idle_timeout_seconds: float = 600,
+        process_stop_grace_seconds: float = 5,
     ) -> None:
         self.executable = executable
         self.session_dir = session_dir
@@ -168,6 +170,8 @@ class PiProvider:
         self.managed_skills = managed_skills or {}
         self.resource_manifest = resource_manifest
         self.debug = debug
+        self.idle_timeout_seconds = idle_timeout_seconds
+        self.process_stop_grace_seconds = process_stop_grace_seconds
         self.lock_path = self.session_dir.parent / "pi-runtime.lock"
         self._processes: dict[str, asyncio.subprocess.Process] = {}
 
@@ -192,6 +196,7 @@ class PiProvider:
         self._require_sandbox_rg(runtime_packages)
         command = [
             self.executable,
+            "--no-skills",
             *self._package_arguments(runtime_packages, package_paths),
             "--mode",
             "rpc",
@@ -252,6 +257,7 @@ class PiProvider:
         self._require_sandbox_rg(runtime_packages)
         base_command = [
             self.executable,
+            "--no-skills",
             *self._package_arguments(runtime_packages, package_paths),
             "--mode",
             "json",
@@ -306,7 +312,14 @@ class PiProvider:
                 try:
                     while True:
                         try:
-                            line = await process.stdout.readline()
+                            line = await asyncio.wait_for(
+                                process.stdout.readline(),
+                                timeout=self.idle_timeout_seconds,
+                            )
+                        except TimeoutError as error:
+                            raise ProviderError(
+                                f"Pi produced no events for {self.idle_timeout_seconds:g}s"
+                            ) from error
                         except ValueError as error:
                             raise ProviderError(
                                 "Pi emitted a JSON event larger than 4 MiB"
@@ -326,9 +339,7 @@ class PiProvider:
                             await on_event(event)
                     await process.wait()
                 except BaseException:
-                    if process.returncode is None:
-                        process.terminate()
-                        await process.wait()
+                    await self._terminate(process)
                     raise
                 finally:
                     self._processes.pop(session_id, None)
@@ -393,8 +404,34 @@ class PiProvider:
 
     async def stop(self, session_id: str) -> None:
         process = self._processes.get(session_id)
-        if process and process.returncode is None:
+        if process:
+            await self._terminate(process)
+
+    async def stop_tasks(self, task_ids: tuple[str, ...]) -> None:
+        prefixes = tuple(f"{task_id}-" for task_id in task_ids)
+        await asyncio.gather(*(
+            self.stop(session_id)
+            for session_id in tuple(self._processes)
+            if session_id.startswith(prefixes)
+        ))
+
+    async def _terminate(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        try:
             process.terminate()
+        except ProcessLookupError:
+            await process.wait()
+            return
+        try:
+            await asyncio.wait_for(
+                process.wait(), timeout=self.process_stop_grace_seconds
+            )
+        except TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
             await process.wait()
 
     def status(self, session_id: str) -> str:
@@ -524,7 +561,15 @@ class PiProvider:
             path = paths[package] if isinstance(package, str) else Path(package.artifact_path)
             if path.is_symlink() or not path.is_absolute() or not path.is_dir():
                 raise ProviderError(f"managed Pi package is unavailable: {package}")
-            arguments.extend(("-e", str(path)))
+            if (
+                isinstance(package, ResolvedPiPackage)
+                and path.name in package.resources.get("skills", [])
+                and not any(package.resources.get(kind) for kind in ("extensions", "prompts", "themes"))
+                and (path / "SKILL.md").is_file()
+            ):
+                arguments.extend(("--skill", str(path / "SKILL.md")))
+            else:
+                arguments.extend(("-e", str(path)))
         return arguments
 
     def _resource_snapshot(

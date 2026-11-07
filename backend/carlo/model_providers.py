@@ -33,6 +33,7 @@ MANAGED_PROFILE_SKILLS = ("frontend-design",)
 GLOBAL_PROFILE_SKILLS = ("carlo-runtime",)
 REQUIRED_PROFILE_SKILLS: dict[str, tuple[str, ...]] = {
     "plan": ("carlo-planning",),
+    "technical-plan": ("carlo-planning",),
 }
 
 
@@ -121,8 +122,10 @@ def validate_runtime_policy(policy: dict[str, Any]) -> None:
             raise ModelProviderError(f"{key} must be an integer between 1 and 100")
     if "reserve_tokens" in policy and (type(policy["reserve_tokens"]) is not int or policy["reserve_tokens"] < 1):
         raise ModelProviderError("reserve_tokens must be a positive integer")
-    if "context_window_tokens" in policy and (type(policy["context_window_tokens"]) is not int or policy["context_window_tokens"] < 1):
-        raise ModelProviderError("context_window_tokens must be a positive integer")
+    if "context_window_tokens" in policy:
+        cap = policy["context_window_tokens"]
+        if type(cap) is not int or cap < 16_384 or cap & (cap - 1):
+            raise ModelProviderError("context_window_tokens must be a power of two of at least 16k")
     if "enable_thinking" in policy and type(policy["enable_thinking"]) is not bool:
         raise ModelProviderError("enable_thinking must be a boolean")
 
@@ -138,21 +141,18 @@ def resolve_runtime_policy(
     api: str = "openai-completions",
 ) -> tuple[int, int, CompactionTokens, dict[str, Any] | None]:
     validate_runtime_policy(policy)
-    cap = policy.get("context_window_tokens", 65_536 if profile_name == "implementation" else context_window)
+    cap = policy.get("context_window_tokens", context_window)
     context_window = min(context_window, cap)
     if context_window <= max_tokens:
         raise ModelProviderError("context_window_tokens must exceed max_tokens")
-    percent = policy.get("context_window_percent", 100 if profile_name == "implementation" else 75)
+    percent = policy.get("context_window_percent", 100)
     recent_percent = policy.get("keep_recent_percent", keep_recent_percent)
     exposed_window = max(max_tokens + 1, int(context_window * percent / 100))
-    default_reserve = max(max_tokens, context_window - 56_000) if profile_name == "implementation" else max(
-        max_tokens, int(exposed_window * reserve_percent / 100)
-    )
+    default_reserve = max(max_tokens, int(exposed_window * reserve_percent / 100))
     reserve = policy.get("reserve_tokens", default_reserve)
     if type(reserve) is not int or reserve < max_tokens or reserve >= exposed_window:
         raise ModelProviderError("reserve_tokens must be at least max_tokens and below the exposed context window")
-    recent_base = exposed_window if profile_name == "implementation" else context_window
-    recent = int(recent_base * recent_percent / 100)
+    recent = int(exposed_window * recent_percent / 100)
     if recent >= exposed_window - reserve:
         raise ModelProviderError("keep_recent_percent does not fit the exposed context window")
     thinking = policy.get("enable_thinking", False if profile_name == "implementation" else None)
@@ -161,6 +161,12 @@ def resolve_runtime_policy(
         if thinking is not None and api == "openai-completions" else None
     )
     return context_window, percent, CompactionTokens(reserve, recent), sampling
+
+
+def context_pack_budget(context_window: int, max_tokens: int, percent: int, compaction: CompactionTokens) -> int:
+    """Leave the configured recent-context allowance free for Pi and tool results."""
+    exposed = max(max_tokens + 1, int(context_window * percent / 100))
+    return exposed - compaction.reserve_tokens - compaction.keep_recent_tokens
 
 
 async def resolve_agent_profile(
@@ -297,10 +303,16 @@ async def resolve_agent_profile(
         if records
         else legacy_packages
     )
+    if record.name in {"plan", "technical-plan"}:
+        packages = tuple(
+            package for package in packages
+            if getattr(package, "identity", package) != "superpowers"
+        )
+    is_omlx = provider.slug == "omlx"
     return AgentProfile(
         name=record.name,
         model=None,
-        effort=record.effort,
+        effort="off" if is_omlx else record.effort,
         tools=tools,
         skills=skills,
         resolved_model=ResolvedModel(
@@ -314,7 +326,7 @@ async def resolve_agent_profile(
             api_key=api_key,
             compatibility=compatibility,
             input_modalities=tuple(model.input_modalities or ["text"]),
-            reasoning=model.reasoning,
+            reasoning=False if is_omlx else model.reasoning or bool(record.effort and record.effort != "off"),
             context_window=context_window,
             max_tokens=max_tokens,
             compaction_enabled=runtime.compaction_enabled if runtime else True,
@@ -340,6 +352,29 @@ def model_runtime_evidence(profile: Any) -> dict[str, Any] | None:
         "max_tokens": model.max_tokens,
         "reserve_tokens": model.reserve_tokens,
         "keep_recent_tokens": model.keep_recent_tokens,
+    }
+
+
+async def implementation_planning_target(
+    session: AsyncSession, task_model_id: int | None = None,
+) -> dict[str, Any]:
+    record = await session.scalar(select(AgentProfileRecord).where(AgentProfileRecord.name == "implementation"))
+    model_id = task_model_id or (record.available_model_id if record else None)
+    model = await session.get(AvailableModel, model_id) if model_id else None
+    if record is None or model is None or model.effective_context_window is None:
+        return {}
+    runtime = await session.get(PiRuntimeSettings, 1)
+    window, percent, compaction, _ = resolve_runtime_policy(
+        "implementation", record.context_policy or {}, model.effective_context_window,
+        model.effective_max_tokens, runtime.reserve_percent if runtime else 10,
+        runtime.keep_recent_percent if runtime else 20,
+    )
+    return {
+        "model": model.external_id,
+        "usable_input_tokens": int(window * percent / 100) - compaction.reserve_tokens,
+        "context_pack_budget_tokens": context_pack_budget(
+            window, model.effective_max_tokens, percent, compaction,
+        ),
     }
 
 
@@ -391,6 +426,7 @@ def parse_openai_models(payload: Any) -> list[DiscoveredModel]:
         if not isinstance(display_name, str) or len(display_name) > 240:
             display_name = None
         modalities = value.get("input") or value.get("input_modalities") or []
+        reasoning = value.get("reasoning")
         result.append(
             DiscoveredModel(
                 external_id=external_id,
@@ -404,7 +440,9 @@ def parse_openai_models(payload: Any) -> list[DiscoveredModel]:
                 )
                 if isinstance(modalities, list)
                 else (),
-                reasoning=value.get("reasoning") is True,
+                reasoning=reasoning is True or (
+                    isinstance(reasoning, dict) and bool(reasoning.get("supported_efforts"))
+                ),
                 metadata=value,
             )
         )

@@ -69,7 +69,7 @@ def build_context_pack(
     repository: Path,
     package: dict[str, Any],
     *,
-    max_tokens: int = 32_000,
+    max_tokens: int,
     brief: str = "",
     include_file_contents: bool = True,
 ) -> str:

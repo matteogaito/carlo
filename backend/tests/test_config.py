@@ -7,15 +7,13 @@ from carlo.config import Settings
 
 def test_default_database_url_is_a_string(monkeypatch) -> None:
     monkeypatch.delenv("CARLO_DATABASE_URL", raising=False)
-    monkeypatch.delenv("CARLO_CONTEXT_PACK_BUDGET_TOKENS", raising=False)
     assert Settings.from_env().database_url == "postgresql+psycopg:///carlov3"
-    assert Settings.from_env().context_pack_budget_tokens == 32_000
 
 
 def test_worker_settings_are_loaded_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("CARLO_WORKTREE_ROOT", "/tmp/carlo-worktrees")
     monkeypatch.setenv("CARLO_MAX_ATTEMPTS", "9")
-    monkeypatch.setenv("CARLO_CONTEXT_PACK_BUDGET_TOKENS", "16000")
+    monkeypatch.setenv("CARLO_PI_IDLE_TIMEOUT_SECONDS", "42")
     monkeypatch.setenv("CARLO_ACTION_CANCEL_GRACE_SECONDS", "7")
     monkeypatch.setenv("CARLO_NPM_EXECUTABLE", "/opt/homebrew/bin/npm")
     monkeypatch.setenv("CARLO_PI_REQUEST_DIAGNOSTICS", "true")
@@ -23,7 +21,7 @@ def test_worker_settings_are_loaded_from_environment(monkeypatch) -> None:
     settings = Settings.from_env()
     assert not hasattr(settings, "worktree_root")
     assert settings.max_attempts == 9
-    assert settings.context_pack_budget_tokens == 16000
+    assert settings.pi_idle_timeout_seconds == 42
     assert settings.action_cancel_grace_seconds == 7
     assert settings.npm_executable == "/opt/homebrew/bin/npm"
     assert settings.pi_request_diagnostics is True

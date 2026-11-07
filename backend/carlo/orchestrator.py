@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from dataclasses import asdict, dataclass, replace
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -33,7 +34,10 @@ from .models import (
     ValidationRun,
 )
 from .model_providers import (
+    CompactionTokens,
     CredentialCipher,
+    context_pack_budget,
+    implementation_planning_target,
     model_runtime_evidence,
     resolve_agent_profile,
 )
@@ -43,11 +47,25 @@ from .execution_telemetry import ExecutionTelemetry, ToolBudgetExceeded
 from .provider import PiProvider
 from .planning import FeatureTask, ImplementationTask, Planner, PlanningError, PlanningQuestion, PlanningRequest
 from .work_package_escalation import within_approved_scope
-from .api import work_package_example
+from .api import _planning_activity, work_package_example
 
 IMPLEMENTATION_LOCK = 1_128_352_847
 MAX_INTERRUPTS = 3
 EMPTY_DIFF_HASH = hashlib.sha256(b"").hexdigest()
+
+
+def _json_object(output: str, *required_keys: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(output):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(output[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and all(key in value for key in required_keys):
+            return value
+    raise ValueError("planner returned no valid JSON object")
 
 
 class TaskStopRequested(BaseException):
@@ -236,9 +254,11 @@ class Orchestrator:
 
     async def _finish(self, task_id: str, outcome: str) -> None:
         async with self.session_factory() as session:
-            task = await session.get(Task, task_id)
+            task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
             if task is None:
                 raise RuntimeError(f"active task {task_id} disappeared")
+            if task.status != TaskStatus.IN_PROGRESS:
+                return
             if outcome == "validated":
                 if task.branch_name is not None or task.worktree_path is not None:
                     checkpoint = task.checkpoint_sha
@@ -408,9 +428,10 @@ class ImplementationPipeline:
         artifact_root: Path,
         max_attempts: int = 20,
         credential_cipher: CredentialCipher | None = None,
-        context_pack_budget_tokens: int = 32_000,
         request_diagnostics: bool = False,
         max_escalations: int = 3,
+        *,
+        context_pack_budget_tokens: int | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.provider = provider
@@ -461,9 +482,7 @@ class ImplementationPipeline:
         )
         if task.worktree_path != str(worktree.path) or task.branch_name != worktree.branch:
             async with self.session_factory() as session:
-                current = await session.get(Task, task_id)
-                if current is None:
-                    return "failed"
+                current = await self._require_running(session, task_id, lock=True)
                 current.branch_name = worktree.branch
                 current.worktree_path = str(worktree.path)
                 current.stage = TaskStage.IMPLEMENTING
@@ -479,6 +498,7 @@ class ImplementationPipeline:
         if task.parent_task_id is not None:
             packages = plan.metadata_json.get("implementation_tasks") or []
             if len(packages) == 1 and "files" not in packages[0]:
+                await self._restore_for_technical_replan(task, workspace, worktree, base_ref)
                 technical = await self._prepare_technical_plan(task, plan, worktree)
                 if technical == "blocked":
                     return "blocked"
@@ -501,6 +521,13 @@ class ImplementationPipeline:
         escalation_profile = await self._resolve_profile(escalation.id)
         await self._record_model_runtime(
             task_id, model_runtime_evidence(implementation_profile)
+        )
+        model = implementation_profile.resolved_model
+        pack_budget = self.context_pack_budget_tokens or (
+            context_pack_budget(
+                model.context_window, model.max_tokens, model.context_window_percent,
+                CompactionTokens(model.reserve_tokens, model.keep_recent_tokens),
+            ) if model else None
         )
 
         previous: ValidationSnapshot | None = None
@@ -605,6 +632,8 @@ class ImplementationPipeline:
             )
             if task.parent_task_id is not None:
                 try:
+                    if pack_budget is None:
+                        raise ContextPackError("implementation model has no context limits")
                     if not isinstance(packages, list) or len(packages) != 1:
                         raise ContextPackError("subtask has no single complete work package; replan required")
                     context_brief = plan.brief_markdown
@@ -619,14 +648,14 @@ class ImplementationPipeline:
                     if is_recovery_attempt or focused_retry:
                         pack = build_context_pack(
                             worktree.path, packages[0],
-                            max_tokens=self.context_pack_budget_tokens,
+                            max_tokens=pack_budget,
                             brief=context_brief,
                             include_file_contents=False,
                         )
                     else:
                         pack = build_context_pack(
                             worktree.path, packages[0],
-                            max_tokens=self.context_pack_budget_tokens,
+                            max_tokens=pack_budget,
                             brief=context_brief,
                         )
                         runtime_instruction = f"Current strategy: {strategy}"
@@ -700,7 +729,14 @@ class ImplementationPipeline:
                 if was_recovery:
                     return "failed"
                 continue
-            except Exception:
+            except Exception as error:
+                await self._mark_attempt_outcome(
+                    task_id,
+                    attempt_id,
+                    "failed",
+                    str(error) or error.__class__.__name__,
+                    emit_event=False,
+                )
                 if meter is not None:
                     await self._record_session_metrics(task_id, current_number, meter.summary("failed"))
                 raise
@@ -710,6 +746,30 @@ class ImplementationPipeline:
             focused_retry = False
             retry_feedback = None
             await self._record_provider_result(task_id, attempt_id, current_number, result)
+            if task.parent_task_id is not None:
+                task_packages = plan.metadata_json.get("technical_packages") or packages
+                editable = {
+                    item["path"]
+                    for package in task_packages
+                    for item in package["files"]
+                    if item["mode"] in {"edit", "create"}
+                }
+                unexpected = sorted(
+                    await workspace.changed_paths(worktree) - editable
+                )
+                if unexpected:
+                    reason = "changed files outside task plan: " + ", ".join(unexpected)
+                    await self._mark_attempt_outcome(
+                        task_id, attempt_id, "scope_violation", reason
+                    )
+                    if meter is not None:
+                        await self._record_session_metrics(
+                            task_id, current_number, meter.summary("scope_violation")
+                        )
+                    history.append(AttemptSignal(
+                        "scope_violation", await workspace.diff_hash(worktree), strategy
+                    ))
+                    break
             deviation = major_deviation(result.output)
             if deviation:
                 await self._block_for_amendment(
@@ -805,17 +865,64 @@ class ImplementationPipeline:
                     return "blocked"
         return "failed"
 
+    async def _restore_for_technical_replan(
+        self, task: Task, workspace: GitWorkspace, worktree: Checkout, base_ref: str | None,
+    ) -> None:
+        async with self.session_factory() as session:
+            requested = await session.scalar(select(Event).where(
+                Event.task_id == task.id, Event.type == "task.technical_replan.requested"
+            ).order_by(Event.sequence.desc()).limit(1))
+            restored = await session.scalar(select(Event.sequence).where(
+                Event.task_id == task.id, Event.type == "git.technical_replan_restored"
+            ).order_by(Event.sequence.desc()).limit(1))
+            checkpoint = await session.scalar(select(Attempt.checkpoint_sha).where(
+                Attempt.task_id == task.id, Attempt.outcome == "verified",
+                Attempt.checkpoint_sha.is_not(None),
+            ).order_by(Attempt.number.desc()).limit(1))
+        if requested is None or (restored is not None and restored > requested.sequence):
+            return
+        target = checkpoint or base_ref or await workspace._git(
+            "merge-base", "HEAD", workspace.integration_branch, cwd=worktree.path
+        )
+        head, archive = await workspace.archive_and_restore(
+            worktree, target,
+            self.artifact_root / task.id / f"technical-replan-{requested.sequence}.patch",
+        )
+        async with self.session_factory() as session:
+            current = await self._require_running(session, task.id, lock=True)
+            current.checkpoint_sha = target or head
+            session.add(Event(task=current, type="git.technical_replan_restored", payload={
+                "request_sequence": requested.sequence,
+                "previous_head": head,
+                "checkpoint": target or head,
+                "archive": archive,
+            }))
+            await session.commit()
+
     async def _prepare_technical_plan(
         self, task: Task, feature_plan: PlanRevision, worktree: Checkout,
     ) -> PlanRevision | str | None:
         """Resolve a feature outcome into ordered internal execution slices."""
-        feature_source = (
-            feature_plan.metadata_json.get("feature_task")
-            or feature_plan.metadata_json["implementation_tasks"][0]
-        )
+        feature_source = feature_plan.metadata_json.get("feature_task")
+        if feature_source is None:
+            current = feature_plan.metadata_json["implementation_tasks"][0]
+            feature_source = {
+                name: current[name]
+                for name in FeatureTask.model_fields
+                if name in current
+            }
         feature = FeatureTask.model_validate(feature_source)
         async with self.session_factory() as session:
-            record = await session.scalar(select(AgentProfileRecord).where(AgentProfileRecord.name == "plan"))
+            record = await session.scalar(select(AgentProfileRecord).where(
+                AgentProfileRecord.name == "technical-plan"
+            ))
+            replan_request = await session.scalar(select(Event).where(
+                Event.task_id == task.id, Event.type == "task.technical_replan.requested"
+            ).order_by(Event.sequence.desc()).limit(1))
+            replan_plan = await session.scalar(select(PlanRevision).where(
+                PlanRevision.task_id == task.id,
+                PlanRevision.revision == replan_request.payload["previous_revision"],
+            )) if replan_request and replan_request.payload.get("feature_revision") == feature_plan.revision else None
             answer = await session.scalar(select(Event).where(
                 Event.task_id == task.id, Event.type == "planning.technical.answer",
             ).order_by(Event.sequence.desc()).limit(1))
@@ -825,6 +932,9 @@ class ImplementationPipeline:
                 Task.status == TaskStatus.DONE,
                 Task.superseded_at.is_(None),
             ).order_by(Task.subtask_position))).all())
+            implementation_target = await implementation_planning_target(
+                session, task.available_model_id,
+            )
         verified_predecessors = [
             {"task_id": previous.id, "title": previous.title, "outcome": previous.goal, "checkpoint": previous.checkpoint_sha}
             for previous in predecessors if previous.checkpoint_sha
@@ -832,31 +942,84 @@ class ImplementationPipeline:
         if record is None:
             raise RuntimeError("technical planning profile is missing")
         profile = await self._resolve_profile(record.id)
-        profile = replace(profile, tools=tuple(tool for tool in profile.tools if tool in {"read", "grep", "find", "ls"}))
+        profile = replace(profile, tools=tuple(
+            tool for tool in profile.tools if tool in {"read", "grep", "find", "ls"}
+        ))
         handoff = json.dumps({
             "approved_parent_brief": feature_plan.brief_markdown,
             "approved_feature": feature.model_dump(),
             "verified_predecessors": verified_predecessors,
             "user_answer": answer.payload if answer else None,
+            "technical_replan": ({
+                "previous_plan": replan_plan.plan_markdown,
+                "completed_slices": [
+                    {"id": item.get("id"), "title": item.get("title")}
+                    for item in (replan_plan.metadata_json.get("technical_packages") or [])[
+                        :int(replan_request.payload.get("completed_slices", 0))
+                    ]
+                ],
+                "last_validation_failure": (await self._latest_validation_feedback(task.id) or "")[-3000:],
+                "instruction": "Plan only the remaining work from the restored verified checkout. Preserve completed slices; replace the unfinished technical slices.",
+            } if replan_plan else None),
             "instruction": (
                 "Plan only this approved feature on the current checkout. Return one or more ordered technical "
                 "execution slices. Split now if necessary; slices are internal to this child Task and must not "
                 "need later sub-splitting. Together they must preserve the approved objective, interfaces, "
-                "constraints, and acceptance criteria."
+                "constraints, and acceptance criteria. Trace every caller of each changed interface before "
+                "choosing the editable file scope. Include every affected caller or preserve compatibility; "
+                "a package that cannot compile within its editable files is invalid."
             ),
         }, ensure_ascii=False)
         async with self.session_factory() as session:
-            session.add(Event(task_id=task.id, type="planning.technical.started", payload={"feature_id": feature.id}))
+            await self._require_running(session, task.id)
+            session.add(Event(
+                task_id=task.id,
+                type="planning.technical.started",
+                payload={
+                    "feature_id": feature.id,
+                    "profile": profile.name,
+                    "model": profile.resolved_model.external_id if profile.resolved_model else profile.model,
+                },
+            ))
             await session.commit()
+        last_response_event = 0.0
+
+        async def publish(provider_event: dict[str, Any]) -> None:
+            nonlocal last_response_event
+            async with self.session_factory() as session:
+                await self._require_running(session, task.id)
+            activity = _planning_activity(provider_event)
+            if activity is None:
+                return
+            event_type, payload = activity
+            if event_type == "planning.drafting":
+                now = monotonic()
+                if now - last_response_event < 30:
+                    return
+                last_response_event = now
+                event_type = "planning.technical.responding"
+            else:
+                event_type = event_type.replace("planning.", "planning.technical.", 1)
+            async with self.session_factory() as session:
+                session.add(Event(task_id=task.id, type=event_type, payload=payload))
+                await session.commit()
+
+        async def retry(payload: dict[str, Any]) -> None:
+            async with self.session_factory() as session:
+                await self._require_running(session, task.id)
+                session.add(Event(task_id=task.id, type="planning.technical.package_retry", payload=payload))
+                await session.commit()
+
         try:
             result = await Planner(self.provider, profile).plan(PlanningRequest(
                 task.project, task.title, task.goal,
                 f"{task.id}-technical-plan-{feature_plan.revision}",
                 handoff=handoff, technical_plan=True, repository_path=str(worktree.path),
-            ))
+                implementation_target=implementation_target,
+            ), on_event=publish, on_retry=retry)
             if isinstance(result, PlanningQuestion):
                 async with self.session_factory() as session:
-                    current = await session.get(Task, task.id)
+                    current = await self._require_running(session, task.id, lock=True)
                     current.planning_question = {"text": result.text}
                     session.add(Event(task=current, type="planning.technical.question", payload={"question": result.text}))
                     await session.commit()
@@ -866,19 +1029,22 @@ class ImplementationPipeline:
                 raise PlanningError("technical plan did not return complete execution slices")
             if [package.position for package in packages] != list(range(len(packages))):
                 raise PlanningError("technical slices are not zero-based and ordered")
-            if any(not set(feature.constraints).issubset(package.constraints) for package in packages):
-                raise PlanningError("technical slice weakened approved feature constraints")
-            inherited_interfaces = {item for package in packages for item in package.interfaces}
-            inherited_done_when = {item for package in packages for item in package.done_when}
-            if not set(feature.interfaces).issubset(inherited_interfaces) or not set(feature.done_when).issubset(inherited_done_when):
-                raise PlanningError("technical slices do not preserve approved interfaces or acceptance criteria")
+            packages = [package.model_copy(update={
+                "constraints": list(dict.fromkeys([*feature.constraints, *package.constraints])),
+            }) for package in packages]
+            last = packages[-1]
+            packages[-1] = last.model_copy(update={
+                "interfaces": list(dict.fromkeys([*feature.interfaces, *last.interfaces])),
+                "done_when": list(dict.fromkeys([*feature.done_when, *last.done_when])),
+            })
         except (PlanningError, ValueError) as error:
             async with self.session_factory() as session:
+                await self._require_running(session, task.id, lock=True)
                 session.add(Event(task_id=task.id, type="planning.technical.failed", payload={"error": str(error)[:1000]}))
                 await session.commit()
             return None
         async with self.session_factory() as session:
-            current = await session.get(Task, task.id)
+            current = await self._require_running(session, task.id, lock=True)
             revision_number = int(await session.scalar(
                 select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
                     PlanRevision.task_id == task.id
@@ -899,6 +1065,14 @@ class ImplementationPipeline:
                     "feature_task": feature.model_dump(),
                     "technical_brief": result.brief_markdown,
                     "verified_predecessors": verified_predecessors,
+                    "planner_profile": {
+                        "name": profile.name,
+                        "provider": record.provider,
+                        "model": profile.resolved_model.external_id if profile.resolved_model else profile.model,
+                        "effort": profile.effort,
+                        "tools": list(profile.tools),
+                    },
+                    "model_runtime": model_runtime_evidence(profile),
                 },
                 approved_at=datetime.now(UTC),
             )
@@ -921,9 +1095,7 @@ class ImplementationPipeline:
         if not isinstance(slices, list) or next_index >= len(slices):
             return None
         async with self.session_factory() as session:
-            current = await session.get(Task, task_id)
-            if current is None:
-                raise RuntimeError("task disappeared while advancing technical slice")
+            current = await self._require_running(session, task_id, lock=True)
             revision_number = int(await session.scalar(
                 select(func.coalesce(func.max(PlanRevision.revision), 0) + 1).where(
                     PlanRevision.task_id == task_id
@@ -978,9 +1150,20 @@ class ImplementationPipeline:
 
     async def _latest_validation_feedback(self, task_id: str) -> str | None:
         async with self.session_factory() as session:
+            latest_verified = await session.scalar(
+                select(func.coalesce(func.max(Attempt.number), 0)).where(
+                    Attempt.task_id == task_id, Attempt.outcome == "verified"
+                )
+            )
             run = await session.scalar(
                 select(ValidationRun)
-                .where(ValidationRun.task_id == task_id, ValidationRun.exit_code != 0)
+                .join(Attempt, ValidationRun.attempt_id == Attempt.id)
+                .where(
+                    ValidationRun.task_id == task_id,
+                    ValidationRun.exit_code != 0,
+                    Attempt.task_id == task_id,
+                    Attempt.number > latest_verified,
+                )
                 .order_by(ValidationRun.id.desc())
                 .limit(1)
             )
@@ -1059,9 +1242,13 @@ class ImplementationPipeline:
         )
         try:
             result = await self.provider.run(
-                profile, instruction, str(checkout.path), f"{task.id}-work-package-escalation-{escalation_id}"
+                profile,
+                instruction,
+                str(checkout.path),
+                f"{task.id}-work-package-escalation-{escalation_id}",
+                on_event=self._pi_step_handler(task.id),
             )
-            output = json.loads(result.output)
+            output = _json_object(result.output, "action")
             if not isinstance(output, dict) or output.get("action") not in {"revise", "replan", "blocked"}:
                 raise ValueError("planner returned no valid escalation action")
         except (ValueError, RuntimeError) as error:
@@ -1164,12 +1351,26 @@ class ImplementationPipeline:
             session.add(Event(task_id=task_id, type="execution.session_metrics", payload={"attempt": attempt, **summary}))
             await session.commit()
 
-    async def _mark_attempt_outcome(self, task_id: str, attempt_id: int, outcome: str, reason: str) -> None:
+    async def _mark_attempt_outcome(
+        self,
+        task_id: str,
+        attempt_id: int,
+        outcome: str,
+        reason: str,
+        *,
+        emit_event: bool = True,
+    ) -> None:
         async with self.session_factory() as session:
+            await self._require_running(session, task_id, lock=True)
             attempt = await session.get(Attempt, attempt_id)
             if attempt is not None:
                 attempt.outcome = outcome
-            session.add(Event(task_id=task_id, type=f"execution.{outcome}", payload={"reason": reason[:500]}))
+            if emit_event:
+                session.add(Event(
+                    task_id=task_id,
+                    type=f"execution.{outcome}",
+                    payload={"reason": reason[:500]},
+                ))
             await session.commit()
 
     async def _record_context_pack_replan(self, task_id: str, error: ContextPackError) -> None:
@@ -1281,9 +1482,7 @@ class ImplementationPipeline:
         self, task_id: str, profile_id: int, number: int, instruction: str
     ) -> int:
         async with self.session_factory() as session:
-            task = await session.get(Task, task_id)
-            if task is None:
-                raise RuntimeError("task disappeared")
+            task = await self._require_running(session, task_id, lock=True)
             task.active_profile_id = profile_id
             task.stage = TaskStage.IMPLEMENTING
             attempt = Attempt(
@@ -1442,9 +1641,9 @@ class ImplementationPipeline:
         batch: ValidationBatch,
     ) -> None:
         async with self.session_factory() as session:
-            task = await session.get(Task, task_id)
+            task = await self._require_running(session, task_id, lock=True)
             attempt = await session.get(Attempt, attempt_id)
-            if task is None or attempt is None:
+            if attempt is None:
                 raise RuntimeError("attempt disappeared")
             attempt.outcome = outcome
             attempt.checkpoint_sha = checkpoint
@@ -1536,17 +1735,21 @@ class ImplementationPipeline:
 
     async def _set_stage(self, task_id: str, stage: TaskStage) -> None:
         async with self.session_factory() as session:
-            task = await session.get(Task, task_id)
-            if task is None:
-                raise RuntimeError("task disappeared")
+            task = await self._require_running(session, task_id, lock=True)
             task.stage = stage
             await session.commit()
 
+    @staticmethod
+    async def _require_running(session: AsyncSession, task_id: str, *, lock: bool = False) -> Task:
+        query = select(Task).where(Task.id == task_id)
+        task = await session.scalar(query.with_for_update() if lock else query)
+        if task is None or task.status != TaskStatus.IN_PROGRESS:
+            raise TaskStopRequested()
+        return task
+
     async def _set_checkpoint(self, task_id: str, checkpoint: str) -> None:
         async with self.session_factory() as session:
-            task = await session.get(Task, task_id)
-            if task is None:
-                raise RuntimeError("task disappeared")
+            task = await self._require_running(session, task_id, lock=True)
             task.checkpoint_sha = checkpoint
             session.add(
                 Event(task=task, type="git.checkpoint_created", payload={"sha": checkpoint})
@@ -1631,8 +1834,9 @@ class ImplementationPipeline:
             instruction,
             str(worktree.path),
             f"{task.id}-escalation-{escalation_id}",
+            on_event=self._pi_step_handler(task.id),
         )
-        output = json.loads(result.output)
+        output = _json_object(result.output, "diagnosis", "strategy")
         strategy = str(output["strategy"])
         async with self.session_factory() as session:
             record = await session.get(Escalation, escalation_id)

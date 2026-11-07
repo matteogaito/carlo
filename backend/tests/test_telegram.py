@@ -122,6 +122,14 @@ def test_format_includes_task_and_severity() -> None:
     assert "revision: 2" in message
 
 
+def test_format_links_directly_to_the_task() -> None:
+    event = Event(type="execution.failed", task_id="PHOTO-87", payload={"outcome": "failed"})
+
+    message, _ = format_event(event, "https://carlo.example")
+
+    assert message.endswith("Open task: https://carlo.example/?task=PHOTO-87")
+
+
 def test_planning_failure_only_includes_the_short_error() -> None:
     event = Event(
         type="planning.failed",

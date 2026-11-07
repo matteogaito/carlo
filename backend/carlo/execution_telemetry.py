@@ -16,8 +16,8 @@ class ExecutionTelemetry:
         package_files: set[str],
         estimated_tool_calls: int,
         *,
-        soft_tool_calls: int = 50,
-        hard_tool_calls: int = 120,
+        soft_tool_calls: int = 100,
+        hard_tool_calls: int = 200,
     ) -> None:
         if not 1 <= estimated_tool_calls <= soft_tool_calls < hard_tool_calls:
             raise ValueError("tool-call thresholds must satisfy 1 <= estimate <= soft < hard")

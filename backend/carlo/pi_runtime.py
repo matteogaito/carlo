@@ -37,7 +37,7 @@ def _xcode_sandbox_paths(project: Path | None) -> tuple[list[str], list[str]]:
 
 
 def runtime_context_window(
-    context_window: int, max_tokens: int, percent: int = 75
+    context_window: int, max_tokens: int, percent: int = 100
 ) -> int:
     return max(max_tokens + 1, int(context_window * percent / 100))
 
@@ -184,6 +184,26 @@ class PiRuntimeSnapshotBuilder:
         gitconfig_paths = [str(Path.home() / ".gitconfig")] if project else []
         temporary_paths = [str(Path(tempfile.gettempdir()).resolve())] if project else []
         xcode_read_paths, xcode_write_paths = _xcode_sandbox_paths(project)
+        environment = (
+            {"CARLO_PI_MODEL_API_KEY": model.api_key} if model.api_key else {}
+        )
+        xcode_bin: Path | None = None
+        if xcode_read_paths:
+            xcode_bin = agent_dir / "bin"
+            xcode_bin.mkdir(exist_ok=True)
+            xcodebuild = xcode_bin / "xcodebuild"
+            xcodebuild.write_text(
+                "#!/bin/sh\n"
+                "mkdir -p \"$PWD/.carlo/xcode-cache/clang\" "
+                "\"$PWD/.carlo/xcode-cache/swift\" \"$PWD/.carlo/tmp\"\n"
+                "export CLANG_MODULE_CACHE_PATH=\"$PWD/.carlo/xcode-cache/clang\"\n"
+                "export SWIFT_MODULE_CACHE_PATH=\"$PWD/.carlo/xcode-cache/swift\"\n"
+                "export TMPDIR=\"$PWD/.carlo/tmp\"\n"
+                "exec /usr/bin/xcodebuild \"$@\" "
+                "'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox'\n"
+            )
+            xcodebuild.chmod(0o755)
+            environment["PATH"] = f"{xcode_bin}{os.pathsep}{os.environ.get('PATH', '')}"
         self._write_json(
             agent_dir / "sandbox.json",
             {
@@ -191,7 +211,16 @@ class PiRuntimeSnapshotBuilder:
                 "sandboxUserShell": True,
                 "permissionPromptTimeoutSeconds": 1,
                 "allowBrowserProcess": False,
-                "network": {"allowedDomains": ["*"], "deniedDomains": []},
+                **({"allowPty": True} if xcode_read_paths else {}),
+                "network": {
+                    "allowedDomains": ["*"],
+                    "deniedDomains": [],
+                    **(
+                        {"allowMachLookup": ["com.apple.testmanagerd.control"]}
+                        if xcode_read_paths
+                        else {}
+                    ),
+                },
                 "filesystem": {
                     "denyRead": [
                         "/Users",
@@ -205,6 +234,7 @@ class PiRuntimeSnapshotBuilder:
                         project_path,
                         *gitconfig_paths,
                         *xcode_read_paths,
+                        *([str(xcode_bin)] if xcode_bin else []),
                         *(str(path.resolve()) for path in read_paths),
                         *(str(Path(package.artifact_path).resolve()) for package in packages),
                     ],
@@ -217,9 +247,7 @@ class PiRuntimeSnapshotBuilder:
         return PiRuntimeSnapshot(
             agent_dir=agent_dir,
             model_pattern=f"{model.provider_slug}/{model.external_id}",
-            environment={"CARLO_PI_MODEL_API_KEY": model.api_key}
-            if model.api_key
-            else {},
+            environment=environment,
             manifest=manifest,
             packages=packages,
         )

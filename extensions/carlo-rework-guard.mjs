@@ -36,6 +36,16 @@ const ImplementationTask = Type.Object({
   budget: Type.Object({ max_tool_calls: Type.Integer({ minimum: 1, maximum: 50 }) }),
 });
 
+const FeatureTask = Type.Object({
+  id: Type.String(),
+  title: Type.String(),
+  position: Type.Integer({ minimum: 0 }),
+  objective: Type.String(),
+  interfaces: Type.Array(Type.String()),
+  constraints: Type.Array(Type.String()),
+  done_when: Type.Array(Type.String()),
+}, { additionalProperties: false });
+
 export default function (pi) {
   const allowed = declaredCommands();
 
@@ -59,7 +69,7 @@ export default function (pi) {
       brief_markdown: Type.String(),
       plan_markdown: Type.String(),
       package: Type.Optional(ImplementationTask),
-      packages: Type.Optional(Type.Array(ImplementationTask)),
+      packages: Type.Optional(Type.Array(FeatureTask)),
     }, { additionalProperties: false }),
     async execute(_toolCallId, params) {
       return {

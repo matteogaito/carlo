@@ -45,6 +45,23 @@ async def test_planner_uses_same_contract_for_task_and_discovery():
 
 
 @pytest.mark.asyncio
+async def test_planner_starts_a_fresh_session_for_each_attempt_and_later_retry():
+    project = Project(name="Test", key="TEST", repository_path="/tmp", policies={})
+    provider = FakeProvider(json.dumps({"question": "Which format?"}))
+    provider.outputs = ["The previous plan was invalid.", provider.output]
+    planner = Planner(provider, None)
+    request = PlanningRequest(project, "One", "Deliver one", "task-plan")
+
+    assert await planner.plan(request) == PlanningQuestion("Which format?")
+    assert await planner.plan(request) == PlanningQuestion("Which format?")
+
+    session_ids = [call[3] for call in provider.calls]
+    assert len(session_ids) == len(set(session_ids)) == 3
+    assert all(session_id.startswith("task-plan-") for session_id in session_ids)
+    assert "previous plan is invalid" in provider.calls[1][1]
+
+
+@pytest.mark.asyncio
 async def test_technical_planner_uses_current_checkout_and_requires_a_complete_package(tmp_path):
     from carlo.api import PlanPayload
 
@@ -105,3 +122,22 @@ async def test_feature_planner_rejects_premature_file_scoped_children():
         ))
     assert len(provider.calls) == 3
     assert all("Approved parent decision" in call[1] for call in provider.calls)
+
+
+@pytest.mark.asyncio
+async def test_parent_planner_receives_implementation_limits_even_when_resuming():
+    project = Project(name="Test", key="TEST", repository_path="/tmp", policies={}, validation_commands=["pytest -q"])
+    provider = FakeProvider(json.dumps({"question": "Which contract?"}))
+    target = {"model": "qwen3-coder-next", "usable_input_tokens": 56000, "context_pack_budget_tokens": 32000}
+
+    await Planner(provider, None).plan(PlanningRequest(
+        project, "Import photos", "Import and browse photos", "parent-plan",
+        instruction="Continue after user answer", implementation_target=target,
+    ))
+
+    prompt = provider.calls[0][1]
+    assert "Continue after user answer" in prompt
+    assert "qwen3-coder-next" in prompt
+    assert "32000" in prompt
+    assert "independently verifiable" in prompt
+    assert "Split" in prompt

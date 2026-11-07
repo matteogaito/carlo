@@ -367,8 +367,8 @@ async def test_discovery_fails_a_turn_that_stops_emitting_events(
 
     provider = StallingProvider()
     runtime = DiscoveryRuntime(factory, provider, Path("/guard.mjs"))
-    await asyncio.wait_for(runtime.run_next(), 0.2)
-    await asyncio.wait_for(runtime.run_next(), 0.2)
+    await asyncio.wait_for(runtime.run_next(), 1.0)
+    await asyncio.wait_for(runtime.run_next(), 1.0)
 
     async with factory() as session:
         discovery = await session.get(Discovery, discovery_id)
@@ -724,11 +724,10 @@ async def test_discovery_restart_keeps_its_original_managed_model(tmp_path: Path
 
     assert first_process.profiles[0].resolved_model.external_id == "first"
     assert second_process.profiles[0].resolved_model.external_id == "first"
-    assert first_process.profiles[0].skills == (
-        "carlo-runtime",
-        "carlo-discovery",
-        "frontend-design",
+    assert {"carlo-runtime", "carlo-discovery", "frontend-design"} <= set(
+        first_process.profiles[0].skills
     )
+    assert "carlo-planning" not in first_process.profiles[0].skills
     await restarted.close()
     await engine.dispose()
 

@@ -42,3 +42,10 @@ def test_hold_parks_failed_task_to_not_ready() -> None:
     assert transition(
         TaskStatus.FAILED, TaskStage.BLOCKED, "hold"
     ) == (TaskStatus.NOT_READY, TaskStage.CREATED)
+
+
+def test_blocked_in_progress_task_can_retry_without_rework() -> None:
+    assert transition(TaskStatus.IN_PROGRESS, TaskStage.BLOCKED, "retry") == (
+        TaskStatus.READY,
+        TaskStage.QUEUED,
+    )

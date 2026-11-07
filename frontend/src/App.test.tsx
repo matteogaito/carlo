@@ -14,6 +14,7 @@ import {
   type AvailableModel,
   type Api,
   type Discovery,
+  type ImplementationTask,
   type Project,
   type ModelProvider,
   type Runner,
@@ -24,6 +25,7 @@ import {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  window.history.replaceState({}, '', '/')
 })
 
 const task: Task = {
@@ -83,6 +85,7 @@ const api: Api = {
   createTask: async () => { throw new Error('unused') },
   startPlanning: async () => task,
   replanTask: async () => task,
+  replanTechnicalTask: async () => task,
   reworkTask: async () => task,
   retrySubtask: async () => task,
   stopTask: async () => task,
@@ -91,6 +94,8 @@ const api: Api = {
   reorderTasks: async () => [task],
   answerPlanning: async () => task,
   approvePlan: async () => task,
+  listProjectFiles: async () => [],
+  getProjectFile: async () => { throw new Error('unused') },
   listProjectActions: async () => ({ project_id: 1, commit_sha: 'abc', branch: 'main', dirty_paths: [], actions: [], error: null }),
   listActionRuns: async () => [],
   getActionRun: async () => { throw new Error('unused') },
@@ -124,6 +129,23 @@ const api: Api = {
 }
 
 describe('CARLO board', () => {
+  it('places Project immediately after Board and opens the file browser', async () => {
+    render(<App api={api} />)
+    const navigation = await screen.findByRole('navigation', { name: 'Main views' })
+    expect(within(navigation).getAllByRole('button').slice(0, 2).map(button => button.textContent)).toEqual(['Board', 'Project'])
+    await userEvent.click(within(navigation).getByRole('button', { name: 'Project' }))
+    expect(await screen.findByRole('combobox', { name: 'Project' })).toBeTruthy()
+  })
+  it('opens a task linked from a notification', async () => {
+    window.history.replaceState({}, '', '/?task=CAR-1')
+    const getTask = vi.fn(async () => task)
+
+    render(<App api={{ ...api, getTask }} />)
+
+    expect(await screen.findByRole('heading', { name: 'Login flow' })).toBeTruthy()
+    expect(getTask).toHaveBeenCalledWith('CAR-1')
+  })
+
   it('filters by project and hides done tasks untouched for 14 days', async () => {
     const projects: Project[] = [
       { id: 1, name: 'CARLO', key: 'CAR', repository_path: '/tmp/carlo', default_branch: 'main', integration_branch: 'main', validation_commands: [] },
@@ -184,6 +206,24 @@ describe('CARLO board', () => {
     expect(replanTask).toHaveBeenCalledWith('CAR-1')
   })
 
+  it('offers technical replan on an active child task', async () => {
+    const child: Task = {
+      ...task, id: 'CAR-2', parent_task_id: 'CAR-1', status: 'IN_PROGRESS', stage: 'blocked',
+      approved_plan_revision: 2, technical_replan_allowed: true,
+      plan: { ...task.plan!, revision: 3, approved_at: null, metadata: { ...task.plan!.metadata, technical_packages: [{
+        id: 'slice-1', title: 'Implement', position: 0, objective: 'Implement',
+        files: [], interfaces: [], changes: {}, constraints: [],
+        verification: { commands: [], success: '' }, done_when: [], budget: { max_tool_calls: 20 },
+      }] } },
+    }
+    const replanTechnicalTask = vi.fn(async () => ({ ...child, status: 'READY' as const, stage: 'queued' }))
+    render(<App api={{ ...api, listTasks: async () => [child], getTask: async () => child, replanTechnicalTask }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-2.*Login flow/i }))
+    await userEvent.click(screen.getByRole('button', { name: 'Replan technical plan' }))
+    expect(replanTechnicalTask).toHaveBeenCalledWith('CAR-2')
+  })
+
   it('labels replan approval as replacing subtasks', async () => {
     const replanned: Task = {
       ...task,
@@ -216,6 +256,16 @@ describe('CARLO board', () => {
     expect(await screen.findByRole('heading', { name: 'Parent task' })).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: 'Resume execution' }))
     expect(resumeTask).toHaveBeenCalledWith('CAR-1')
+  })
+
+  it('resumes a stopped execution child from its own actions', async () => {
+    const child: Task = { ...task, id: 'CAR-2', status: 'READY', stage: 'queued',
+      parent_task_id: 'CAR-1', parent_title: 'Parent', approved_plan_revision: 2 }
+    const resumeTask = vi.fn(async () => child)
+    render(<App api={{ ...api, listTasks: async () => [child], getTask: async () => child, resumeTask }} />)
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-2.*Login flow/ }))
+    await userEvent.click(screen.getByRole('button', { name: 'Resume execution' }))
+    expect(resumeTask).toHaveBeenCalledWith('CAR-2')
   })
 
   it('maps tasks to six fixed columns and opens task detail', async () => {
@@ -370,6 +420,33 @@ describe('CARLO board', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('shows every technical slice while marking the current one', async () => {
+    const slice = (position: number): ImplementationTask => ({
+      id: `slice-${position}`, title: `Technical slice ${position + 1}`, position,
+      objective: `Implement slice ${position + 1}`,
+      files: [{ path: `file-${position}.swift`, mode: 'edit', ranges: [], symbols: [], reason: 'Approved scope' }],
+      interfaces: [], changes: { [`file-${position}.swift`]: 'Update behavior' },
+      constraints: [], verification: { commands: ['make test'], success: 'Tests pass' },
+      done_when: ['Verified'], budget: { max_tool_calls: 20 },
+    })
+    const slices = [0, 1, 2, 3].map(slice)
+    const planned: Task = {
+      ...task,
+      plan: { ...task.plan!, metadata: {
+        title: 'Technical plan', description: 'Four ordered execution slices',
+        implementation_tasks: [slices[0]],
+        technical_packages: slices,
+        technical_package_index: 0,
+      } },
+    }
+    render(<App api={{ ...api, listTasks: async () => [planned], getTask: async () => planned }} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-1.*Login flow/i }))
+    expect(screen.getByRole('heading', { name: 'Technical slices' })).toBeTruthy()
+    for (const item of slices) expect(screen.getByText(item.title)).toBeTruthy()
+    expect(within(screen.getByText(slices[0].title).closest('summary')!).getByText('Current')).toBeTruthy()
+  })
+
   it('creates a task from an uploaded Markdown megaprompt', async () => {
     const project: Project = {
       id: 1,
@@ -442,6 +519,25 @@ describe('CARLO board', () => {
     expect(await screen.findByRole('complementary', { name: 'ECA-1 details' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Pi is planning' })).toBeTruthy()
     expect(screen.getByText('Exploring repository')).toBeTruthy()
+  })
+
+  it('shows technical planning activity and time since the last Pi event', async () => {
+    const technical = {
+      ...task,
+      id: 'CAR-2', title: 'Import photos', parent_task_id: 'CAR-1', parent_title: 'PhotoDigger',
+      status: 'IN_PROGRESS' as const, stage: 'implementing',
+      events: [
+        { sequence: 3, task_id: 'CAR-2', discovery_id: null, type: 'planning.technical.tool.started', payload: { tool: 'read', detail: 'PhotoDigger/ContentView.swift' }, created_at: new Date(Date.now() - 10_000).toISOString() },
+        { sequence: 2, task_id: 'CAR-2', discovery_id: null, type: 'planning.technical.exploring', payload: {}, created_at: new Date(Date.now() - 20_000).toISOString() },
+        { sequence: 1, task_id: 'CAR-2', discovery_id: null, type: 'planning.technical.started', payload: {}, created_at: new Date(Date.now() - 30_000).toISOString() },
+      ],
+    }
+    render(<App api={{ ...api, listTasks: async () => [technical], getTask: async () => technical }} />)
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-2.*Import photos/i }))
+    expect(screen.getByRole('heading', { name: 'Pi is preparing technical plan' })).toBeTruthy()
+    expect(screen.getByText(/30s elapsed/)).toBeTruthy()
+    expect(screen.getByText(/Last Pi activity 10s ago/)).toBeTruthy()
+    expect(screen.getByText(/read · PhotoDigger\/ContentView.swift/)).toBeTruthy()
   })
 
   it('answers a focused planner question from task detail', async () => {
@@ -566,6 +662,28 @@ describe('CARLO board', () => {
       ...api,
       listTasks: async () => [neverStarted],
       getTask: async () => neverStarted,
+      retrySubtask,
+    } as Api} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: /CAR-2.*Login flow/i }))
+    await userEvent.click(screen.getByRole('button', { name: 'Retry subtask' }))
+    expect(retrySubtask).toHaveBeenCalledWith('CAR-2')
+  })
+
+  it('offers Retry subtask for an in-progress blocked child', async () => {
+    const blocked = {
+      ...task,
+      id: 'CAR-2',
+      status: 'IN_PROGRESS' as const,
+      stage: 'blocked',
+      parent_task_id: 'CAR-1',
+      approved_plan_revision: 2,
+    }
+    const retrySubtask = vi.fn(async () => ({ ...blocked, status: 'READY' as const, stage: 'queued' }))
+    render(<App api={{
+      ...api,
+      listTasks: async () => [blocked],
+      getTask: async () => blocked,
       retrySubtask,
     } as Api} />)
 
@@ -731,14 +849,24 @@ describe('CARLO board', () => {
       effective_context_window: 65536, effective_max_tokens: 16384,
       reserve_tokens: 16384, keep_recent_tokens: 13107, selectable: true,
     }
+    const largerModel: AvailableModel = {
+      ...model, id: 3, external_id: 'Qwen3.8-27B-large', display_name: 'Qwen3.8-27B-large',
+      discovered_context_window: 131072, discovered_max_tokens: 8192,
+      effective_context_window: 131072, effective_max_tokens: 8192,
+      reserve_tokens: 13107, keep_recent_tokens: 26214,
+    }
     const profile: AgentProfileSettings = {
       name: 'plan', provider: 'pi', effort: null,
       permissions: {}, default_packages: ['ponytail'], default_skills: ['carlo-planning'], required_skills: ['carlo-planning'], context_policy: {}, active: true,
-      available_model_id: null,
+      available_model_id: 2,
+      context_limits: { model_context_window: 65536, context_window: 65536, output_tokens: 16384, reserve_tokens: 16384, keep_recent_tokens: 13107, usable_input_tokens: 49152, context_pack_budget_tokens: null },
     }
     const refreshModelProvider = vi.fn(async () => undefined)
     const updateModelProvider = vi.fn(async () => provider)
-    const updateAgentProfile = vi.fn(async () => profile)
+    const updateAgentProfile = vi.fn(async (_name: string, input: Partial<AgentProfileSettings>) => {
+      if (input.context_policy) profile.context_policy = input.context_policy
+      return profile
+    })
     const packageSettings: AgentPackage[] = [
       { id: 1, name: 'superpowers', source: 'git:superpowers', revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', active_version: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', enabled: true, pinned: false, is_default: true, resources: {}, last_update_status: 'SUCCESS' },
       { id: 2, name: 'ponytail', source: 'git:ponytail', revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', active_version: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', enabled: true, pinned: false, is_default: true, resources: { skills: ['ponytail'] }, last_update_status: 'SUCCESS' },
@@ -765,7 +893,7 @@ describe('CARLO board', () => {
       ...api,
       getPiSettings: async () => piSettings,
       listModelProviders: async () => [provider],
-      listModels: async () => [model],
+      listModels: async () => [model, largerModel],
       listAgentProfiles: async () => [profile],
       listPackages: async () => packageSettings,
       listSkills: async () => [
@@ -791,6 +919,7 @@ describe('CARLO board', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Refresh Local OMLX' }))
     expect(refreshModelProvider).toHaveBeenCalledWith(1)
     await userEvent.click(screen.getByRole('button', { name: 'Coding agents' }))
+    expect(screen.getByText('Context window · Model default (64k)')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Global Pi packages' })).toBeTruthy()
     const [defaultSuperpowers, defaultPonytail] = screen.getAllByRole('checkbox', { name: 'Default' }) as HTMLInputElement[]
     expect(defaultSuperpowers.checked).toBe(true)
@@ -810,6 +939,7 @@ describe('CARLO board', () => {
     expect(screen.getByRole('option', { name: 'Not configured — choose a managed model' })).toBeTruthy()
     expect(screen.getByRole('option', { name: 'omlx — Qwen3.8-27B' })).toBeTruthy()
     await userEvent.selectOptions(screen.getByLabelText('Model for plan'), '2')
+    await userEvent.selectOptions(screen.getByLabelText('Reasoning for plan'), 'high')
     const coreSkill = screen.getByRole('checkbox', { name: 'plan skill carlo-planning' }) as HTMLInputElement
     expect(coreSkill.checked).toBe(true)
     expect(coreSkill.disabled).toBe(true)
@@ -820,10 +950,22 @@ describe('CARLO board', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save plan' }))
     expect(updateAgentProfile).toHaveBeenCalledWith('plan', {
       available_model_id: 2,
+      effort: 'high',
       default_packages: ['ponytail'],
       default_skills: ['carlo-planning', 'carlo-ui-design'],
     })
     expect((await screen.findByRole('status', { name: 'plan saved' })).textContent).toBe('Saved ✓')
+    await userEvent.click(screen.getByText('Context window · Model default (64k)'))
+    const contextWindow = screen.getByLabelText('Context window for plan')
+    expect(screen.queryByRole('option', { name: '16k' })).toBeNull()
+    await userEvent.selectOptions(contextWindow, '32768')
+    await userEvent.click(screen.getByRole('button', { name: 'Save plan' }))
+    expect(updateAgentProfile).toHaveBeenLastCalledWith('plan', expect.objectContaining({ context_policy: { context_window_tokens: 32768 } }))
+    await userEvent.selectOptions(screen.getByLabelText('Model for plan'), '3')
+    expect(screen.getByText('Context window · Model default (128k)')).toBeTruthy()
+    expect(screen.getByRole('option', { name: '16k' })).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Save plan' }))
+    expect(updateAgentProfile).toHaveBeenLastCalledWith('plan', expect.objectContaining({ context_policy: {} }))
     updateAgentProfile.mockRejectedValueOnce(new Error('save failed'))
     await userEvent.click(screen.getByRole('button', { name: 'Save plan' }))
     await waitFor(() => expect(screen.queryByRole('status', { name: 'plan saved' })).toBeNull())

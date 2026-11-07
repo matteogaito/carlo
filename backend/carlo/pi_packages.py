@@ -122,7 +122,10 @@ class PiPackageManager:
                 for metadata in (agent_dir / "git").rglob(".git")
                 if metadata.is_dir()
                 and not metadata.parent.is_symlink()
-                and (metadata.parent / "package.json").is_file()
+                and (
+                    (metadata.parent / "package.json").is_file()
+                    or (metadata.parent / "SKILL.md").is_file()
+                )
             ]
             if len(candidates) == 1:
                 return candidates[0]
@@ -130,6 +133,8 @@ class PiPackageManager:
 
     @staticmethod
     def _manifest(package_root: Path) -> dict[str, Any]:
+        if not (package_root / "package.json").exists() and (package_root / "SKILL.md").is_file():
+            return {"name": package_root.name, "pi": {"skills": ["./SKILL.md"]}}
         try:
             value = json.loads((package_root / "package.json").read_text())
         except (OSError, json.JSONDecodeError) as error:

@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlparse
 
 from fastapi import (
@@ -28,8 +28,8 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy import delete, func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.responses import FileResponse
 from starlette.staticfiles import StaticFiles
@@ -44,13 +44,17 @@ from .model_providers import (
     available_profile_packages,
     available_profile_skills,
     calculate_compaction,
+    context_pack_budget,
+    implementation_planning_target,
     model_runtime_evidence,
     refresh_model_provider,
     resolve_agent_profile,
+    resolve_runtime_policy,
     validate_runtime_policy,
 )
 from .domain import InvalidTransition, TaskStage, TaskStatus, transition
 from .git import parent_branch_name
+from .project_files import list_files as list_project_files, read_file as read_project_file
 from .models import AgentProfile as AgentProfileRecord
 from .maintenance import record_startup
 from .models import (
@@ -82,6 +86,7 @@ from .telegram import TelegramNotifier, TelegramTransport, telegram_enabled
 
 from .tasks import TaskCreationError, create_task as create_task_record
 from .planning import (
+    FeatureTask,
     ImplementationTask,
     PlanMetadata,
     PlanPayload,
@@ -148,7 +153,7 @@ class Approval(BaseModel):
 
 class ProfileUpdate(BaseModel):
     provider: str | None = None
-    effort: str | None = None
+    effort: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     permissions: dict[str, Any] | None = None
     default_skills: list[str] | None = None
     default_packages: list[str] | None = None
@@ -410,6 +415,12 @@ async def approve_plan_revision(
     is_replan: bool = False,
 ) -> list[Task]:
     """Approve a stored plan and materialize its children for either entry route."""
+    items = plan.metadata_json.get("implementation_tasks") or []
+    if task.parent_task_id is None and items:
+        try:
+            _require_feature_children(items)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
     action = (
         "approve_amendment" if task.status == TaskStatus.IN_PROGRESS and task.stage == TaskStage.BLOCKED
         else "approve_fix" if task.status == TaskStatus.FAILED and task.stage == TaskStage.BLOCKED
@@ -421,7 +432,6 @@ async def approve_plan_revision(
     plan.approved_at = datetime.now(UTC)
     children: list[Task] = []
     old_children: list[Task] = []
-    items = plan.metadata_json.get("implementation_tasks") or []
     if task.parent_task_id is None and items:
         if existing and not is_replan:
             children = list(existing)
@@ -450,6 +460,14 @@ def _proposal_implementation_tasks(
     return items if isinstance(items, list) else []
 
 
+def _require_feature_children(items: list[Any]) -> None:
+    try:
+        for item in items:
+            FeatureTask.model_validate(item)
+    except ValueError as error:
+        raise ValueError("parent plan requires feature-level children without file scopes") from error
+
+
 def validate_task_proposal(proposal: dict[str, Any], state: dict[str, Any] | None = None) -> tuple[PlanPayload | None, str | None]:
     """Validate a Discovery task_proposal the same way create_discovery_tasks
     does, without side effects — returns (plan, None) if valid, or (None,
@@ -465,6 +483,7 @@ def validate_task_proposal(proposal: dict[str, Any], state: dict[str, Any] | Non
             approved_plan = PlanPayload.model_validate(proposal.get("plan_draft"))
             if not approved_plan.metadata.implementation_tasks:
                 raise ValueError("implementation_tasks must not be empty")
+            _require_feature_children(approved_plan.metadata.implementation_tasks)
             return approved_plan, None
         metadata = dict(proposal.get("metadata") or {})
         metadata["implementation_tasks"] = _proposal_implementation_tasks(proposal, metadata)
@@ -477,6 +496,7 @@ def validate_task_proposal(proposal: dict[str, Any], state: dict[str, Any] | Non
         )
         if not approved_plan.metadata.implementation_tasks:
             raise ValueError("implementation_tasks must not be empty")
+        _require_feature_children(approved_plan.metadata.implementation_tasks)
         return approved_plan, None
     except ValueError as error:
         detail = (
@@ -537,6 +557,10 @@ async def validate_fix_proposal(
         )
         if not approved_plan.metadata.implementation_tasks:
             raise ValueError("fix proposal has no work packages")
+        if action == "revise_parent":
+            _require_feature_children(approved_plan.metadata.implementation_tasks)
+        elif not isinstance(approved_plan.metadata.implementation_tasks[0], ImplementationTask):
+            raise ValueError("task revision requires one technical work package")
         return approved_plan, None
     except ValueError as error:
         detail = (
@@ -619,6 +643,23 @@ def _replan_allowed(task: Task, children: list[Task]) -> bool:
     )
 
 
+def _technical_replan_allowed(task: Task, plan: PlanRevision | None) -> bool:
+    return bool(
+        task.parent_task_id
+        and plan is not None
+        and plan.metadata_json.get("technical_packages")
+        and (task.status, task.stage) in {
+            (TaskStatus.READY, TaskStage.QUEUED),
+            (TaskStatus.FAILED, TaskStage.BLOCKED),
+            (TaskStatus.IN_PROGRESS, TaskStage.PREPARING_GIT),
+            (TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING),
+            (TaskStatus.IN_PROGRESS, TaskStage.VALIDATING),
+            (TaskStatus.IN_PROGRESS, TaskStage.ESCALATING),
+            (TaskStatus.IN_PROGRESS, TaskStage.BLOCKED),
+        }
+    )
+
+
 def create_app(
     session_factory: async_sessionmaker[AsyncSession],
     provider: CodingAgentProvider,
@@ -650,11 +691,21 @@ def create_app(
                 settings.telegram_bot_token,
                 settings.telegram_chat_id,
                 settings.telegram_level,
+                app_origin=settings.app_origin,
             ).initialize_cursor()
         await record_startup(session_factory, settings.pi_executable)
         yield
 
     app = FastAPI(title="CARLO v3", lifespan=lifespan)
+
+    @app.get("/api/health")
+    async def health() -> dict[str, str]:
+        try:
+            async with session_factory() as session:
+                await session.execute(text("SELECT 1"))
+        except SQLAlchemyError as error:
+            raise HTTPException(503, "database unavailable") from error
+        return {"status": "ok"}
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
@@ -829,6 +880,25 @@ def create_app(
     ) -> list[dict[str, Any]]:
         projects = (await session.scalars(select(Project).order_by(Project.key))).all()
         return [_project_view(project) for project in projects]
+
+    @api.get("/projects/{project_id}/files")
+    async def project_files(
+        project_id: int, session: AsyncSession = Depends(get_session),
+    ) -> list[str]:
+        project = await session.get(Project, project_id)
+        if project is None:
+            raise HTTPException(404, "Project not found")
+        return await asyncio.to_thread(list_project_files, Path(project.repository_path))
+
+    @api.get("/projects/{project_id}/file")
+    async def project_file(
+        project_id: int, path: str = Query(min_length=1, max_length=4096),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, str]:
+        project = await session.get(Project, project_id)
+        if project is None:
+            raise HTTPException(404, "Project not found")
+        return await asyncio.to_thread(read_project_file, Path(project.repository_path), path)
 
     @api.get("/runners")
     async def list_runners(
@@ -1165,7 +1235,9 @@ def create_app(
                 select(AgentProfileRecord).order_by(AgentProfileRecord.name)
             )
         ).all()
-        return [_profile_view(profile) for profile in profiles]
+        models = {model.id: model for model in (await session.scalars(select(AvailableModel))).all()}
+        runtime = await _pi_settings(session)
+        return [_profile_view(profile, models.get(profile.available_model_id), runtime) for profile in profiles]
 
     @api.get("/settings/skills")
     async def list_skills() -> list[dict[str, Any]]:
@@ -1337,13 +1409,25 @@ def create_app(
             if "available_model_id" in payload.model_fields_set
             else profile.available_model_id
         )
-        if selected_model_id is not None:
-            await _selectable_model(session, selected_model_id)
+        selected_model = await _selectable_model(session, selected_model_id) if selected_model_id is not None else None
         if "context_policy" in payload.model_fields_set:
             if payload.context_policy is None:
                 raise HTTPException(422, "context_policy cannot be null")
             try:
                 validate_runtime_policy(payload.context_policy)
+            except ModelProviderError as error:
+                raise HTTPException(422, str(error)) from error
+        runtime = await _pi_settings(session)
+        if selected_model is not None:
+            try:
+                resolve_runtime_policy(
+                    profile.name,
+                    payload.context_policy if "context_policy" in payload.model_fields_set else profile.context_policy or {},
+                    selected_model.effective_context_window,
+                    selected_model.effective_max_tokens,
+                    runtime.reserve_percent,
+                    runtime.keep_recent_percent,
+                )
             except ModelProviderError as error:
                 raise HTTPException(422, str(error)) from error
         if "default_packages" in payload.model_fields_set:
@@ -1398,7 +1482,7 @@ def create_app(
             Event(type="agent_profile.updated", payload={"name": name, "fields": sorted(payload.model_fields_set)})
         )
         await session.commit()
-        return _profile_view(profile)
+        return _profile_view(profile, selected_model, runtime)
 
     @api.get("/settings/model-providers")
     async def list_model_providers(
@@ -1571,6 +1655,21 @@ def create_app(
         for field in payload.model_fields_set:
             setattr(model, field, getattr(payload, field))
         _validate_model_limits(model)
+        runtime = await _pi_settings(session)
+        profiles = (await session.scalars(select(AgentProfileRecord).where(AgentProfileRecord.available_model_id == model.id))).all()
+        if profiles and model.effective_context_window is None:
+            await session.rollback()
+            raise HTTPException(422, "selected model needs a context override")
+        try:
+            for profile in profiles:
+                resolve_runtime_policy(
+                    profile.name, profile.context_policy or {},
+                    model.effective_context_window, model.effective_max_tokens,
+                    runtime.reserve_percent, runtime.keep_recent_percent,
+                )
+        except ModelProviderError as error:
+            await session.rollback()
+            raise HTTPException(422, str(error)) from error
         session.add(
             Event(
                 type="model.updated",
@@ -1624,6 +1723,16 @@ def create_app(
                         model.effective_max_tokens,
                         pi_settings.reserve_percent,
                         pi_settings.keep_recent_percent,
+                    )
+            models_by_id = {model.id: model for model in models}
+            profiles = (await session.scalars(select(AgentProfileRecord))).all()
+            for profile in profiles:
+                model = models_by_id.get(profile.available_model_id)
+                if model is not None:
+                    resolve_runtime_policy(
+                        profile.name, profile.context_policy or {},
+                        model.effective_context_window, model.effective_max_tokens,
+                        pi_settings.reserve_percent, pi_settings.keep_recent_percent,
                     )
         except ModelProviderError as error:
             await session.rollback()
@@ -2330,13 +2439,16 @@ def create_app(
     async def continue_planning(
         task: Task, session: AsyncSession, instruction: str
     ) -> dict[str, Any]:
-        profile = await _profile(session, "plan")
+        profile = await _profile(session, "technical-plan" if task.parent_task_id else "plan")
         try:
             provider_profile = await resolve_agent_profile(
                 session,
                 profile,
                 credential_cipher,
                 task_model_id=task.available_model_id,
+            )
+            implementation_target = await implementation_planning_target(
+                session, task.available_model_id,
             )
         except ModelProviderError as error:
             raise HTTPException(409, str(error)) from error
@@ -2365,6 +2477,7 @@ def create_app(
                     task.project, task.title, task.goal, session_id,
                     prompt_path=task.prompt_path, model_id=task.available_model_id,
                     instruction=instruction, technical_plan=task.parent_task_id is not None,
+                    implementation_target=implementation_target,
                 ),
                 on_event=publish, on_retry=retry,
             )
@@ -2584,6 +2697,58 @@ def create_app(
             await session.commit()
             raise
 
+    @api.post("/tasks/{task_id}/replan-technical")
+    async def replan_technical_task(
+        task_id: str, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, Any]:
+        task = await _task_or_404(session, task_id, lock=True)
+        revisions = list((await session.scalars(
+            select(PlanRevision).where(PlanRevision.task_id == task.id)
+            .order_by(PlanRevision.revision)
+        )).all())
+        current = next((item for item in revisions if item.revision == task.approved_plan_revision), None)
+        if not _technical_replan_allowed(task, current):
+            raise HTTPException(409, "technical replan requires an unfinished subtask with an approved technical plan")
+        source = next((item for item in reversed(revisions) if item.revision < current.revision
+            and item.approved_at is not None
+            and len(item.metadata_json.get("implementation_tasks") or []) == 1
+            and "files" not in item.metadata_json["implementation_tasks"][0]), None)
+        if source is None:
+            raise HTTPException(409, "subtask has no technical plan to regenerate")
+        superseded = [item.revision for item in revisions if item.revision > current.revision and item.approved_at is None]
+        parent = await session.scalar(select(Task).where(Task.id == task.parent_task_id).with_for_update())
+        if parent is None:
+            raise HTTPException(409, "subtask parent is missing")
+        previous_attempt = int(await session.scalar(
+            select(func.coalesce(func.max(Attempt.number), 0)).where(Attempt.task_id == task.id)
+        ) or 0)
+        pending = await session.scalar(select(Attempt).where(
+            Attempt.task_id == task.id, Attempt.outcome.is_(None)
+        ).order_by(Attempt.number.desc()).limit(1).with_for_update())
+        if pending is not None:
+            pending.outcome = "interrupted"
+        previous_status, previous_stage = task.status, task.stage
+        task.status, task.stage = TaskStatus.READY, TaskStage.QUEUED
+        task.approved_plan_revision = source.revision
+        task.active_profile_id = None
+        task.planning_question = None
+        task.planning_cursor = None
+        task.version += 1
+        parent.status, parent.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
+        parent.version += 1
+        session.add(Event(task=task, type="task.technical_replan.requested", payload={
+            "previous_revision": current.revision,
+            "superseded_revisions": superseded,
+            "feature_revision": source.revision,
+            "previous_attempt": previous_attempt,
+            "completed_slices": int(current.metadata_json.get("technical_package_index", 0)),
+            "previous_status": previous_status.value,
+            "previous_stage": previous_stage.value,
+            "checkpoint": task.checkpoint_sha,
+        }))
+        await session.commit()
+        return await _task_view(session, task)
+
     @api.post("/tasks/{task_id}/rework")
     async def rework_task(
         task_id: str, session: AsyncSession = Depends(get_session)
@@ -2662,6 +2827,21 @@ def create_app(
             or task.approved_plan_revision is None
         ):
             raise HTTPException(409, "subtask has no reusable execution state")
+        pending_plan = await session.scalar(
+            select(PlanRevision)
+            .where(
+                PlanRevision.task_id == task.id,
+                PlanRevision.revision > task.approved_plan_revision,
+                PlanRevision.approved_at.is_(None),
+            )
+            .order_by(PlanRevision.revision.desc())
+            .limit(1)
+        )
+        if pending_plan is not None:
+            raise HTTPException(
+                409,
+                f"plan revision {pending_plan.revision} requires approval before retry",
+            )
         try:
             task.status, task.stage = transition(task.status, task.stage, "retry")
         except InvalidTransition as error:
@@ -2728,18 +2908,36 @@ def create_app(
         )
         if task is None:
             raise HTTPException(404, "task not found")
+        if task.parent_task_id is None:
+            children = list((await session.scalars(
+                select(Task).where(
+                    Task.parent_task_id == task.id,
+                    Task.status == TaskStatus.IN_PROGRESS,
+                    Task.superseded_at.is_(None),
+                ).with_for_update()
+            )).all())
+            targets = [task, *children]
+        else:
+            parent = await session.scalar(
+                select(Task).where(Task.id == task.parent_task_id).with_for_update()
+            )
+            targets = [task, *([parent] if parent and parent.status == TaskStatus.IN_PROGRESS else [])]
         try:
-            task.status, task.stage = transition(task.status, task.stage, "stop")
+            for target in targets:
+                target.status, target.stage = transition(target.status, target.stage, "stop")
         except InvalidTransition as error:
             raise HTTPException(409, str(error)) from error
-        if task.parent_task_id is None:
-            session.add(
-                Event(
-                    task=task,
-                    type="task.stopped",
-                    payload={"reset": "ready"},
+        for target in targets:
+            target.version += 1
+            session.add(Event(task=target, type="task.stopped", payload={"reset": "ready"}))
+            if target.parent_task_id is not None:
+                pending = await session.scalar(
+                    select(Attempt).where(
+                        Attempt.task_id == target.id, Attempt.outcome.is_(None)
+                    ).order_by(Attempt.number.desc()).limit(1).with_for_update()
                 )
-            )
+                if pending is not None:
+                    pending.outcome = "interrupted"
         await session.commit()
         return await _task_view(session, task)
 
@@ -2769,12 +2967,18 @@ def create_app(
         )
         if task is None:
             raise HTTPException(404, "task not found")
-        if task.status != TaskStatus.READY:
+        parent = task if task.parent_task_id is None else await session.scalar(
+            select(Task).where(Task.id == task.parent_task_id).with_for_update()
+        )
+        if parent is None or parent.status not in (
+            {TaskStatus.READY} if task.parent_task_id is None
+            else {TaskStatus.READY, TaskStatus.IN_PROGRESS}
+        ):
             raise HTTPException(409, "aggregate task is not ready")
         child = await session.scalar(
             select(Task)
             .where(
-                Task.parent_task_id == task.id,
+                Task.parent_task_id == parent.id,
                 Task.superseded_at.is_(None),
                 Task.status != TaskStatus.DONE,
             )
@@ -2784,13 +2988,22 @@ def create_app(
         )
         if child is None:
             raise HTTPException(409, "aggregate task has no unfinished subtasks")
+        if task.parent_task_id is not None and child.id != task.id:
+            raise HTTPException(409, f"{child.id} must finish first")
         if child.status != TaskStatus.READY:
             raise HTTPException(409, f"{child.id} is not ready")
+        pending = await session.scalar(
+            select(Attempt).where(
+                Attempt.task_id == child.id, Attempt.outcome.is_(None)
+            ).order_by(Attempt.number.desc()).limit(1).with_for_update()
+        )
+        if pending is not None:
+            pending.outcome = "interrupted"
         child.stage = TaskStage.QUEUED
         child.version += 1
-        task.status, task.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
-        task.version += 1
-        session.add(Event(task=task, type="subtasks.resumed", payload={"child": child.id}))
+        parent.status, parent.stage = TaskStatus.IN_PROGRESS, TaskStage.IMPLEMENTING
+        parent.version += 1
+        session.add(Event(task=parent, type="subtasks.resumed", payload={"child": child.id}))
         await session.commit()
         return await _task_view(session, task)
 
@@ -3114,7 +3327,32 @@ def _runner_view(runner: Runner) -> dict[str, Any]:
     }
 
 
-def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
+def _profile_view(
+    profile: AgentProfileRecord,
+    model: AvailableModel | None = None,
+    runtime: PiRuntimeSettings | None = None,
+) -> dict[str, Any]:
+    limits = None
+    if model is not None and runtime is not None and model.effective_context_window is not None:
+        try:
+            window, percent, compaction, _ = resolve_runtime_policy(
+                profile.name, profile.context_policy or {}, model.effective_context_window,
+                model.effective_max_tokens, runtime.reserve_percent, runtime.keep_recent_percent,
+            )
+            exposed = max(model.effective_max_tokens + 1, int(window * percent / 100))
+            limits = {
+                "model_context_window": model.effective_context_window,
+                "context_window": exposed,
+                "output_tokens": model.effective_max_tokens,
+                "reserve_tokens": compaction.reserve_tokens,
+                "keep_recent_tokens": compaction.keep_recent_tokens,
+                "usable_input_tokens": exposed - compaction.reserve_tokens,
+                "context_pack_budget_tokens": context_pack_budget(
+                    window, model.effective_max_tokens, percent, compaction,
+                ) if profile.name == "implementation" else None,
+            }
+        except ModelProviderError:
+            pass
     return {
         "name": profile.name,
         "provider": profile.provider,
@@ -3126,6 +3364,7 @@ def _profile_view(profile: AgentProfileRecord) -> dict[str, Any]:
         "context_policy": profile.context_policy,
         "active": profile.active,
         "available_model_id": profile.available_model_id,
+        "context_limits": limits,
     }
 
 
@@ -3276,7 +3515,7 @@ def _available_model_view(
             max_tokens,
             settings.reserve_percent,
             settings.keep_recent_percent,
-        )
+        ) if context_window is not None else None
     except ModelProviderError:
         compaction = None
     return {
@@ -3314,6 +3553,12 @@ async def _task_view(
         .order_by(PlanRevision.revision.desc())
         .limit(1)
     )
+    approved_plan = plan
+    if task.parent_task_id and plan is not None and plan.revision != task.approved_plan_revision:
+        approved_plan = await session.scalar(select(PlanRevision).where(
+            PlanRevision.task_id == task.id,
+            PlanRevision.revision == task.approved_plan_revision,
+        ))
     parent_title = None
     if task.parent_task_id:
         parent_title = await session.scalar(
@@ -3347,6 +3592,7 @@ async def _task_view(
         if task.superseded_at
         else None,
         "replan_allowed": _replan_allowed(task, children),
+        "technical_replan_allowed": _technical_replan_allowed(task, approved_plan),
         "used_skills": [],
         "skill_revisions": {},
         "loaded_packages": {},

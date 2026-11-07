@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -27,6 +28,7 @@ class PlanningRequest:
     instruction: str | None = None
     technical_plan: bool = False
     repository_path: str | None = None
+    implementation_target: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,17 @@ class Planner:
         on_retry: AgentEventHandler | None = None,
     ) -> "PlanPayload | PlanningQuestion":
         instruction = request.instruction or planning_instruction(request)
+        if request.implementation_target:
+            instruction += "\nImplementation target: " + json.dumps(request.implementation_target)
+            if request.technical_plan:
+                instruction += "\nKeep each technical slice's context pack below the configured token budget. That budget is a safety ceiling, not a target: keep each slice small enough to implement and verify in one focused iteration."
+            else:
+                instruction += (
+                    "\nSplit the parent into independently verifiable children small enough for this "
+                    "implementation model. Split separate behaviors, interfaces, or repository areas that cannot "
+                    "be understood and verified together; do not hide a broad child in many technical slices. "
+                    "Each child gets a technical plan on its current checkout just before implementation."
+                )
         if self.profile is not None and "carlo-planning" in self.profile.skills:
             instruction = f"/skill:carlo-planning {instruction}"
         original_instruction = instruction
@@ -69,7 +82,7 @@ class Planner:
             try:
                 self.last_result = await self.provider.run(
                     self.profile, instruction, request.repository_path or request.project.repository_path,
-                    request.session_id, on_event=on_event,
+                    f"{request.session_id[:160]}-{uuid4().hex}", on_event=on_event,
                 )
                 raw = json.loads(self.last_result.output)
                 question = raw.get("question") if isinstance(raw, dict) else None
@@ -290,6 +303,9 @@ def planning_instruction(request: PlanningRequest, *, fresh_rework: bool = False
     guidance = (
         "This is technical planning for one approved child on its current checkout. Inspect the actual code, "
         "choose the files and concrete changes, then return one or more ordered technical work packages. "
+        "Before fixing the file scope, search every caller of any interface you will change. Include all affected "
+        "callers as editable files or specify a compatible implementation that requires no caller changes. "
+        "Reject your own package if the repository cannot compile using only its edit/create files. "
         "Split the approved child now when one package would be too large; these packages are internal execution slices, "
         "not child Tasks, and they must never require a later sub-split. "
         "Together the packages must preserve the approved objective, interfaces, constraints, and acceptance criteria. "

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,58 @@ async def test_pi_provider_rejects_project_local_sandbox_configuration(
             await provider.open_conversation(profile, str(project), "CAR-sandbox")
 
     assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_pi_provider_kills_an_idle_process(tmp_path: Path) -> None:
+    executable = tmp_path / "fake-pi"
+    pid_file = tmp_path / "pid"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, signal, time\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True: time.sleep(1)\n"
+    )
+    executable.chmod(0o755)
+    provider = PiProvider(
+        str(executable),
+        tmp_path / "sessions",
+        idle_timeout_seconds=1,
+        process_stop_grace_seconds=0.1,
+    )
+
+    with pytest.raises(ProviderError, match="no events for 1s"):
+        await provider.run(
+            AgentProfile("implementation", None, None, (), ()),
+            "Implement",
+            str(tmp_path),
+            "CAR-idle",
+        )
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+
+
+@pytest.mark.asyncio
+async def test_stop_tasks_kills_all_matching_pi_sessions_only(tmp_path: Path) -> None:
+    executable = tmp_path / "fake-pi"
+    executable.write_text("#!/usr/bin/env python3\nimport time\nwhile True: time.sleep(1)\n")
+    executable.chmod(0o755)
+    provider = PiProvider(str(executable), tmp_path / "sessions", process_stop_grace_seconds=0.1)
+    ids = ("TST-2-technical-plan-1", "TST-2-implementation-1", "discovery-42")
+    runs = [asyncio.create_task(provider.run(
+        AgentProfile("implementation", None, None, (), ()), "Work", str(tmp_path), session_id
+    )) for session_id in ids]
+    try:
+        async with asyncio.timeout(2):
+            while any(provider.status(session_id) != "running" for session_id in ids):
+                await asyncio.sleep(0.01)
+        await provider.stop_tasks(("TST-1", "TST-2"))
+        assert [provider.status(session_id) for session_id in ids] == ["idle", "idle", "running"]
+    finally:
+        await provider.stop("discovery-42")
+        await asyncio.gather(*runs, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -209,7 +262,7 @@ async def test_pi_provider_resolves_project_boundary_in_successful_launch(
     assert subprocess_cwds == [str(project.resolve())]
     argv = result.events[-1]["argv"]
     assert argv == [
-        "--mode", "json", "--print", "--approve", "--session-id", "CAR-1-plan-1",
+        "--no-skills", "--mode", "json", "--print", "--approve", "--session-id", "CAR-1-plan-1",
         "--session-dir", str(sessions), "--model", "openai/gpt-5",
         "--thinking", "high", "--tools", "read",
         "--skill", str(skill_root / "carlo-planning"),
@@ -368,7 +421,7 @@ async def test_pi_provider_loads_managed_superpowers_and_frontend_skill(
     )
 
     argv = result.events[-1]["argv"]
-    assert argv[:4] == ["-e", str(superpowers), "-e", str(ponytail)]
+    assert argv[:5] == ["--no-skills", "-e", str(superpowers), "-e", str(ponytail)]
     assert ["--skill", str(frontend)] == argv[argv.index("--skill"):argv.index("--skill") + 2]
     assert result.resource_revisions == {
         "superpowers": "a" * 40,
@@ -458,8 +511,25 @@ async def test_pi_provider_loads_only_packages_selected_by_the_profile(
     )
 
     argv = result.events[-1]["argv"]
-    assert ["-e", str(ponytail)] == argv[:2]
+    assert ["--no-skills", "-e", str(ponytail)] == argv[:3]
     assert str(superpowers) not in argv
+
+
+def test_root_git_skill_is_passed_explicitly_to_pi(tmp_path: Path) -> None:
+    from carlo.provider import ResolvedPiPackage
+
+    checkout = tmp_path / "kor"
+    checkout.mkdir()
+    (checkout / "SKILL.md").write_text("---\nname: kor\n---\n")
+    package = ResolvedPiPackage(
+        1, "git:github.com/matteogaito/kor", "git:github.com/matteogaito/kor",
+        "a" * 40, str(checkout), {"skills": ["kor"]},
+    )
+    provider = PiProvider("pi", tmp_path / "sessions")
+
+    assert provider._package_arguments((package,), {}) == [
+        "--skill", str(checkout / "SKILL.md")
+    ]
 
 
 @pytest.mark.asyncio
@@ -488,7 +558,7 @@ async def test_pi_provider_loads_resolved_package_artifacts(tmp_path: Path) -> N
         "CAR-8-implementation",
     )
 
-    assert result.events[-1]["argv"][:4] == ["-e", str(first), "-e", str(second)]
+    assert result.events[-1]["argv"][:5] == ["--no-skills", "-e", str(first), "-e", str(second)]
     assert result.loaded_packages == {"npm:pippo": "1.5.0", "git:tools": "a" * 40}
 
 
@@ -711,7 +781,7 @@ async def test_pi_provider_streams_a_persisted_rpc_conversation(tmp_path: Path) 
         "images": [image],
     }
     assert state.raw["argv"] == [
-        "--mode", "rpc", "--approve", "--session-id", "discovery-42",
+        "--no-skills", "--mode", "rpc", "--approve", "--session-id", "discovery-42",
         "--session-dir", str(sessions), "--model", "openai/gpt-5.6-sol",
         "--thinking", "high", "--tools", "read,bash",
         "--skill", str(skill), "--extension", str(guard),

@@ -13,6 +13,7 @@ from .models import AgentProfile as ProfileRecord
 from .models import Attempt, Discovery, DiscoveryMessage, DiscoveryTurn, Escalation, Event, PlanRevision, Task
 from .model_providers import (
     CredentialCipher,
+    implementation_planning_target,
     model_runtime_evidence,
     resolve_agent_profile,
 )
@@ -439,11 +440,13 @@ class DiscoveryRuntime:
                         "commands": discovery.state.get("commands", []),
                         "depends_on": candidate.get("depends_on", []),
                     }, ensure_ascii=False)
+                    implementation_target = await implementation_planning_target(session)
                     result = await Planner(self.provider, profile).plan(PlanningRequest(
                         discovery.project, str(candidate.get("title", "")),
                         str(candidate.get("megaprompt", "")),
                         f"discovery-{discovery_id}-{candidate['id']}-{source[:12]}-plan",
                         handoff=handoff,
+                        implementation_target=implementation_target,
                     ))
                     error = result.text if isinstance(result, PlanningQuestion) else None
                 except Exception as exc:

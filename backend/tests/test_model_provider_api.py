@@ -288,7 +288,7 @@ async def test_model_and_pi_settings_api_exposes_effective_context_preview(
 
 
 @pytest.mark.asyncio
-async def test_available_model_without_reported_limits_uses_safe_defaults(
+async def test_available_model_without_reported_context_requires_override(
     settings_app,
 ) -> None:
     app, factory, _ = settings_app
@@ -322,12 +322,59 @@ async def test_available_model_without_reported_limits_uses_safe_defaults(
             "/api/agent-profiles/brief",
             json={"available_model_id": model_id},
         )
+        updated = await client.patch(
+            f"/api/settings/models/{model_id}",
+            json={"context_window_override": 131_072},
+        )
+        selected_after_override = await client.patch(
+            "/api/agent-profiles/brief",
+            json={"available_model_id": model_id},
+        )
 
     entry = next(item for item in listed.json() if item["id"] == model_id)
-    assert entry["effective_context_window"] == 65_536
+    assert entry["effective_context_window"] is None
     assert entry["effective_max_tokens"] == 16_384
-    assert entry["selectable"] is True
-    assert selected.status_code == 200
+    assert entry["selectable"] is False
+    assert selected.status_code == 409
+    assert updated.json()["effective_context_window"] == 131_072
+    assert selected_after_override.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_agent_profile_shows_model_context_and_allows_a_profile_cap(settings_app) -> None:
+    app, factory, _ = settings_app
+    async with factory() as session:
+        provider = ModelProvider(name="Local", slug="omlx", kind="openai-compatible", base_url="http://local.test/v1")
+        model = AvailableModel(model_provider=provider, external_id="qwen", status="AVAILABLE", discovered_context_window=262_144, discovered_max_tokens=16_384)
+        profile = AgentProfile(name="implementation", provider="pi")
+        session.add_all([provider, model, profile])
+        await session.commit()
+        model_id = model.id
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        client.headers["Origin"] = "http://test"
+        selected = await client.patch("/api/agent-profiles/implementation", json={"available_model_id": model_id})
+        assert selected.status_code == 200
+        limits = selected.json()["context_limits"]
+        assert limits["context_window"] == 262_144
+        assert limits["context_pack_budget_tokens"] == 183_502
+
+        capped = await client.patch("/api/agent-profiles/implementation", json={"context_policy": {"context_window_tokens": 65_536}})
+        assert capped.status_code == 200
+        assert capped.json()["context_limits"]["context_window"] == 65_536
+        assert capped.json()["context_limits"]["context_pack_budget_tokens"] == 36_045
+        listed = await client.get("/api/agent-profiles")
+        assert listed.json()[0]["context_limits"] == capped.json()["context_limits"]
+
+        invalid = await client.patch("/api/agent-profiles/implementation", json={"context_policy": {"context_window_tokens": 8_000}})
+        assert invalid.status_code == 422
+        non_power_of_two = await client.patch("/api/agent-profiles/implementation", json={"context_policy": {"context_window_tokens": 48_000}})
+        assert non_power_of_two.status_code == 422
+        invalid_model = await client.patch(f"/api/settings/models/{model_id}", json={"max_tokens_override": 65_536})
+        assert invalid_model.status_code == 422
+        invalid_global = await client.patch("/api/settings/pi", json={"keep_recent_percent": 80})
+        assert invalid_global.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -450,7 +497,7 @@ async def test_agent_profiles_select_known_skills_and_keep_core_skills(
     skills = {item["name"]: item for item in catalog.json()}
     assert skills["carlo-ui-design"]["source"] == "carlo"
     assert skills["frontend-design"]["source"] == "managed"
-    assert skills["carlo-planning"]["required_profiles"] == ["plan"]
+    assert skills["carlo-planning"]["required_profiles"] == ["plan", "technical-plan"]
     assert {item["name"] for item in packages.json()} == {"ponytail", "superpowers"}
     assert defaults.json()["default_packages"] == ["superpowers", "ponytail"]
     assert saved_defaults.json()["default_skills"] == ["carlo-ui-design"]

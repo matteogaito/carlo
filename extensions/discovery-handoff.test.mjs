@@ -51,8 +51,11 @@ test("Rework tool accepts a task-level revision or a parent-level split", async 
   assert.ok(tool.parameters.properties.plan_markdown);
   for (const field of ["id", "title", "position", "objective", "files", "interfaces", "changes", "constraints", "verification", "done_when", "budget"]) {
     assert.ok(tool.parameters.properties.package.properties[field], `missing package field: ${field}`);
+  }
+  for (const field of ["id", "title", "position", "objective", "interfaces", "constraints", "done_when"]) {
     assert.ok(tool.parameters.properties.packages.items.properties[field], `missing packages field: ${field}`);
   }
+  assert.equal(tool.parameters.properties.packages.items.properties.files, undefined);
 
   const editBlock = await blocked[0]({ toolName: "edit", input: {} });
   assert.equal(editBlock.block, true);
